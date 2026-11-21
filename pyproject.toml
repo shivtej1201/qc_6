@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qc6"
+version = "6.0.0"
+description = "QC V6: every page checked, real-visitor review, user journeys and fixes written for people"
+requires-python = ">=3.11"
+dependencies = ["fastapi", "uvicorn", "asyncpg", "httpx", "playwright", "pyyaml", "duckdb", "pyarrow", "pillow", "cryptography",
+                "pydantic", "pydantic-settings", "psutil", "python-dateutil", "openpyxl", "python-multipart"]
+
+[tool.setuptools.packages.find]
+include = ["qc6*"]
+
+[tool.setuptools.package-data]
+"qc6.db" = ["migrations/*.sql"]
+"qc6" = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "engine", "tests"]

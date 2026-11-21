@@ -1,0 +1,29 @@
+name: QC V6
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: qc6, POSTGRES_DB: qc6_test }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    env:
+      QC6_TEST_DATABASE_URL: postgresql://postgres:qc6@127.0.0.1:5432/qc6_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+      - name: Lighthouse (optional extra check used by the tests)
+        run: |
+          mkdir -p "$RUNNER_TEMP/lh" && cd "$RUNNER_TEMP/lh" && npm init -y >/dev/null && npm i lighthouse@12.2.1
+          echo "QC6_TEST_LIGHTHOUSE=$RUNNER_TEMP/lh/node_modules/.bin/lighthouse" >> "$GITHUB_ENV"
+      - name: Web app (type-check + build)
+        working-directory: web
+        run: npm ci && npm run build
+      - run: python -m pytest -q
