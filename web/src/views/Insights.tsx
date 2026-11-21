@@ -26,8 +26,11 @@ export function InsightsView({ site }: { site: Site; params: URLSearchParams }) 
           <h1>Insights</h1>
           <p className="lede">How {site.primary_host} and the team are trending, from the checks QC has run. Every number says what it's based on.</p>
         </div>
+        <div className="row">
+        <a className="btn" href={`/api/v2/sites/${site.id}/report.pdf`} download>Download report (PDF)</a>
         <div className="seg" role="group" aria-label="How many checks">
           {RANGES.map(([n, label]) => <button key={n} aria-pressed={runs === n} onClick={() => setRuns(n)}>{label}</button>)}
+        </div>
         </div>
       </div>
       {!x ? <p className="faint">Loading…</p> : x.runs_considered === 0 ? (

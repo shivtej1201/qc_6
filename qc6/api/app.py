@@ -136,6 +136,9 @@ def public_site(s: Dict[str, Any]) -> Dict[str, Any]:
     from qc6.notify import mask
     out = {k: v for k, v in s.items() if k != "access_token"}
     st = dict(out.get("settings") or {})
+    if st.get("staging"):
+        from qc6.site_access import public_staging
+        st["staging"] = public_staging(st["staging"])          # never the login itself, not even encrypted
     if st.get("alerts"):
         al = dict(st["alerts"])
         for ch in ("slack", "teams"):
@@ -220,6 +223,10 @@ class SitePatch(BaseModel):
     alerts: Optional[Dict[str, Any]] = None
     tickets: Optional[Dict[str, Any]] = None
     preset: Optional[str] = None
+    gsc_property: Optional[str] = Field(default=None, max_length=300)
+    ga4_property_id: Optional[str] = Field(default=None, max_length=20)
+    scope: Optional[Dict[str, List[str]]] = None
+    staging: Optional[Dict[str, Any]] = None
     max_pages: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     read_timeout: Optional[float] = Field(default=None, ge=2, le=120)
     max_retries: Optional[int] = Field(default=None, ge=0, le=5)
@@ -261,6 +268,28 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
             st["tickets"] = clean_config({**(st.get("tickets") or {}), **body.tickets})
         except ValueError as e:
             raise problem(400, "Check the ticket settings", str(e))
+    from qc6.site_access import AccessError, clean_scope, clean_staging
+    try:
+        if body.scope is not None:
+            st["scope"] = clean_scope(body.scope)
+        if body.staging is not None:
+            stg = clean_staging(body.staging, st.get("staging"))
+            if stg is None:
+                st.pop("staging", None)
+            else:
+                st["staging"] = stg
+    except AccessError as e:
+        raise problem(400, "Check the crawl scope / staging access", str(e))
+    if body.gsc_property is not None:
+        g = body.gsc_property.strip()
+        if g and not (g.startswith("sc-domain:") or re.match(r"^https?://[^/\s]+/$", g)):
+            raise problem(400, "Check the Search Console property",
+                          'Use "sc-domain:example.com" for a domain property or the full address ending in / for a URL-prefix property.')
+        st["gsc_property"] = g
+    if body.ga4_property_id is not None:
+        if body.ga4_property_id and not body.ga4_property_id.isdigit():
+            raise problem(400, "The GA4 property id is a number", "Find it in GA4 under Admin, Property details.")
+        st["ga4_property_id"] = body.ga4_property_id
     if body.preset is not None:
         from qc6.presets import PRESETS
         if body.preset not in PRESETS:
@@ -275,7 +304,8 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
     pool = await get_pool()
     await pool.execute("UPDATE sites SET settings = $2, name = COALESCE($3, name) WHERE id = $1", site_id, st, body.name)
     await services.log(pool, me["workspace_id"], me["id"], "site.update", f"site:{site_id}",
-                       {k: v for k, v in body.model_dump(exclude_none=True).items() if k not in ("alerts", "tickets")})
+                       {k: v for k, v in body.model_dump(exclude_none=True).items() if k not in ("alerts", "tickets", "staging")}
+                       | ({"staging": "changed"} if body.staging is not None else {}))
     return public_site(await site_for(site_id, me))
 
 
@@ -669,6 +699,133 @@ async def pages(site_id: int, q: str = "", limit: int = Query(50, le=500), me=De
     return {"pages": [dict(r) for r in rows]}
 
 
+INVENTORY_FILTERS = ("status", "template", "indexable", "canonical", "depth_min", "fixes", "change", "q")
+
+
+async def _inventory_run(site_id: int, run: Optional[int], pool) -> int:
+    from qc6.inventory import checks_with_pages
+    checks = await checks_with_pages(pool, site_id)
+    if not checks:
+        raise problem(404, "No finished check yet", "Pages appear here after the first check.")
+    if run is None:
+        return checks[0]["id"]
+    if run not in {c["id"] for c in checks}:
+        raise problem(404, "That check isn't one of this site's finished checks")
+    return run
+
+
+@app.get("/api/v2/sites/{site_id}/inventory")
+async def inventory(site_id: int, request: Request, run: Optional[int] = None, sort: str = "url", desc: bool = False,
+                    limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), me=Depends(current_member)):
+    """Every page of a check, filterable: status, page type, indexable, canonical, depth, open fixes, new / gone / changed."""
+    from qc6.inventory import checks_with_pages, list_pages
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    f = {k: request.query_params.get(k) for k in INVENTORY_FILTERS if request.query_params.get(k)}
+    try:
+        out = await list_pages(pool, site_id, rid, f, sort, desc, limit, offset)
+    except ValueError:
+        raise problem(400, "Check the filters", "template and depth_min are numbers.")
+    out["checks"] = await checks_with_pages(pool, site_id)
+    return out
+
+
+@app.get("/api/v2/sites/{site_id}/inventory.csv")
+async def inventory_csv(site_id: int, request: Request, run: Optional[int] = None, me=Depends(current_member)):
+    from qc6.inventory import csv_rows
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    f = {k: request.query_params.get(k) for k in INVENTORY_FILTERS if request.query_params.get(k)}
+    name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
+    return StreamingResponse(csv_rows(pool, site_id, rid, f), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
+
+
+@app.get("/api/v2/sites/{site_id}/compare")
+async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member)):
+    """Two checks side by side: pages added / gone / changed status, fixes new / confirmed / back again, score."""
+    from qc6.inventory import compare
+    await site_for(site_id, me)
+    try:
+        return await compare(await get_pool(), site_id, a, b)
+    except ValueError as e:
+        raise problem(400, str(e))
+    except LookupError as e:
+        raise problem(404, str(e))
+
+
+@app.get("/api/v2/sites/{site_id}/growth/opportunities")
+async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+                        min_impressions: int = Query(2500, ge=1), me=Depends(current_member)):
+    """Pages ranked by QC's opportunity score, with the reasons in words and an action bucket (CrawlPulse FEAT-15)."""
+    from qc6.opportunity import page_opportunities
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, None, pool)
+    d = await page_opportunities(pool, site_id, rid, min_impressions)
+    rows = [p for p in d["pages"] if not bucket or p["bucket"] == bucket]
+    return {**{k: v for k, v in d.items() if k != "pages"}, "total": len(rows), "pages": rows[offset:offset + limit]}
+
+
+@app.get("/api/v2/sites/{site_id}/growth/search")
+async def search_insights(site_id: int, striking_min: int = Query(2500, ge=1), cannibal_min: int = Query(1000, ge=1),
+                          me=Depends(current_member)):
+    from qc6 import search_console as sc
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    return {**await sc.status(pool, s), "striking": await sc.striking_distance(pool, site_id, striking_min),
+            "cannibalisation": await sc.cannibalisation(pool, site_id, cannibal_min),
+            "thresholds": {"striking_min_impressions": striking_min, "cannibal_min_impressions": cannibal_min}}
+
+
+@app.post("/api/v2/sites/{site_id}/growth/sync")
+async def search_sync(site_id: int, me=Depends(current_member)):
+    from qc6 import search_console as sc
+    can_edit(me)
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    try:
+        out = await sc.sync(pool, s)
+    except (RuntimeError, ValueError) as e:
+        await sc.record_error(pool, site_id, str(e))
+        raise problem(400, "Search Console sync didn't work", str(e))
+    except httpx.HTTPError as e:
+        await sc.record_error(pool, site_id, f"Google didn't answer ({type(e).__name__}).")
+        raise problem(502, "Google didn't answer", type(e).__name__)
+    await services.log(pool, me["workspace_id"], me["id"], "search.sync", f"site:{site_id}", {"rows": out["rows"]})
+    return out
+
+
+REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+
+@app.get("/api/v2/sites/{site_id}/report.{fmt}")
+async def report(site_id: int, fmt: str, me=Depends(current_member)):
+    """Executive summary (CrawlPulse FEAT-18-02) as a self-contained page, or the same page printed to PDF."""
+    from fastapi.responses import HTMLResponse, Response
+    from qc6 import report as rep
+    if fmt not in ("html", "pdf"):
+        raise problem(404, "Not found")
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM runs WHERE site_id = $1 AND status = 'completed')", site_id):
+        raise problem(404, "No finished check yet", "The report needs at least one finished check.")
+    doc = rep.render_html(await rep.gather(pool, s))
+    name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
+    if fmt == "html":
+        return HTMLResponse(doc, headers={"Content-Security-Policy": REPORT_CSP})
+    try:
+        pdf = await rep.to_pdf(doc)
+    except Exception as e:                              # Chromium missing or failed: say so, offer the HTML
+        raise problem(503, "The PDF couldn't be made", f"Chromium isn't available on the server ({type(e).__name__}). "
+                      "The same report is at report.html; your browser can print it to PDF.")
+    await services.log(pool, me["workspace_id"], me["id"], "report.pdf", f"site:{site_id}", {})
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="qc-report-{name}.pdf"'})
+
+
 @app.get("/api/v2/runs/{run_id}/facts/{dataset}")
 async def facts_query(run_id: int, dataset: str, filter: str = "", q: str = Query("", max_length=300), page_url: str = "",
                       sort: str = "page", desc: bool = False, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
@@ -768,8 +925,13 @@ async def access_test(site_id: int, me=Depends(current_member)):
     if not settings.allow_private_targets and not URLNormalizer.is_safe_url(s["base_url"]):
         raise problem(400, "This address points to a private network")
     results = []
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={
-            "User-Agent": f"Mozilla/5.0 {settings.ua_suffix}", settings.access_header: s["access_token"]}) as c:
+    from qc6.site_access import AccessError, httpx_hook
+    try:
+        hook = httpx_hook(s)
+    except AccessError as e:
+        raise problem(400, "The staging login can't be used", str(e))
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"},
+                                 event_hooks={"request": [hook]}) as c:
         for i in range(20):
             try:
                 r = await c.get(s["base_url"] + "/")

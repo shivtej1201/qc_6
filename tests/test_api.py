@@ -252,3 +252,58 @@ def test_every_write_is_audited(world, migrated):
     acts = {r["action"] for r in rows}
     assert {"site.create", "run.start", "journey.save", "site.update", "fix.update"} <= acts
     assert all(r["actor_id"] for r in rows if r["action"] in ("journey.save", "site.update"))
+
+
+def test_scope_and_staging_settings(world, migrated, monkeypatch):
+    monkeypatch.setenv("QC6_SECRET_KEY", "api-test-secret")
+    c, sid = world["c"], world["site"]
+    r = c.patch(f"/api/v2/sites/{sid}", json={"scope": {"include": ["/product/*"], "exclude": ["*?sort=*"]},
+                                              "staging": {"username": "qa", "password": "Hunter2!", "headers": {"X-Env": "staging"}}},
+                headers=H)
+    assert r.status_code == 200
+    st = r.json()["settings"]
+    assert st["scope"] == {"include": ["/product/*"], "exclude": ["*?sort=*"]}
+    assert st["staging"] == {"username": "qa", "has_password": True, "header_names": ["X-Env"]}
+    for path in (f"/api/v2/sites/{sid}", "/api/v2/sites", f"/api/v2/sites/{sid}/today"):
+        body = c.get(path, headers=H).text
+        assert "Hunter2!" not in body and "sealed" not in body and "staging\"" not in body.replace('"staging":', "")
+    assert c.patch(f"/api/v2/sites/{sid}", json={"staging": {"headers": {"User-Agent": "x"}}}, headers=H).status_code == 400
+    assert c.patch(f"/api/v2/sites/{sid}", json={"scope": {"exclude": ["blog"]}}, headers=H).status_code == 400
+
+    async def audit():
+        import asyncpg
+        conn = await asyncpg.connect(migrated)
+        rows = await conn.fetch("SELECT detail::text AS d FROM audit_log WHERE action = 'site.update'")
+        await conn.close()
+        return [r["d"] for r in rows]
+    logs = asyncio.run(audit())
+    assert any('"staging": "changed"' in d for d in logs) and not any("Hunter2!" in d for d in logs)
+    c.patch(f"/api/v2/sites/{sid}", json={"scope": {"include": [], "exclude": []}, "staging": {"clear": True}}, headers=H)
+    assert "staging" not in c.get(f"/api/v2/sites/{sid}", headers=H).json()["settings"]
+
+
+def test_inventory_endpoints(world):
+    c, sid = world["c"], world["site"]
+    d = c.get(f"/api/v2/sites/{sid}/inventory?status=2xx&sort=fixes&desc=true", headers=H).json()
+    assert d["run_id"] == world["run"] and d["total"] > 0 and d["checks"][0]["id"] == world["run"]
+    r = c.get(f"/api/v2/sites/{sid}/inventory.csv", headers=H)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv") and "attachment" in r.headers["content-disposition"]
+    assert r.text.count("\n") == c.get(f"/api/v2/sites/{sid}/inventory", headers=H).json()["total"] + 1
+    assert c.get(f"/api/v2/sites/{sid}/inventory?run=999999", headers=H).status_code == 404
+    assert c.get(f"/api/v2/sites/{sid}/compare?a={world['run']}&b={world['run']}", headers=H).status_code == 400
+    assert c.get(f"/api/v2/sites/{world['other_site']}/inventory", headers=H).status_code == 404
+
+
+def test_executive_report(world):
+    c, sid = world["c"], world["site"]
+    c.patch(f"/api/v2/sites/{sid}", json={"name": "Fixture <script>alert(1)</script>"}, headers=H)
+    r = c.get(f"/api/v2/sites/{sid}/report.html", headers=H)
+    assert r.status_code == 200 and r.headers["content-security-policy"].startswith("default-src 'none'")
+    assert "<script>alert" not in r.text and "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+    assert "The fixes that matter most" in r.text and "health out of 100" in r.text
+    pdf = c.get(f"/api/v2/sites/{sid}/report.pdf", headers=H)
+    assert pdf.status_code == 200 and pdf.content[:5] == b"%PDF-" and len(pdf.content) > 5000
+    assert "attachment" in pdf.headers["content-disposition"]
+    assert c.get(f"/api/v2/sites/{world['other_site']}/report.pdf", headers=H).status_code == 404
+    assert c.get(f"/api/v2/sites/{sid}/report.docx", headers=H).status_code == 404
+    c.patch(f"/api/v2/sites/{sid}", json={"name": "Fixture API"}, headers=H)

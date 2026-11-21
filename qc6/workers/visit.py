@@ -79,9 +79,8 @@ class VisitResult:
 
 
 def is_primary(host: str, primary: str) -> bool:
-    host, primary = (host or "").lower(), primary.lower()
-    base = primary[4:] if primary.startswith("www.") else primary
-    return host == primary or host == base or host.endswith("." + base)
+    from qc6.site_access import is_site_host
+    return is_site_host(host, primary)
 
 
 def make_route_guard(site: Dict[str, Any], budget: Optional[HostBudget]):
@@ -89,6 +88,9 @@ def make_route_guard(site: Dict[str, Any], budget: Optional[HostBudget]):
     metadata addresses (same SSRF guard as the crawler, checked for every request, including redirects the page
     triggers); every request to the site's own hosts takes a token from the shared per-host budget."""
     from qcv5.crawler.url_normalizer import URLNormalizer
+    from qc6.site_access import private_headers
+    private = private_headers(site)
+    primary = site.get("primary_host") or urllib.parse.urlsplit(site.get("base_url", "")).hostname or ""
 
     async def guard(route):
         req = route.request
@@ -98,11 +100,14 @@ def make_route_guard(site: Dict[str, Any], budget: Optional[HostBudget]):
         if u.scheme in ("http", "https"):
             if not settings.allow_private_targets and not URLNormalizer.is_safe_url(req.url):
                 return await route.abort("blockedbyclient")
-            if budget is not None and is_primary(u.hostname or "", site["primary_host"]):
-                try:
-                    await budget.take()
-                except Paused:
-                    return await route.abort("blockedbyclient")
+            if is_primary(u.hostname or "", primary):
+                if budget is not None:
+                    try:
+                        await budget.take()
+                    except Paused:
+                        return await route.abort("blockedbyclient")
+                # the allow-token and any staging login go to the site's own hosts only, never to third parties
+                return await route.continue_(headers={**req.headers, **private})
         await route.continue_()
     return guard
 
@@ -127,7 +132,7 @@ class Visitor:
         self.ctx = await self.browser.new_context(
             **prof, user_agent=self.ua or None, locale=self.site.get("settings", {}).get("locale", "en-IN"),
             timezone_id=self.site.get("settings", {}).get("timezone", "Asia/Kolkata"),
-            extra_http_headers={settings.access_header: self.site["access_token"]}, accept_downloads=False,
+            accept_downloads=False,
             java_script_enabled=True, service_workers="block")
         await self.ctx.add_init_script(VITALS_HOOK)
         self._guard = make_route_guard(self.site, self.budget)

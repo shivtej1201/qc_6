@@ -65,8 +65,12 @@ async def fetch_html(url: str, site: Dict[str, Any]) -> Optional[str]:
     from qcv5.crawler.url_normalizer import URLNormalizer
     if not settings.allow_private_targets and not URLNormalizer.is_safe_url(url):
         return None
+    from qc6.site_access import httpx_hook, is_site_url
+    if not is_site_url(url, site["primary_host"]):
+        return None
     async with await _client() as c:
-        r = await c.get(url, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}", settings.access_header: site["access_token"]})
+        c.event_hooks["request"].append(httpx_hook(site))
+        r = await c.get(url, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"})
         return r.text if r.status_code == 200 and "html" in r.headers.get("content-type", "html") else None
 
 

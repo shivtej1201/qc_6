@@ -147,14 +147,12 @@ class JourneyRunner:
         out = JourneyOutcome(spec["name"], device)
         pacer = Pacer(self._persona(spec), self.seed)
         ua = None
-        ctx = await self.browser.new_context(**DEVICES[device], extra_http_headers={settings.access_header: self.site["access_token"]},
-                                             locale="en-IN", timezone_id="Asia/Kolkata", accept_downloads=False)
+        ctx = await self.browser.new_context(**DEVICES[device], locale="en-IN", timezone_id="Asia/Kolkata", accept_downloads=False)
         await ctx.add_init_script(VITALS_HOOK)
         await ctx.route("**/*", make_route_guard(self.site, self.budget))
         page = await ctx.new_page()
         ua = await page.evaluate("navigator.userAgent")
-        await ctx.set_extra_http_headers({settings.access_header: self.site["access_token"],
-                                          "User-Agent": f"{ua} {settings.ua_suffix}"})
+        await ctx.set_extra_http_headers({"User-Agent": f"{ua} {settings.ua_suffix}"})   # token: route guard, site hosts only
         errors: List[str] = []
         requests = {"n": 0}
         page.on("console", lambda m: errors.append(m.text[:300]) if m.type == "error" else None)

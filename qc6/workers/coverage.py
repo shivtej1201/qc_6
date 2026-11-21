@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 import threading
@@ -19,8 +20,11 @@ from qcv5.crawler.on_page_audit_engine import OnPageAuditEngine
 from qcv5.reports.on_page_csv_packager import build_on_page_csv_package
 
 from qc6.domain import templates as T
+from qc6.linkgraph import text_simhash
 from qc6.settings import settings
 from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score
+
+log = logging.getLogger("qc6.coverage")
 
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
@@ -31,15 +35,39 @@ class FingerprintEngine(OnPageAuditEngine):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.fingerprints: Dict[str, int] = {}
+        self.text_fps: Dict[str, int] = {}            # SimHash of the main text, for near-duplicate pages
         self._fp_lock = threading.Lock()
 
     def _parse_and_classify(self, src_url, final_url, html, seo_ctx=None):
         out = super()._parse_and_classify(src_url, final_url, html, seo_ctx)
         if html:
             fp = T.simhash(html)
+            tfp = text_simhash(html)
             with self._fp_lock:
                 self.fingerprints[src_url] = fp
+                if tfp is not None:
+                    self.text_fps[src_url] = tfp
         return out
+
+    def save_fingerprints(self, path: str) -> None:
+        """Checkpoint both fingerprint maps (atomic replace), so a paused or crashed check keeps its page types."""
+        import json as _json
+        with self._fp_lock:
+            data = {"layout": {k: str(v) for k, v in self.fingerprints.items()},
+                    "text": {k: str(v) for k, v in self.text_fps.items()}}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(data, f)
+        os.replace(tmp, path)
+
+    def load_fingerprints(self, path: str) -> None:
+        import json as _json
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+        if "layout" not in data:                       # older checkpoints: a flat url -> layout map
+            data = {"layout": data, "text": {}}
+        self.fingerprints.update({k: int(v) for k, v in data["layout"].items()})
+        self.text_fps.update({k: int(v) for k, v in data.get("text", {}).items()})
 
 
 # V5 rule code -> V6 rule (+ how to build subject/fields). Anything else becomes PAGE_CHECK / LINK_CHECK with V5's
@@ -83,8 +111,9 @@ def map_issue(r: sqlite3.Row, template_id: Optional[int], host: str) -> Optional
 
 
 def identity_headers(site: Dict[str, Any]) -> Dict[str, str]:
-    """How QC introduces itself on every request: a real browser UA plus 'QC-Audit/6.0', and the site's access token."""
-    return {"User-Agent": f"{BROWSER_UA} {settings.ua_suffix}", settings.access_header: site["access_token"]}
+    """How QC introduces itself on every request, to every host: a real browser UA plus 'QC-Audit/6.0'.
+    The site's allow-token and staging login are private: see qc6.site_access.httpx_hook."""
+    return {"User-Agent": f"{BROWSER_UA} {settings.ua_suffix}"}
 
 
 async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str], opts: Dict[str, Any],
@@ -106,19 +135,26 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         read_timeout=eo.get("read_timeout"), max_retries=eo.get("max_retries"),
         audit_seo=True, probe_url=f"{site['base_url'].rstrip('/')}/robots.txt")
     eng.extra_headers = identity_headers(site)
+    from qc6.site_access import httpx_hook
+    eng.site_request_hook = httpx_hook(site)
     entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
     eng.initialize_inventory(entries)                 # idempotent: on resume, finished pages stay finished
     fp_path = os.path.join(run_dir, "fingerprints.json")
-    if os.path.exists(fp_path):                       # layout fingerprints of pages parsed before a pause
-        import json as _json
-        with open(fp_path, encoding="utf-8") as f:
-            eng.fingerprints.update({k: int(v) for k, v in _json.load(f).items()})
+    if os.path.exists(fp_path):                       # fingerprints of pages parsed before a pause or a crash
+        eng.load_fingerprints(fp_path)
     if control is not None:
         control["engine"] = eng
 
     async def progress_loop():
+        tick = 0
         while True:
             await asyncio.sleep(2.0)
+            tick += 1
+            if tick % 30 == 0:                        # every minute: a crash loses at most a minute of fingerprints
+                try:
+                    await asyncio.to_thread(eng.save_fingerprints, fp_path)
+                except OSError:
+                    log.warning("could not checkpoint fingerprints for run %s", run_id)
             try:
                 c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
                 done = c.execute("SELECT COUNT(*) FROM on_page_source_pages WHERE job_id = ? AND crawl_state != 'PENDING'",
@@ -140,21 +176,20 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         if control is not None:
             control["engine"] = None
     if eng._stop_requested:                           # paused: keep the checkpoint, build nothing yet
-        import json as _json
-        with open(fp_path, "w", encoding="utf-8") as f:
-            _json.dump({k: str(v) for k, v in eng.fingerprints.items()}, f)
+        eng.save_fingerprints(fp_path)
         return {"paused": True, "pages_done": int(stats.get("source_pages_processed") or 0)}
     pkg = await asyncio.to_thread(build_on_page_csv_package, db_path, job, os.path.join(run_dir, "reports"),
                                   package_name="QC_V6_COVERAGE", project_id=host)
     from qc6 import facts
     fact_counts = await asyncio.to_thread(facts.export, db_path, job, run_id)
-    out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg)
+    out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps)
     out["facts"] = fact_counts
     return out
 
 
 async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str, job: str,
-                          fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any]) -> Dict[str, Any]:
+                          fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any],
+                          text_fps: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
     pages = c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title, s.page_type, s.business,
@@ -242,14 +277,43 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         it = map_issue(r, tpl, site["primary_host"])
         if it is not None:
             items.append(it)
+    graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items)
     applied = await apply(pool, run_id, site["id"], items, template_names=names)
     complete = int(stats.get("source_pages_pending") or 0) == 0
     moved = await close_run(pool, run_id, site["id"], ["coverage"], complete=complete)
     sc = await snapshot_score(pool, run_id, site["id"], len(pages))
     summary = {"pages": len(pages), "templates": len(db_tpl), "issues_v5": len(issues), **applied, "lifecycle": moved,
+               "link_graph": graph,
                "score": sc.get("score"), "trust_gate": pkg.get("final_qc_status"), "zip": pkg.get("zip_path"),
                "links": stats.get("url_relationships_persisted"), "images": stats.get("image_relationships_persisted")}
     return summary
+
+
+async def _link_intelligence(pool, run_id: int, site: Dict[str, Any], pages, page_tpl: Dict[str, int], db_tpl: Dict[int, int],
+                             text_fps: Dict[str, int], items: List[Item]) -> Dict[str, Any]:
+    """Click depth, link strength and inlinks into each page's facts; deep / unreachable pages, canonical targets and
+    near-duplicates become fixes like any other finding. Uses the links already exported to Parquet."""
+    from qc6 import facts, linkgraph
+    rows = [{"url": r["url"], "final_url": r["final_url"], "http_status": r["http_status"],
+             "canonical_url": r["canonical_url"] or "", "noindex": bool(r["noindex"])} for r in pages]
+    links = os.path.join(facts.facts_dir(run_id), "links.parquet")
+    try:
+        res = await asyncio.to_thread(linkgraph.analyse, rows, site["base_url"], links, text_fps)
+    except Exception:                                  # never lose a finished check over the extra analysis
+        log.warning("link analysis failed for run %s", run_id, exc_info=True)
+        return {"error": "link analysis failed; see the worker log"}
+    m = res["metrics"]
+    urls = list(m)
+    await pool.execute("""UPDATE pages p SET facts = p.facts || jsonb_strip_nulls(jsonb_build_object(
+                              'depth', x.depth, 'inlinks', x.inlinks, 'authority', x.authority, 'canonical_url', x.canonical))
+                          FROM unnest($2::text[], $3::int[], $4::int[], $5::float8[], $6::text[]) AS x(url, depth, inlinks, authority, canonical)
+                          WHERE p.run_id = $1 AND p.url = x.url""",
+                       run_id, urls, [m[u]["depth"] for u in urls], [m[u]["inlinks"] for u in urls], [m[u]["authority"] for u in urls],
+                       [m[u]["canonical_url"] for u in urls])
+    for url, rule, subject, fields in res["problems"]:
+        items.append(Item(rule, url, "coverage", db_tpl.get(page_tpl.get(url, -1)), subject, fields,
+                          {"metrics": m.get(url, {}), **({"target": subject} if subject else {})}))
+    return {k: res[k] for k in ("home_found", "edges", "near_duplicate_groups")} | {"problems": len(res["problems"])}
 
 
 def _has_col(c: sqlite3.Connection, table: str, col: str) -> bool:
