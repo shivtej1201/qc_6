@@ -20,12 +20,43 @@ from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score
 log = logging.getLogger("qc6.runner")
 
 CLAIM_SQL = """
-UPDATE runs SET status = 'running', started_at = now()
+UPDATE runs SET status = 'running', started_at = COALESCE(started_at, now()), worker_id = $1, heartbeat_at = now(),
+                attempts = attempts + 1
 WHERE id = (
   SELECT r.id FROM runs r WHERE r.status = 'queued'
     AND NOT EXISTS (SELECT 1 FROM runs x WHERE x.site_id = r.site_id AND x.status IN ('running', 'pausing'))
   ORDER BY r.id FOR UPDATE SKIP LOCKED LIMIT 1)
 RETURNING id"""
+
+HEARTBEAT_S = 15
+STALE_S = 90            # no heartbeat for this long: the worker is gone (crash, kill, power loss)
+MAX_ATTEMPTS = 3
+
+# A check whose worker stopped is put back in the queue and resumes where it stopped (finished pages stay finished);
+# after MAX_ATTEMPTS starts it is failed with a plain reason instead of looping. A check that was pausing becomes paused.
+RECOVER_SQL = """
+UPDATE runs SET
+  status = CASE WHEN status = 'pausing' THEN 'paused' WHEN attempts >= $2 THEN 'failed' ELSE 'queued' END,
+  error = CASE WHEN status = 'running' AND attempts >= $2
+               THEN 'The worker running this check stopped ' || attempts || ' times, so QC stopped retrying. Look at the worker log, then start a new check.'
+               ELSE error END,
+  finished_at = CASE WHEN status = 'running' AND attempts >= $2 THEN now() ELSE finished_at END,
+  worker_id = NULL
+WHERE status IN ('running', 'pausing') AND heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1)
+RETURNING id, status"""
+
+
+async def recover_stale(pool, stale_s: float = STALE_S, max_attempts: int = MAX_ATTEMPTS) -> List[Dict[str, Any]]:
+    return [dict(r) for r in await pool.fetch(RECOVER_SQL, float(stale_s), max_attempts)]
+
+
+async def _heartbeat(pool, run_id: int) -> None:
+    while True:
+        await asyncio.sleep(HEARTBEAT_S)
+        try:
+            await pool.execute("UPDATE runs SET heartbeat_at = now() WHERE id = $1 AND worker_id = $2", run_id, settings.worker_id)
+        except Exception:                       # a missed beat is fine; three in a row and another worker takes over
+            log.warning("heartbeat for run %s failed", run_id)
 
 
 async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]:
@@ -229,12 +260,21 @@ async def worker_loop(poll_s: float = 2.0) -> None:
                     log.info("schedule %s started run %s", st["key"], st["run_id"])
             except Exception:
                 log.warning("scheduler tick failed: %s", traceback.format_exc())
-        run_id = await pool.fetchval(CLAIM_SQL)
+        try:
+            for r in await recover_stale(pool):
+                log.warning("run %s lost its worker; now %s", r["id"], r["status"])
+        except Exception:
+            log.warning("stale-run recovery failed: %s", traceback.format_exc())
+        run_id = await pool.fetchval(CLAIM_SQL, settings.worker_id)
         if run_id is None:
             await asyncio.sleep(poll_s)
             continue
         log.info("claimed run %s", run_id)
-        await execute_run(pool, run_id)
+        beat = asyncio.create_task(_heartbeat(pool, run_id))
+        try:
+            await execute_run(pool, run_id)
+        finally:
+            beat.cancel()
 
 
 if __name__ == "__main__":
