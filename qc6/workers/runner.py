@@ -61,9 +61,12 @@ async def _heartbeat(pool, run_id: int) -> None:
 
 async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]:
     from qc6.presets import max_pages
+    from qc6.site_access import apply_scope, httpx_hook
     limit = max_pages(site.get("settings") or {}, opts)
+    scope = (site.get("settings") or {}).get("scope")
     if opts.get("urls"):
-        return list(dict.fromkeys(opts["urls"]))[:limit]
+        kept, opts["_scope_excluded"] = apply_scope(dict.fromkeys(opts["urls"]), scope)
+        return kept[:limit]
     from qcv5.crawler.sitemap_extractor import SitemapExtractor
     sitemaps = [x for x in (opts.get("sitemap"), (site.get("settings") or {}).get("sitemap")) if x]
     from qc6.workers.coverage import identity_headers
@@ -71,7 +74,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
     if not sitemaps:                     # like a crawler would: robots.txt Sitemap lines, else /sitemap.xml
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers) as c:
+            async with httpx.AsyncClient(timeout=15, headers=headers, event_hooks={"request": [httpx_hook(site)]}) as c:
                 r = await c.get(site["base_url"] + "/robots.txt")
                 if r.status_code == 200:
                     sitemaps = [l.split(":", 1)[1].strip() for l in r.text.splitlines() if l.lower().startswith("sitemap:")]
@@ -82,6 +85,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
     ex = SitemapExtractor(allow_local=settings.allow_private_targets, max_urls=limit,
                           use_browser_fallback=False)
     ex.client.headers.update(headers)
+    ex.client.event_hooks["request"].append(httpx_hook(site))     # token / staging login: the site's hosts only
     ex.robots_manager.user_agent = headers["User-Agent"]
     try:
         res = await ex.extract_all(sitemaps)
@@ -92,7 +96,8 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
             raise RuntimeError(
                 f"{site['primary_host']} refused to show QC its sitemap (HTTP 403 from the CDN). QC doesn't try to get round a "
                 "block. Open Crawler access, copy the allow rule for the X-QC-Audit header, and ask your CDN team to add it.")
-    return [u["normalized_url"] for u in res.get("unique_urls", [])][:limit]
+    kept, opts["_scope_excluded"] = apply_scope((u["normalized_url"] for u in res.get("unique_urls", [])), scope)
+    return kept[:limit]
 
 
 async def journey_stage(pool, browser, run_id: int, site: Dict[str, Any], fast: bool = False,
@@ -189,7 +194,7 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
             part = await run_coverage(pool, run_id, site, urls, {**opts, "with_visits": kind == "full"}, control)
             if part.get("paused") or control["pause"]:
                 return await paused()
-            await stage_done("coverage", part)
+            await stage_done("coverage", {**part, "scope_excluded": int(opts.get("_scope_excluded") or 0)})
         if kind in ("visit", "full") and "visits" not in done_stages:
             from qc6.workers.visit_stage import run_visit_stage
             if kind == "visit":       # visit the pages of the site's latest coverage run

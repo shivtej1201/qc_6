@@ -252,3 +252,31 @@ def test_every_write_is_audited(world, migrated):
     acts = {r["action"] for r in rows}
     assert {"site.create", "run.start", "journey.save", "site.update", "fix.update"} <= acts
     assert all(r["actor_id"] for r in rows if r["action"] in ("journey.save", "site.update"))
+
+
+def test_scope_and_staging_settings(world, migrated, monkeypatch):
+    monkeypatch.setenv("QC6_SECRET_KEY", "api-test-secret")
+    c, sid = world["c"], world["site"]
+    r = c.patch(f"/api/v2/sites/{sid}", json={"scope": {"include": ["/product/*"], "exclude": ["*?sort=*"]},
+                                              "staging": {"username": "qa", "password": "Hunter2!", "headers": {"X-Env": "staging"}}},
+                headers=H)
+    assert r.status_code == 200
+    st = r.json()["settings"]
+    assert st["scope"] == {"include": ["/product/*"], "exclude": ["*?sort=*"]}
+    assert st["staging"] == {"username": "qa", "has_password": True, "header_names": ["X-Env"]}
+    for path in (f"/api/v2/sites/{sid}", "/api/v2/sites", f"/api/v2/sites/{sid}/today"):
+        body = c.get(path, headers=H).text
+        assert "Hunter2!" not in body and "sealed" not in body and "staging\"" not in body.replace('"staging":', "")
+    assert c.patch(f"/api/v2/sites/{sid}", json={"staging": {"headers": {"User-Agent": "x"}}}, headers=H).status_code == 400
+    assert c.patch(f"/api/v2/sites/{sid}", json={"scope": {"exclude": ["blog"]}}, headers=H).status_code == 400
+
+    async def audit():
+        import asyncpg
+        conn = await asyncpg.connect(migrated)
+        rows = await conn.fetch("SELECT detail::text AS d FROM audit_log WHERE action = 'site.update'")
+        await conn.close()
+        return [r["d"] for r in rows]
+    logs = asyncio.run(audit())
+    assert any('"staging": "changed"' in d for d in logs) and not any("Hunter2!" in d for d in logs)
+    c.patch(f"/api/v2/sites/{sid}", json={"scope": {"include": [], "exclude": []}, "staging": {"clear": True}}, headers=H)
+    assert "staging" not in c.get(f"/api/v2/sites/{sid}", headers=H).json()["settings"]

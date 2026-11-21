@@ -27,6 +27,8 @@ def test_crashed_check_is_requeued_and_finishes(pg_pool, site_srv, tmp_path, mon
         ws = await services.create_workspace(pool, "Crash Co", "c@crash.test", "Chandra")
         sid = await services.create_site(pool, ws["workspace_id"], "Crash", site_srv.base, {"rate_rps": 6, "visitors": 2})
         urls = site_srv.urls(per_template=10)
+        # the claim takes the oldest queued check; leave only this test's check in the queue
+        await pool.execute("UPDATE runs SET status = 'cancelled' WHERE status IN ('queued', 'running', 'pausing')")
         rid = await services.start_run(pool, sid, "coverage", {"urls": urls, "images": False})
         assert await pool.fetchval(CLAIM_SQL, "w-doomed") == rid
         task = asyncio.create_task(execute_run(pool, rid))

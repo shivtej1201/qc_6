@@ -83,8 +83,9 @@ def map_issue(r: sqlite3.Row, template_id: Optional[int], host: str) -> Optional
 
 
 def identity_headers(site: Dict[str, Any]) -> Dict[str, str]:
-    """How QC introduces itself on every request: a real browser UA plus 'QC-Audit/6.0', and the site's access token."""
-    return {"User-Agent": f"{BROWSER_UA} {settings.ua_suffix}", settings.access_header: site["access_token"]}
+    """How QC introduces itself on every request, to every host: a real browser UA plus 'QC-Audit/6.0'.
+    The site's allow-token and staging login are private: see qc6.site_access.httpx_hook."""
+    return {"User-Agent": f"{BROWSER_UA} {settings.ua_suffix}"}
 
 
 async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str], opts: Dict[str, Any],
@@ -106,6 +107,8 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         read_timeout=eo.get("read_timeout"), max_retries=eo.get("max_retries"),
         audit_seo=True, probe_url=f"{site['base_url'].rstrip('/')}/robots.txt")
     eng.extra_headers = identity_headers(site)
+    from qc6.site_access import httpx_hook
+    eng.site_request_hook = httpx_hook(site)
     entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
     eng.initialize_inventory(entries)                 # idempotent: on resume, finished pages stay finished
     fp_path = os.path.join(run_dir, "fingerprints.json")

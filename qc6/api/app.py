@@ -136,6 +136,9 @@ def public_site(s: Dict[str, Any]) -> Dict[str, Any]:
     from qc6.notify import mask
     out = {k: v for k, v in s.items() if k != "access_token"}
     st = dict(out.get("settings") or {})
+    if st.get("staging"):
+        from qc6.site_access import public_staging
+        st["staging"] = public_staging(st["staging"])          # never the login itself, not even encrypted
     if st.get("alerts"):
         al = dict(st["alerts"])
         for ch in ("slack", "teams"):
@@ -220,6 +223,8 @@ class SitePatch(BaseModel):
     alerts: Optional[Dict[str, Any]] = None
     tickets: Optional[Dict[str, Any]] = None
     preset: Optional[str] = None
+    scope: Optional[Dict[str, List[str]]] = None
+    staging: Optional[Dict[str, Any]] = None
     max_pages: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     read_timeout: Optional[float] = Field(default=None, ge=2, le=120)
     max_retries: Optional[int] = Field(default=None, ge=0, le=5)
@@ -261,6 +266,18 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
             st["tickets"] = clean_config({**(st.get("tickets") or {}), **body.tickets})
         except ValueError as e:
             raise problem(400, "Check the ticket settings", str(e))
+    from qc6.site_access import AccessError, clean_scope, clean_staging
+    try:
+        if body.scope is not None:
+            st["scope"] = clean_scope(body.scope)
+        if body.staging is not None:
+            stg = clean_staging(body.staging, st.get("staging"))
+            if stg is None:
+                st.pop("staging", None)
+            else:
+                st["staging"] = stg
+    except AccessError as e:
+        raise problem(400, "Check the crawl scope / staging access", str(e))
     if body.preset is not None:
         from qc6.presets import PRESETS
         if body.preset not in PRESETS:
@@ -275,7 +292,8 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
     pool = await get_pool()
     await pool.execute("UPDATE sites SET settings = $2, name = COALESCE($3, name) WHERE id = $1", site_id, st, body.name)
     await services.log(pool, me["workspace_id"], me["id"], "site.update", f"site:{site_id}",
-                       {k: v for k, v in body.model_dump(exclude_none=True).items() if k not in ("alerts", "tickets")})
+                       {k: v for k, v in body.model_dump(exclude_none=True).items() if k not in ("alerts", "tickets", "staging")}
+                       | ({"staging": "changed"} if body.staging is not None else {}))
     return public_site(await site_for(site_id, me))
 
 
@@ -768,8 +786,13 @@ async def access_test(site_id: int, me=Depends(current_member)):
     if not settings.allow_private_targets and not URLNormalizer.is_safe_url(s["base_url"]):
         raise problem(400, "This address points to a private network")
     results = []
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={
-            "User-Agent": f"Mozilla/5.0 {settings.ua_suffix}", settings.access_header: s["access_token"]}) as c:
+    from qc6.site_access import AccessError, httpx_hook
+    try:
+        hook = httpx_hook(s)
+    except AccessError as e:
+        raise problem(400, "The staging login can't be used", str(e))
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"},
+                                 event_hooks={"request": [hook]}) as c:
         for i in range(20):
             try:
                 r = await c.get(s["base_url"] + "/")

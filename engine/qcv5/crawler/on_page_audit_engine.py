@@ -2961,8 +2961,11 @@ class OnPageAuditEngine:
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept-Encoding": "gzip, deflate",
-                **(getattr(self, "extra_headers", None) or {}),   # V6: honest UA suffix + X-QC-Audit token
+                **(getattr(self, "extra_headers", None) or {}),   # V6: public identity only (honest UA suffix)
             },
+            # V6: site-private headers (X-QC-Audit token, staging login) are added per request, only for the site's
+            # own hosts, so link checks on other websites never receive them
+            event_hooks={"request": [getattr(self, "site_request_hook")]} if getattr(self, "site_request_hook", None) else None,
         ) as client:
             await self._wait_for_primary_ready(client, initial_wait=False)
 

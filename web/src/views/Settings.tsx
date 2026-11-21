@@ -17,6 +17,9 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
     setForm({
       name: s.data.name, preset: st.preset ?? "target", rate_rps: st.rate_rps ?? 12, visitors: st.visitors ?? 6, consent: st.consent ?? "accept",
       max_pages: st.max_pages ?? "", read_timeout: st.read_timeout ?? "", max_retries: st.max_retries ?? "",
+      include: (st.scope?.include || []).join("\n"), exclude: (st.scope?.exclude || []).join("\n"),
+      stg_user: st.staging?.username ?? "", stg_pass: "",
+      stg_headers: (st.staging?.header_names || []).map((h: string) => `${h}: •••`).join("\n"),
       check_schedule: st.check_schedule ?? "", sitemap: st.sitemap ?? "",
       slack: st.alerts?.slack_webhook ?? "", teams: st.alerts?.teams_webhook ?? "",
       on: st.alerts?.on ?? ["summary", "regressed", "journey_failed", "access"],
@@ -25,6 +28,7 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
     });
   }, [s.data]);
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm({ ...form, [k]: e.target.value });
+  const setT = (k: string) => (e: React.ChangeEvent<HTMLTextAreaElement>) => setForm({ ...form, [k]: e.target.value });
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,6 +41,8 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
         max_pages: form.max_pages === "" ? undefined : Number(form.max_pages),
         read_timeout: form.read_timeout === "" ? undefined : Number(form.read_timeout),
         max_retries: form.max_retries === "" ? undefined : Number(form.max_retries),
+        scope: { include: lines(form.include), exclude: lines(form.exclude) },
+        staging: stagingBody(form, s.data?.settings?.staging),
         check_schedule: form.check_schedule, sitemap: form.sitemap || undefined,
         alerts: { slack_webhook: form.slack, teams_webhook: form.teams, on: form.on }, tickets,
       });
@@ -99,6 +105,26 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
           </details>
         </section>
         <section className="panel grid" data-reveal>
+          <h2>What to check, and how to get in</h2>
+          <div className="grid g-2">
+            <Field id="s-inc" label="Only these pages" hint="One pattern per line, e.g. /loans/*. Empty: every page in the sitemap.">
+              <textarea id="s-inc" className="input" rows={3} value={form.include} onChange={setT("include")} placeholder="/loans/*" /></Field>
+            <Field id="s-exc" label="Never these pages" hint="One per line, e.g. *?sort=* or /archive/*.">
+              <textarea id="s-exc" className="input" rows={3} value={form.exclude} onChange={setT("exclude")} placeholder="*?sort=*" /></Field>
+          </div>
+          <p className="faint" style={{ fontSize: 13, margin: 0 }}>For a pre-production site behind a login. QC sends these only to {site.primary_host} and its
+            own subdomains, never to other websites, and keeps them encrypted.</p>
+          <div className="grid g-2">
+            <Field id="s-su" label="Login name"><input id="s-su" className="input" autoComplete="off" value={form.stg_user} onChange={set("stg_user")} /></Field>
+            <Field id="s-sp" label="Password" hint={s.data?.settings?.staging?.has_password ? "Saved. Type a new one to change it." : undefined}>
+              <input id="s-sp" className="input" type="password" autoComplete="new-password" value={form.stg_pass} onChange={set("stg_pass")} /></Field>
+          </div>
+          <Field id="s-sh" label="Extra headers" hint="One per line as Name: value. Saved values show as •••; leave them to keep them, delete the line to remove one.">
+            <textarea id="s-sh" className="input" rows={2} value={form.stg_headers} onChange={setT("stg_headers")} placeholder="X-Env: staging" /></Field>
+          {s.data?.settings?.staging && <div><button type="button" className="btn quiet" onClick={async () => {
+            await api.patchSite(site.id, { staging: { clear: true } }); toast("Staging login removed."); s.reload(); }}>Remove the staging login</button></div>}
+        </section>
+        <section className="panel grid" data-reveal>
           <h2>Alerts</h2>
           <Field id="s-slack" label="Slack incoming webhook"><input id="s-slack" className="input" placeholder="https://hooks.slack.com/services/…" value={form.slack || ""} onChange={set("slack")} /></Field>
           <Field id="s-teams" label="Microsoft Teams incoming webhook"><input id="s-teams" className="input" placeholder="https://….webhook.office.com/…" value={form.teams || ""} onChange={set("teams")} /></Field>
@@ -126,6 +152,19 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
       </form>
     </div>
   );
+}
+
+function lines(v: string): string[] { return (v || "").split("\n").map((x) => x.trim()).filter(Boolean); }
+
+function stagingBody(form: Record<string, any>, current: any) {
+  const headers: Record<string, string> = {};
+  for (const l of lines(form.stg_headers)) {
+    const i = l.indexOf(":");
+    if (i > 0) headers[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+  }
+  for (const h of current?.header_names || []) if (!(h in headers)) headers[h] = "";     // line deleted: remove it
+  if (!form.stg_user && !form.stg_pass && !Object.keys(headers).length && !current) return undefined;
+  return { username: form.stg_user, password: form.stg_pass, headers };
 }
 
 function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: React.ReactNode }) {
