@@ -89,7 +89,7 @@ async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
 # Problems that depend on other pages (links into a page, duplicates, the sitemap): a spot check can't judge them, so it
 # never confirms them fixed. Only a check of the whole site can.
 CROSS_PAGE_RULES = {"NEAR_DUPLICATE", "DEEP_PAGE", "NOT_REACHABLE_FROM_HOME", "TITLE_DUPLICATE", "CANONICAL_CHAIN",
-                    "NOINDEX_IN_SITEMAP", "CANONICAL_ELSEWHERE"}
+                    "NOINDEX_IN_SITEMAP", "CANONICAL_ELSEWHERE", "PRODUCT_DATA_MISSING"}
 CROSS_PAGE_SUBJECTS = {"ORPHAN_PAGE", "NOT_IN_SITEMAP", "DUPLICATE_TITLE", "DUPLICATE_META_DESCRIPTION", "DUPLICATE_H1",
                        "DUPLICATE_CONTENT", "TRAILING_SLASH_DUPLICATE", "NOINDEX_IN_SITEMAP", "SITEMAP_URL_NOT_CANONICAL"}
 

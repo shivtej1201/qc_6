@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -21,6 +22,7 @@ from qcv5.reports.on_page_csv_packager import build_on_page_csv_package
 
 from qc6.domain import templates as T
 from qc6.linkgraph import text_simhash
+from qc6.product import extract as product_extract
 from qc6.settings import settings
 from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score, spot_pages
 
@@ -36,6 +38,7 @@ class FingerprintEngine(OnPageAuditEngine):
         super().__init__(*a, **kw)
         self.fingerprints: Dict[str, int] = {}
         self.text_fps: Dict[str, int] = {}            # SimHash of the main text, for near-duplicate pages
+        self.products: Dict[str, Any] = {}            # product structured data per page (qc6.product)
         self._fp_lock = threading.Lock()
 
     def _parse_and_classify(self, src_url, final_url, html, seo_ctx=None):
@@ -43,10 +46,12 @@ class FingerprintEngine(OnPageAuditEngine):
         if html:
             fp = T.simhash(html)
             tfp = text_simhash(html)
+            prod = product_extract(html)
             with self._fp_lock:
                 self.fingerprints[src_url] = fp
                 if tfp is not None:
                     self.text_fps[src_url] = tfp
+                self.products[src_url] = prod
         return out
 
     def save_fingerprints(self, path: str) -> None:
@@ -54,7 +59,7 @@ class FingerprintEngine(OnPageAuditEngine):
         import json as _json
         with self._fp_lock:
             data = {"layout": {k: str(v) for k, v in self.fingerprints.items()},
-                    "text": {k: str(v) for k, v in self.text_fps.items()}}
+                    "text": {k: str(v) for k, v in self.text_fps.items()}, "product": dict(self.products)}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             _json.dump(data, f)
@@ -68,6 +73,7 @@ class FingerprintEngine(OnPageAuditEngine):
             data = {"layout": data, "text": {}}
         self.fingerprints.update({k: int(v) for k, v in data["layout"].items()})
         self.text_fps.update({k: int(v) for k, v in data.get("text", {}).items()})
+        self.products.update(data.get("product", {}))
 
 
 # V5 rule code -> V6 rule (+ how to build subject/fields). Anything else becomes PAGE_CHECK / LINK_CHECK with V5's
@@ -182,14 +188,15 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
                                   package_name="QC_V6_COVERAGE", project_id=host)
     from qc6 import facts
     fact_counts = await asyncio.to_thread(facts.export, db_path, job, run_id)
-    out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps)
+    out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps,
+                                products=eng.products)
     out["facts"] = fact_counts
     return out
 
 
 async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str, job: str,
                           fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any],
-                          text_fps: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                          text_fps: Optional[Dict[str, int]] = None, products: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     spot = await spot_pages(pool, run_id)
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
@@ -279,6 +286,16 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         it = map_issue(r, tpl, site["primary_host"])
         if it is not None:
             items.append(it)
+    if products:                                       # product pages: is the product's data complete?
+        from qc6.presets import page_type_label
+        from qc6.product import problems as product_problems
+        prows = [{"url": r["url"], "http_status": r["http_status"], "template_id": db_tpl.get(page_tpl.get(r["url"], -1)),
+                  "product": products.get(r["url"]), "site_type": page_type_label(r["page_type"], r["business"])} for r in pages]
+        for url, rule, fields in product_problems(prows):
+            items.append(Item(rule, url, "coverage", db_tpl.get(page_tpl.get(url, -1)), "", fields, {"product": products.get(url)}))
+        await pool.execute("""UPDATE pages p SET facts = p.facts || jsonb_build_object('product', x.prod::jsonb)
+                              FROM unnest($2::text[], $3::text[]) AS x(url, prod) WHERE p.run_id = $1 AND p.url = x.url""",
+                           run_id, [u for u, v in products.items() if v], [json.dumps(v) for v in products.values() if v])
     graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items, spot=spot is not None)
     applied = await apply(pool, run_id, site["id"], items, template_names=names, spot=spot is not None)
     complete = int(stats.get("source_pages_pending") or 0) == 0
