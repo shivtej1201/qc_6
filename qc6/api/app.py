@@ -687,6 +687,63 @@ async def pages(site_id: int, q: str = "", limit: int = Query(50, le=500), me=De
     return {"pages": [dict(r) for r in rows]}
 
 
+INVENTORY_FILTERS = ("status", "template", "indexable", "canonical", "depth_min", "fixes", "change", "q")
+
+
+async def _inventory_run(site_id: int, run: Optional[int], pool) -> int:
+    from qc6.inventory import checks_with_pages
+    checks = await checks_with_pages(pool, site_id)
+    if not checks:
+        raise problem(404, "No finished check yet", "Pages appear here after the first check.")
+    if run is None:
+        return checks[0]["id"]
+    if run not in {c["id"] for c in checks}:
+        raise problem(404, "That check isn't one of this site's finished checks")
+    return run
+
+
+@app.get("/api/v2/sites/{site_id}/inventory")
+async def inventory(site_id: int, request: Request, run: Optional[int] = None, sort: str = "url", desc: bool = False,
+                    limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), me=Depends(current_member)):
+    """Every page of a check, filterable: status, page type, indexable, canonical, depth, open fixes, new / gone / changed."""
+    from qc6.inventory import checks_with_pages, list_pages
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    f = {k: request.query_params.get(k) for k in INVENTORY_FILTERS if request.query_params.get(k)}
+    try:
+        out = await list_pages(pool, site_id, rid, f, sort, desc, limit, offset)
+    except ValueError:
+        raise problem(400, "Check the filters", "template and depth_min are numbers.")
+    out["checks"] = await checks_with_pages(pool, site_id)
+    return out
+
+
+@app.get("/api/v2/sites/{site_id}/inventory.csv")
+async def inventory_csv(site_id: int, request: Request, run: Optional[int] = None, me=Depends(current_member)):
+    from qc6.inventory import csv_rows
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    f = {k: request.query_params.get(k) for k in INVENTORY_FILTERS if request.query_params.get(k)}
+    name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
+    return StreamingResponse(csv_rows(pool, site_id, rid, f), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
+
+
+@app.get("/api/v2/sites/{site_id}/compare")
+async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member)):
+    """Two checks side by side: pages added / gone / changed status, fixes new / confirmed / back again, score."""
+    from qc6.inventory import compare
+    await site_for(site_id, me)
+    try:
+        return await compare(await get_pool(), site_id, a, b)
+    except ValueError as e:
+        raise problem(400, str(e))
+    except LookupError as e:
+        raise problem(404, str(e))
+
+
 @app.get("/api/v2/runs/{run_id}/facts/{dataset}")
 async def facts_query(run_id: int, dataset: str, filter: str = "", q: str = Query("", max_length=300), page_url: str = "",
                       sort: str = "page", desc: bool = False, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),

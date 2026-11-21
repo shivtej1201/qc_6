@@ -280,3 +280,15 @@ def test_scope_and_staging_settings(world, migrated, monkeypatch):
     assert any('"staging": "changed"' in d for d in logs) and not any("Hunter2!" in d for d in logs)
     c.patch(f"/api/v2/sites/{sid}", json={"scope": {"include": [], "exclude": []}, "staging": {"clear": True}}, headers=H)
     assert "staging" not in c.get(f"/api/v2/sites/{sid}", headers=H).json()["settings"]
+
+
+def test_inventory_endpoints(world):
+    c, sid = world["c"], world["site"]
+    d = c.get(f"/api/v2/sites/{sid}/inventory?status=2xx&sort=fixes&desc=true", headers=H).json()
+    assert d["run_id"] == world["run"] and d["total"] > 0 and d["checks"][0]["id"] == world["run"]
+    r = c.get(f"/api/v2/sites/{sid}/inventory.csv", headers=H)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv") and "attachment" in r.headers["content-disposition"]
+    assert r.text.count("\n") == c.get(f"/api/v2/sites/{sid}/inventory", headers=H).json()["total"] + 1
+    assert c.get(f"/api/v2/sites/{sid}/inventory?run=999999", headers=H).status_code == 404
+    assert c.get(f"/api/v2/sites/{sid}/compare?a={world['run']}&b={world['run']}", headers=H).status_code == 400
+    assert c.get(f"/api/v2/sites/{world['other_site']}/inventory", headers=H).status_code == 404

@@ -60,6 +60,19 @@ export interface Insights {
   regressions: { items: { id: number; title: string; severity: Severity; pages_affected: number; at: string }[]; basis: string };
 }
 
+export interface InvPage { url: string; http_status: number | null; title: string | null; template_name: string | null; noindex?: boolean;
+  canonical?: string; canonical_url?: string; depth?: number | null; inlinks?: number | null; authority?: number | null; words?: number | null;
+  open_fixes?: number; change: string | null; previous_status: number | null }
+export interface Inventory { run_id: number; previous_run_id: number | null; total: number; pages: InvPage[];
+  changes: { new?: number; status_changed?: number; gone?: number }; checks: { id: number; finished_at: string; pages: number | null; imported: string | null }[] }
+export interface Compare { a: { id: number; finished_at: string }; b: { id: number; finished_at: string };
+  pages: { before: number; after: number; added: number; removed: number; status_changed: number };
+  samples: { added: { url: string; http_status: number }[]; removed: { url: string; http_status: number }[];
+    status_changed: { url: string; before: number | null; after: number | null }[] };
+  fixes: Record<"new" | "confirmed" | "back", { count: number; items: { id: number; title: string; severity: Severity; pages: number }[] }>;
+  score: { before: number; after: number; change: number; dimensions: Record<string, number> } | null;
+  page_types: { name: string; before: number; after: number }[] }
+
 export const api = {
   me: () => req<{ member: Member; workspace: { id: number; name: string } }>("GET", "/api/v2/me"),
   members: () => req<{ members: Member[] }>("GET", "/api/v2/members"),
@@ -76,6 +89,10 @@ export const api = {
   run: (id: number) => req<{ run: Run; recent_visits: any[]; found: { id: number; title: string; severity: Severity; pages: number }[] }>("GET", `/api/v2/runs/${id}`),
   startRun: (sid: number, kind: string, options: Record<string, unknown> = {}) =>
     req<{ run_id: number }>("POST", `/api/v2/sites/${sid}/runs`, { kind, options }),
+  inventory: (sid: number, params: Record<string, string>) =>
+    req<Inventory>("GET", `/api/v2/sites/${sid}/inventory?${new URLSearchParams(params)}`),
+  inventoryCsv: (sid: number, params: Record<string, string>) => `/api/v2/sites/${sid}/inventory.csv?${new URLSearchParams(params)}`,
+  compare: (sid: number, a: number, b: number) => req<Compare>("GET", `/api/v2/sites/${sid}/compare?a=${a}&b=${b}`),
   templates: (sid: number) => req<{ templates: { id: number; name: string; path_pattern: string; page_count: number; visits: number; open_fixes: number }[] }>("GET", `/api/v2/sites/${sid}/templates`),
   pages: (sid: number, q: string) => req<{ pages: { url: string; http_status: number; title: string; template_name: string }[] }>("GET", `/api/v2/sites/${sid}/pages?${new URLSearchParams({ q })}`),
   page: (sid: number, url: string) => req<{ page: any; visit: any; fixes: { id: number; title: string; severity: Severity; status: string }[] }>("GET", `/api/v2/sites/${sid}/page?${new URLSearchParams({ url })}`),
