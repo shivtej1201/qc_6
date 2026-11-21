@@ -57,6 +57,30 @@ async def security_headers(request: Request, call_next):
     return resp
 
 
+ETAG_SKIP = ("/api/v2/stream", "/api/v2/objects/", "/metrics")
+
+
+@app.middleware("http")
+async def etag(request: Request, call_next):
+    """ETag on JSON reads (blueprint §11): an API client that sends If-None-Match gets 304 when nothing changed.
+    Cache-Control stays no-store, so browsers never keep workspace data on disk."""
+    resp = await call_next(request)
+    path = request.url.path
+    if (request.method != "GET" or not path.startswith("/api/") or resp.status_code != 200 or path.startswith(ETAG_SKIP)
+            or not resp.headers.get("content-type", "").startswith("application/json")):
+        return resp
+    body = b"".join([chunk async for chunk in resp.body_iterator])
+    import hashlib
+    tag = '"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
+    headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
+    headers["ETag"] = tag
+    from fastapi import Response
+    inm = request.headers.get("if-none-match", "")
+    if tag in [t.strip() for t in inm.split(",")]:
+        return Response(status_code=304, headers={k: v for k, v in headers.items() if k.lower() != "content-type"})
+    return Response(body, status_code=200, headers=headers, media_type="application/json")
+
+
 def problem(status: int, title: str, detail: str = "") -> HTTPException:
     return HTTPException(status, {"title": title, "detail": detail})
 
@@ -195,6 +219,10 @@ class SitePatch(BaseModel):
     sitemap: Optional[str] = Field(default=None, max_length=500)
     alerts: Optional[Dict[str, Any]] = None
     tickets: Optional[Dict[str, Any]] = None
+    preset: Optional[str] = None
+    max_pages: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    read_timeout: Optional[float] = Field(default=None, ge=2, le=120)
+    max_retries: Optional[int] = Field(default=None, ge=0, le=5)
 
 
 @app.patch("/api/v2/sites/{site_id}")
@@ -233,7 +261,14 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
             st["tickets"] = clean_config({**(st.get("tickets") or {}), **body.tickets})
         except ValueError as e:
             raise problem(400, "Check the ticket settings", str(e))
-    for k in ("rate_rps", "visitors", "mobile_share", "consent", "check_schedule", "sitemap"):
+    if body.preset is not None:
+        from qc6.presets import PRESETS
+        if body.preset not in PRESETS:
+            raise problem(400, "Pick one of the speed presets", ", ".join(PRESETS))
+        st["preset"] = body.preset
+        if body.rate_rps is None:                          # choosing a preset sets its speed
+            st["rate_rps"] = PRESETS[body.preset]["target_rps"]
+    for k in ("rate_rps", "visitors", "mobile_share", "consent", "check_schedule", "sitemap", "max_pages", "read_timeout", "max_retries"):
         v = getattr(body, k)
         if v is not None:
             st[k] = v
@@ -261,6 +296,8 @@ async def test_alert(site_id: int, me=Depends(current_member)):
                 sent.append({"channel": ch, "ok": False, "error": type(e).__name__})
     if not sent:
         raise problem(400, "No alert channel set", "Add a Slack or Teams webhook first.")
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "alerts.test", f"site:{site_id}",
+                       {"sent": [x["channel"] for x in sent]})
     return {"sent": sent}
 
 
@@ -338,6 +375,26 @@ async def today(site_id: int, me=Depends(current_member)):
             "trend": [{"score": r["score"], "at": r["created_at"]} for r in reversed(scores)],
             "checked": _ago_sentence(done), "last_run": dict(last) if last else None, "fixes": dict(counts),
             "site": public_site(s)}
+
+
+@app.get("/api/v2/sites/{site_id}/insights")
+async def insights(site_id: int, runs: int = Query(12, ge=2, le=60), me=Depends(current_member)):
+    from qc6.insights import site_insights
+    await site_for(site_id, me)
+    return await site_insights(await get_pool(), site_id, runs)
+
+
+@app.get("/api/v2/sites/{site_id}/presets")
+async def presets(site_id: int, me=Depends(current_member)):
+    """V5 speed presets with how long the page check would take for this site (from its last check's size)."""
+    from qc6.presets import DEFAULT_PRESET, PRESETS, estimate
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed'
+                                   AND summary ? 'pages' ORDER BY id DESC LIMIT 1""", site_id)
+    st = s["settings"] or {}
+    return {"current": st.get("preset", DEFAULT_PRESET), "rate_rps": st.get("rate_rps"), "pages": pages,
+            "presets": [{"id": k, **v, "estimate": estimate(pages, v["target_rps"]) if pages else None} for k, v in PRESETS.items()]}
 
 
 # ------------------------------------------------------------------ fixes
@@ -467,7 +524,7 @@ class RunIn(BaseModel):
 async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     can_edit(me)
     await site_for(site_id, me)
-    allowed = {"urls", "sitemap", "max_pages", "rate_rps", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
+    allowed = {"urls", "sitemap", "max_pages", "rate_rps", "preset", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
     opts = {k: v for k, v in body.options.items() if k in allowed}
     if "urls" in opts and (not isinstance(opts["urls"], list) or len(opts["urls"]) > 300_000):
         raise problem(400, "urls must be a list of at most 3,00,000 addresses")
@@ -677,6 +734,7 @@ async def save_journey(site_id: int, body: JourneyIn, me=Depends(current_member)
         jid = await services.save_journey(await get_pool(), site_id, body.yaml)
     except SpecError as e:
         raise problem(400, "The journey can't be saved", str(e))
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "journey.save", f"journey:{jid}", {"site_id": site_id})
     return {"journey_id": jid}
 
 
@@ -753,7 +811,26 @@ async def integration_run(iid: str, body: IntegrationRun, me=Depends(current_mem
     from qcv5.integrations import BY_ID, run_integration
     if iid not in BY_ID:
         raise problem(404, "Unknown integration")
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "integration.run", f"integration:{iid}", {"url": body.url})
     return await run_integration(iid, body.url, **{k: v for k, v in body.params.items() if isinstance(v, (str, int, float, bool, list))})
+
+
+# ------------------------------------------------------------------ metrics (blueprint §13)
+@app.get("/metrics", include_in_schema=False)
+async def metrics_(request: Request):
+    """Prometheus text format. With QC6_METRICS_TOKEN set, scrapers send `Authorization: Bearer <token>`;
+    without it, only this machine may read it (no workspace data beyond counts is exposed either way)."""
+    import hmac
+    from fastapi.responses import PlainTextResponse
+    from qc6 import metrics
+    token = os.environ.get("QC6_METRICS_TOKEN", "")
+    if token:
+        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(given.encode(), token.encode()):
+            raise problem(401, "Metrics need the scrape token")
+    elif (request.client.host if request.client else "") not in ("127.0.0.1", "::1", "testclient"):
+        raise problem(403, "Metrics are only served to this machine", "Set QC6_METRICS_TOKEN to let a remote Prometheus scrape them.")
+    return PlainTextResponse(await metrics.render(await get_pool()), media_type="text/plain; version=0.0.4")
 
 
 # ------------------------------------------------------------------ web app

@@ -34,7 +34,7 @@ export interface Fix { id: number; rule: string; severity: Severity; dimension: 
   texts: { title: string; why: string; fix: string; verify: string }; example_url?: string | null; source: string;
   ticket_url?: string | null; updated_at: string }
 export interface Run { id: number; kind: string; status: string; progress: Record<string, any>; summary: Record<string, any>;
-  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null }
+  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null; options?: Record<string, any> }
 export interface Member { id: number; name: string; email: string; role: string }
 export interface TodayCard { kind: string; title: string; text: string; action: string; fix_id?: number; journey_run_id?: number }
 export interface Today { greeting: string; lede: string; cards: TodayCard[]; score: number | null; trend: { score: number; at: string }[];
@@ -43,12 +43,30 @@ export interface Step { idx: number; action: string; label: string; status: stri
 export interface Journey { id: number; name: string; device: string; enabled: boolean; source_yaml: string;
   recent: { id: number; status: string; failed_step: number | null; duration_ms: number; started_at: string }[] }
 
+export interface Insights {
+  runs_considered: number; last_run_id: number | null; headlines: string[];
+  score: { points: { run_id: number; at: string; score: number; dimensions: Record<string, number> }[]; dimension_change?: Record<string, number>; basis: string };
+  fix_flow: { runs: { run_id: number; at: string; new: number; verified: number; regressed: number }[];
+    totals_after_first?: { new: number; verified: number; regressed: number }; basis: string };
+  backlog: { by_severity: { severity: Severity; open: number; pages: number }[]; by_status: Record<string, number>; unowned: number; basis: string };
+  time_to_verify: { median_days: Record<string, number>; median_hours?: Record<string, number>; count: number; basis: string };
+  page_types: { items: { template_id: number; name: string; pages: number; open_fixes: number; worst: Severity | null; visited: number; trouble: number }[]; basis: string };
+  vitals: { items: { template_id: number; name: string; device: string; visits: number; lcp: number | null; cls: number | null; inp: number | null;
+    ttfb: number | null; rating: Record<string, string | null> }[]; basis: string };
+  visits: { by_status: Record<string, number>; total?: number; reasons: { reason: string; visits: number }[]; basis: string };
+  crawl: { status_mix: Record<string, number>; pages_by_run: { run_id: number; at: string; pages: number | null; minutes: number | null }[]; basis: string };
+  owners: { items: { id: number; name: string; open: number; waiting: number; verified_30d: number }[]; basis: string };
+  journeys: { items: { id: number; name: string; runs: number; passed: number; median_s: number | null }[]; basis: string };
+  regressions: { items: { id: number; title: string; severity: Severity; pages_affected: number; at: string }[]; basis: string };
+}
+
 export const api = {
   me: () => req<{ member: Member; workspace: { id: number; name: string } }>("GET", "/api/v2/me"),
   members: () => req<{ members: Member[] }>("GET", "/api/v2/members"),
   sites: () => req<{ sites: Site[] }>("GET", "/api/v2/sites"),
   createSite: (b: { name: string; base_url: string }) => req<Site>("POST", "/api/v2/sites", b),
   today: (sid: number) => req<Today>("GET", `/api/v2/sites/${sid}/today`),
+  insights: (sid: number, runs = 12) => req<Insights>("GET", `/api/v2/sites/${sid}/insights?runs=${runs}`),
   fixes: (sid: number, view: string, q: string) =>
     req<{ fixes: Fix[]; counts: Record<string, number> }>("GET", `/api/v2/sites/${sid}/fixes?${new URLSearchParams({ view, q })}`),
   fix: (id: number) => req<{ fix: Fix; pages: string[]; examples: { page_url: string; screenshot: string }[];
@@ -76,6 +94,8 @@ export const api = {
     req<{ total: number; rows: any[]; summary: { n_rows?: number; rows?: number; n_unique?: number; n_broken?: number; n_redirects?: number } }>(
       "GET", `/api/v2/runs/${runId}/facts/${dataset}?${new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))}`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
+  presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
+    description: string; target_rps: number; max_rps: number; estimate: { minutes: number; pages: number } | null }[] }>("GET", `/api/v2/sites/${sid}/presets`),
   patchSite: (sid: number, b: Record<string, unknown>) => req<Site>("PATCH", `/api/v2/sites/${sid}`, b),
   site: (sid: number) => req<Site>("GET", `/api/v2/sites/${sid}`),
   testAlert: (sid: number) => req<{ sent: { channel: string; ok: boolean; status?: number; error?: string }[] }>("POST", `/api/v2/sites/${sid}/alerts/test`),

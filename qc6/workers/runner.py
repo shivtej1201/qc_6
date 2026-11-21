@@ -29,8 +29,10 @@ RETURNING id"""
 
 
 async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]:
+    from qc6.presets import max_pages
+    limit = max_pages(site.get("settings") or {}, opts)
     if opts.get("urls"):
-        return list(dict.fromkeys(opts["urls"]))[: int(opts.get("max_pages", 300_000))]
+        return list(dict.fromkeys(opts["urls"]))[:limit]
     from qcv5.crawler.sitemap_extractor import SitemapExtractor
     sitemaps = [x for x in (opts.get("sitemap"), (site.get("settings") or {}).get("sitemap")) if x]
     from qc6.workers.coverage import identity_headers
@@ -46,7 +48,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
             pass
         sitemaps = sitemaps or [site["base_url"] + "/sitemap.xml"]
     # Honest identity on every sitemap request, and no "retry in a disguised browser" when the CDN says no (blueprint §1.1)
-    ex = SitemapExtractor(allow_local=settings.allow_private_targets, max_urls=int(opts.get("max_pages", 300_000)),
+    ex = SitemapExtractor(allow_local=settings.allow_private_targets, max_urls=limit,
                           use_browser_fallback=False)
     ex.client.headers.update(headers)
     ex.robots_manager.user_agent = headers["User-Agent"]
@@ -59,7 +61,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
             raise RuntimeError(
                 f"{site['primary_host']} refused to show QC its sitemap (HTTP 403 from the CDN). QC doesn't try to get round a "
                 "block. Open Crawler access, copy the allow rule for the X-QC-Audit header, and ask your CDN team to add it.")
-    return [u["normalized_url"] for u in res.get("unique_urls", [])][: int(opts.get("max_pages", 300_000))]
+    return [u["normalized_url"] for u in res.get("unique_urls", [])][:limit]
 
 
 async def journey_stage(pool, browser, run_id: int, site: Dict[str, Any], fast: bool = False,
@@ -69,7 +71,8 @@ async def journey_stage(pool, browser, run_id: int, site: Dict[str, Any], fast: 
     rows = await pool.fetch("SELECT id, name, spec FROM journeys WHERE site_id = $1 AND enabled AND ($2::bigint[] IS NULL OR id = ANY($2::bigint[])) "
                             "ORDER BY id", site["id"], ids)
     from qc6.crawl.budget import HostBudget
-    rate = float((site.get("settings") or {}).get("rate_rps", 12))
+    from qc6.presets import engine_options
+    rate = engine_options(site.get("settings") or {}, opts or {})["target_rps"]
     await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(2.0, rate))
     budget = HostBudget(pool, site["primary_host"], share=0.1)       # journeys take a small share of the site's rate
     runner = JourneyRunner(browser, site, settings.objects_dir, fast=fast, budget=budget)

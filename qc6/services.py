@@ -35,7 +35,7 @@ async def create_site(pool, workspace_id: int, name: str, base_url: str, setting
         raise NotAllowed("Enter the site's address, for example https://www.example.com")
     base = f"{u.scheme}://{u.netloc}"
     host = (u.hostname or "").lower() + (f":{u.port}" if u.port else "")
-    defaults = {"rate_rps": 12, "visitors": 6, "mobile_share": 0.6, "consent": "accept", "locale": "en-IN",
+    defaults = {"preset": "target", "rate_rps": 12, "visitors": 6, "mobile_share": 0.6, "consent": "accept", "locale": "en-IN",
                 "timezone": "Asia/Kolkata"}
     sid = await pool.fetchval("INSERT INTO sites (workspace_id, name, base_url, primary_host, settings, access_token) "
                               "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", workspace_id, name, base, u.hostname.lower(),

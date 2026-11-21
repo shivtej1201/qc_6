@@ -136,3 +136,119 @@ def test_links_explorer(world):
     assert c.get(f"/api/v2/runs/{world['run']}/facts/links?filter=bogus", headers=H).status_code == 400
     csvr = c.get(f"/api/v2/runs/{world['run']}/export/links.csv?filter=broken", headers=H)
     assert csvr.status_code == 200 and csvr.text.count("\n") == 13
+
+
+def test_insights(world):
+    c = world["c"]
+    r = c.get(f"/api/v2/sites/{world['site']}/insights", headers=H)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["runs_considered"] == 1 and d["last_run_id"] == world["run"]
+    assert len(d["score"]["points"]) == 1 and d["score"]["points"][0]["score"] is not None
+    flow = d["fix_flow"]["runs"]
+    assert flow[0]["new"] > 0 and flow[0]["verified"] == 0                       # first check: everything is new
+    open_total = sum(s["open"] for s in d["backlog"]["by_severity"])
+    assert open_total == sum(v for k, v in d["backlog"]["by_status"].items() if k in ("open", "in_progress", "fixed_pending_check"))
+    assert d["page_types"]["items"] and all("open_fixes" in t for t in d["page_types"]["items"])
+    assert sum(d["crawl"]["status_mix"].values()) > 0
+    assert d["visits"]["total"] == sum(d["visits"]["by_status"].values()) > 0
+    assert any(v["lcp"] is not None for v in d["vitals"]["items"])
+    assert d["journeys"]["items"][0]["runs"] == 1
+    assert d["time_to_verify"]["count"] == 0 and "no fix" in d["time_to_verify"]["basis"]
+    assert all(isinstance(h, str) and h.endswith(".") for h in d["headlines"])
+    assert c.get(f"/api/v2/sites/{world['other_site']}/insights", headers=H).status_code == 404   # another workspace's site
+
+
+def test_presets_and_v5_settings(world):
+    c = world["c"]
+    p = c.get(f"/api/v2/sites/{world['site']}/presets", headers=H).json()
+    assert [x["id"] for x in p["presets"]] == ["conservative", "target", "max_tested", "enterprise_150k"]
+    assert p["pages"] and all(x["estimate"]["minutes"] > 0 for x in p["presets"])
+    r = c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "conservative", "max_pages": 5000, "read_timeout": 20, "max_retries": 1},
+                headers=H)
+    st = r.json()["settings"]
+    assert (st["preset"], st["rate_rps"], st["max_pages"], st["read_timeout"], st["max_retries"]) == ("conservative", 8.0, 5000, 20, 1)
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "warp"}, headers=H).status_code == 400
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"max_pages": 0}, headers=H).status_code == 422
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "target"}, headers={"X-QC-User": "view@api.test"}).status_code == 403
+    c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "target", "max_pages": 300000}, headers=H)   # put back for later tests
+
+
+def test_site_page_type_names_the_template(world):
+    """Article pages carry data-pageType="b2c-blog": V5's classifier reads it and V6 names the page type after it."""
+    c = world["c"]
+    names = [t["name"] for t in c.get(f"/api/v2/sites/{world['site']}/templates", headers=H).json()["templates"]]
+    assert "B2C BLOG pages" in names and "Product pages" in names     # no data-pageType -> named from the URL
+
+
+def test_v5_importer(world, migrated):
+    """A V5 audit database (same engine, same tables) becomes a V6 check with fixes; re-import is skipped; source untouched."""
+    import hashlib
+    from qc6.import_v5 import import_all, list_jobs
+    db = os.path.join(settings.data_dir, "runs", str(world["run"]), "coverage.db")
+    before = hashlib.sha256(open(db, "rb").read()).hexdigest()
+    jobs = list_jobs(db)
+    assert [j["job_id"] for j in jobs] == [f"RUN{world['run']}"] and jobs[0]["status"] == "COMPLETED" and jobs[0]["issues"] > 0
+
+    async def go():
+        import asyncpg
+        from qc6.db.pool import _init
+        pool = await asyncpg.create_pool(migrated, min_size=1, max_size=2, init=_init)
+        ws = await pool.fetchval("SELECT workspace_id FROM sites WHERE id = $1", world["site"])
+        sid = await services.create_site(pool, ws, "Imported from V5", "http://localhost:1")
+        first = await import_all(pool, db, sid)
+        again = await import_all(pool, db, sid)
+        run = await pool.fetchrow("SELECT * FROM runs WHERE id = $1", first[0]["run_id"])
+        n_fix = await pool.fetchval("SELECT count(*) FROM fixes WHERE site_id = $1", sid)
+        await pool.close()
+        return sid, first, again, run, n_fix
+    sid, first, again, run, n_fix = asyncio.run(go())
+    assert run["status"] == "completed" and run["options"]["imported_from"] == "QC V5"
+    assert run["summary"]["template_basis"] == "url_pattern" and run["summary"]["pages"] == jobs[0]["source_pages_total"]
+    assert first[0]["fixes"] == n_fix > 0
+    assert "already imported" in again[0]["skipped"]
+    assert hashlib.sha256(open(db, "rb").read()).hexdigest() == before
+    names = {t["name"] for t in world["c"].get(f"/api/v2/sites/{sid}/templates", headers=H).json()["templates"]}
+    assert {"Product pages", "B2C BLOG pages"} <= names                  # URL pattern + the site's data-pageType label
+
+
+def test_metrics(world, monkeypatch):
+    c = world["c"]
+    r = c.get("/metrics")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+    t = r.text
+    for name in ("qc6_runs_queued", "qc6_oldest_queued_job_seconds", "qc6_visit_failure_ratio_24h", "qc6_host_paused",
+                 "qc6_fixes_open", "qc6_disk_free_bytes", "qc6_visits_24h"):
+        assert f"# TYPE {name} gauge" in t
+    assert 'qc6_runs_24h{status="completed"}' in t
+    monkeypatch.setenv("QC6_METRICS_TOKEN", "s3cret")
+    assert c.get("/metrics").status_code == 401
+    assert c.get("/metrics", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_etag_revalidation(world):
+    c = world["c"]
+    r = c.get(f"/api/v2/sites/{world['site']}/insights", headers=H)
+    tag = r.headers["etag"]
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-frame-options"] == "DENY"
+    again = c.get(f"/api/v2/sites/{world['site']}/insights", headers={**H, "If-None-Match": tag})
+    assert again.status_code == 304 and again.content == b""
+    assert c.get(f"/api/v2/sites/{world['site']}/insights", headers={**H, "If-None-Match": '"stale"'}).status_code == 200
+
+
+def test_every_write_is_audited(world, migrated):
+    c = world["c"]
+    sid = world["site"]
+    c.post(f"/api/v2/sites/{sid}/journeys", json={"yaml": JOURNEY.replace("Apply flow", "Audited flow")}, headers=H)
+    c.patch(f"/api/v2/sites/{sid}", json={"visitors": 3}, headers=H)
+
+    async def actions():
+        import asyncpg
+        conn = await asyncpg.connect(migrated)
+        rows = await conn.fetch("SELECT action, actor_id FROM audit_log ORDER BY id")
+        await conn.close()
+        return rows
+    rows = asyncio.run(actions())
+    acts = {r["action"] for r in rows}
+    assert {"site.create", "run.start", "journey.save", "site.update", "fix.update"} <= acts
+    assert all(r["actor_id"] for r in rows if r["action"] in ("journey.save", "site.update"))

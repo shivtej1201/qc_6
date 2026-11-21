@@ -151,7 +151,8 @@ async def run_visit_stage(pool, browser, run_id: int, site: Dict[str, Any], opts
     already = {(r["page_url"], r["device"]) for r in await pool.fetch(
         "SELECT page_url, device FROM visits WHERE run_id = $1 AND status IN ('ok','failed')", run_id)}
     targets = [t for t in targets if (t.url, t.device) not in already]      # resume: skip pages already visited
-    rate = float(opts.get("rate_rps", site["settings"].get("rate_rps", 12)))
+    from qc6.presets import engine_options
+    rate = engine_options(site.get("settings") or {}, opts)["target_rps"]
     await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(2.0, rate))
     budget = HostBudget(pool, site["primary_host"], share=settings.visit_share)
     done = {"n": 0}
