@@ -213,7 +213,7 @@ function ScoreLine({ points }: { points: Insights["score"]["points"] }) {
   );
 }
 
-function FlowBars({ runs }: { runs: Insights["fix_flow"]["runs"] }) {
+export function FlowBars({ runs }: { runs: Insights["fix_flow"]["runs"] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (!runs.length) return <p className="empty">No checks yet.</p>;
   const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;

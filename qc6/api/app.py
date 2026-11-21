@@ -400,7 +400,24 @@ async def today(site_id: int, me=Depends(current_member)):
                 (f"{n} thing{'s' if n != 1 else ''} need{'s' if n == 1 else ''} you." if n else "Nothing needs you right now."))
     else:
         lede = "Run the first check to see how the site is doing."
-    return {"greeting": f"Hello, {first}" if first else "Hello", "lede": lede, "cards": cards[:5],
+    sev = {r["severity"]: r["n"] for r in await pool.fetch(
+        "SELECT severity, count(*) AS n FROM fixes WHERE site_id = $1 AND status IN ('open','in_progress') GROUP BY severity", site_id)}
+    jr = await pool.fetchrow("""SELECT count(*) AS total, count(*) FILTER (WHERE jr.status = 'passed') AS passed FROM journeys j
+                                JOIN LATERAL (SELECT status FROM journey_runs WHERE journey_id = j.id ORDER BY id DESC LIMIT 1) jr ON true
+                                WHERE j.site_id = $1 AND j.enabled""", site_id)
+    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 8""", site_id)
+    ev = {(r["run_id"], r["kind"]): r["n"] for r in await pool.fetch(
+        """SELECT e.run_id, e.kind, count(DISTINCT e.fix_id) AS n FROM fix_events e JOIN fixes f ON f.id = e.fix_id
+           WHERE f.site_id = $1 AND e.run_id = ANY($2::bigint[]) AND e.kind IN ('found','verified','regressed') GROUP BY 1, 2""",
+        site_id, [r["id"] for r in flow_runs])}
+    flow = [{"run_id": r["id"], "at": r["finished_at"], "new": ev.get((r["id"], "found"), 0), "verified": ev.get((r["id"], "verified"), 0),
+             "regressed": ev.get((r["id"], "regressed"), 0)} for r in reversed(flow_runs)]
+    summ = (done["summary"] if done else None) or {}
+    kpis = {"open_by_severity": {k: sev.get(k, 0) for k in ("critical", "high", "medium", "low")},
+            "pages": summ.get("pages"), "visited": summ.get("visited"),
+            "journeys": {"total": jr["total"], "passed": jr["passed"]} if jr else {"total": 0, "passed": 0},
+            "score_change": round(scores[0]["score"] - scores[1]["score"], 1) if len(scores) > 1 else None}
+    return {"greeting": f"Hello, {first}" if first else "Hello", "lede": lede, "cards": cards[:5], "kpis": kpis, "flow": flow,
             "score": scores[0]["score"] if scores else None,
             "trend": [{"score": r["score"], "at": r["created_at"]} for r in reversed(scores)],
             "checked": _ago_sentence(done), "last_run": dict(last) if last else None, "fixes": dict(counts),

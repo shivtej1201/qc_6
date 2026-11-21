@@ -66,6 +66,12 @@ function App() {
   const [palette, setPalette] = useState(false);
   const [menu, setMenu] = useState(false);
   useEffect(() => { setMenu(false); }, [route.view, route.params.toString()]);
+  useEffect(() => {                                       // a modal open: everything behind it is inert
+    const phoneMenu = menu && window.matchMedia("(max-width: 900px)").matches;
+    const behind = palette ? ["main", ".rail", ".topbar", ".tabbar", ".skip"] : phoneMenu ? ["main", ".topbar", ".tabbar", ".skip"] : [];
+    document.querySelectorAll("main, .rail, .topbar, .tabbar, .skip").forEach((el) => el.removeAttribute("inert"));
+    behind.forEach((sel) => document.querySelector(sel)?.setAttribute("inert", ""));
+  }, [palette, menu, route.view]);
   const wasOpen = useRef(false);
   useEffect(() => {                                       // phone menu: focus goes in when it opens, back when it closes
     if (!window.matchMedia("(max-width: 900px)").matches) return;

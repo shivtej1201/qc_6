@@ -33,7 +33,7 @@ export function LinksView({ site, params }: { site: Site; params: URLSearchParam
         <div>
           <h1>{dataset === "links" ? "Links" : "Images"}</h1>
           <p className="lede">Every {dataset === "links" ? "link" : "image"} on every page from the last complete check
-            {s ? <> — <b>{count(s.n_rows)}</b> placements of <b>{count(s.n_unique)}</b> different addresses, <b>{count(s.n_broken)}</b> broken.</> : "."}</p>
+            {s ? <> — <b>{count(s.rows)}</b> placements of <b>{count(s.unique_urls)}</b> different addresses, <b>{count(s.broken)}</b> broken.</> : "."}</p>
         </div>
         <div className="seg" role="group" aria-label="Show">
           <button aria-pressed={dataset === "links"} onClick={() => go("links", { d: "links" })}>Links</button>

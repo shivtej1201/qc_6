@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Site } from "./api";
 import { go } from "./main";
 import { Icon, Sev } from "./ui";
@@ -11,10 +11,17 @@ type Hit = { key: string; kind: "screen" | "fix" | "page"; label: string; sub?: 
 
 export function Palette({ site, screens, onClose }: { site?: Site; screens: Screen[]; onClose: () => void }) {
   const [q, setQ] = useState("");
-  const [hits, setHits] = useState<Hit[]>([]);
+  const [remote, setRemote] = useState<{ q: string; hits: Hit[] }>({ q: "", hits: [] });
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
+  const text = q.trim().toLowerCase();
+  // screens are matched while typing (no wait), so Enter right after typing opens what's shown; fixes and pages follow
+  const hits: Hit[] = useMemo(() => [
+    ...screens.filter((s) => !text || s.label.toLowerCase().includes(text) || s.words.includes(text))
+      .map((s) => ({ key: `s-${s.view}`, kind: "screen" as const, label: s.label, icon: s.icon, run: () => go(s.view) })),
+    ...(remote.q === text ? remote.hits : []),
+  ], [text, remote, screens]);
 
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
@@ -22,13 +29,8 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
     return () => prev?.focus?.();
   }, []);
 
+  useEffect(() => { setActive(0); }, [text]);
   useEffect(() => {
-    const text = q.trim().toLowerCase();
-    const scr: Hit[] = screens
-      .filter((s) => !text || s.label.toLowerCase().includes(text) || s.words.includes(text))
-      .map((s) => ({ key: `s-${s.view}`, kind: "screen", label: s.label, icon: s.icon, run: () => go(s.view) }));
-    setHits(scr);
-    setActive(0);
     if (!site || text.length < 2) return;
     let live = true;
     const t = window.setTimeout(async () => {
@@ -37,16 +39,15 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
         api.pages(site.id, text).catch(() => null),
       ]);
       if (!live) return;
-      const more: Hit[] = [
+      setRemote({ q: text, hits: [
         ...(fx?.fixes || []).slice(0, 5).map((f) => ({ key: `f-${f.id}`, kind: "fix" as const, label: f.title, sev: f.severity,
           sub: f.template_name || "Site-wide", run: () => go("fixes", { fix: f.id }) })),
         ...(pg?.pages || []).slice(0, 6).map((p) => ({ key: `p-${p.url}`, kind: "page" as const, label: path(p.url),
           sub: p.title || p.template_name || "", run: () => go("page", { url: p.url }) })),
-      ];
-      setHits([...scr, ...more]);
+      ] });
     }, 180);
     return () => { live = false; window.clearTimeout(t); };
-  }, [q, site?.id]);
+  }, [text, site?.id]);
 
   useEffect(() => {
     list.current?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });

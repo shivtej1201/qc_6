@@ -58,6 +58,15 @@ def app_url(migrated, tmp_path_factory):
     site.close()
 
 
+async def _until_hash(page, prefix: str, tries: int = 50):
+    """Wait for a route change. (wait_for_function evaluates a string, which our CSP rightly forbids.)"""
+    for _ in range(tries):
+        if (await page.evaluate("location.hash")).startswith(prefix):
+            return
+        await page.wait_for_timeout(100)
+    raise AssertionError(f"never reached {prefix}: {await page.evaluate('location.hash')}")
+
+
 async def _axe(page):
     with open(AXE, encoding="utf-8") as f:
         await page.evaluate(f.read() + "\n;window.axe = axe;")      # evaluate, not a <script>: our CSP blocks inline scripts
@@ -127,15 +136,57 @@ def test_ui_end_to_end(app_url):
             await page.wait_for_selector("#fix-title")
             focused = await page.evaluate("document.activeElement && document.activeElement.textContent")
 
+            # quick jump: Ctrl+K, type, arrow down to a fix, Enter opens it
+            await page.goto(f"{app_url}/#/today")
+            await page.wait_for_selector("h1")
+            await page.keyboard.press("Control+k")
+            await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
+            palette_bad = await _axe(page)
+            await page.keyboard.type("pages")
+            await page.wait_for_selector("[role=option]")
+            await page.keyboard.press("Enter")
+            await _until_hash(page, "#/pages")
+            jumped = await page.evaluate("location.hash")
+
+            # phone: menu button opens the slide-in menu with focus inside; every screen fits the width
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await page.goto(f"{app_url}/#/today")
+            await page.wait_for_selector(".kpi")
+            await page.click("button[aria-label='Open the menu']")
+            await page.wait_for_timeout(350)
+            menu_focus = await page.evaluate("document.activeElement && document.activeElement.getAttribute('aria-label')")
+            menu_bad = await _axe(page)
+            await page.click(".rail a[href='#/settings']")
+            await _until_hash(page, "#/settings")
+            menu_closed = False
+            for _ in range(30):                                   # the menu closes right after the route changes
+                menu_closed = await page.evaluate("!document.querySelector('.app').classList.contains('menu-open')")
+                if menu_closed:
+                    break
+                await page.wait_for_timeout(50)
+            phone_overflow = {}
+            for v in SCREENS:
+                await page.goto(f"{app_url}/#/{v}")
+                await page.wait_for_selector("h1")
+                await page.wait_for_timeout(300)
+                ov = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+                if ov > 0:
+                    phone_overflow[v] = ov
+
             # narrow screen: no sideways scrolling
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.goto(f"{app_url}/#/insights")
             await page.wait_for_selector("text=Health over time")
             overflow = await page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
             await b.close()
-        return problems, drawer_bad, errors, focused, overflow
+        return problems, drawer_bad, errors, focused, overflow, (palette_bad, jumped, menu_focus, menu_bad, menu_closed, phone_overflow)
 
-    problems, drawer_bad, errors, focused, overflow = asyncio.run(go())
+    problems, drawer_bad, errors, focused, overflow, nav = asyncio.run(go())
+    palette_bad, jumped, menu_focus, menu_bad, menu_closed, phone_overflow = nav
+    assert palette_bad == [] and menu_bad == [], (palette_bad, menu_bad)
+    assert jumped.startswith("#/pages")
+    assert menu_focus == "Close the menu" and menu_closed
+    assert phone_overflow == {}, phone_overflow
     assert problems == {}, problems
     assert drawer_bad == [], drawer_bad
     # axe tries to fetch() cross-origin stylesheets to read their rules; our CSP (connect-src 'self') rightly blocks

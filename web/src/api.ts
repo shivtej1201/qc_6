@@ -38,7 +38,10 @@ export interface Run { id: number; kind: string; status: string; progress: Recor
 export interface Member { id: number; name: string; email: string; role: string }
 export interface TodayCard { kind: string; title: string; text: string; action: string; fix_id?: number; journey_run_id?: number }
 export interface Today { greeting: string; lede: string; cards: TodayCard[]; score: number | null; trend: { score: number; at: string }[];
-  checked: string; last_run: Run | null; fixes: { open: number; waiting: number; verified: number }; site: Site }
+  checked: string; last_run: Run | null; fixes: { open: number; waiting: number; verified: number }; site: Site;
+  kpis: { open_by_severity: Record<Severity, number>; pages: number | null; visited: number | null;
+    journeys: { total: number; passed: number }; score_change: number | null };
+  flow: { run_id: number; at: string; new: number; verified: number; regressed: number }[] }
 export interface Step { idx: number; action: string; label: string; status: string; detail: string; screenshot?: string | null; duration_ms: number }
 export interface Journey { id: number; name: string; device: string; enabled: boolean; source_yaml: string;
   recent: { id: number; status: string; failed_step: number | null; duration_ms: number; started_at: string }[] }
@@ -123,7 +126,7 @@ export const api = {
   resumeRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/resume`),
   cancelRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/stop`),
   facts: (runId: number, dataset: string, params: Record<string, string | number>) =>
-    req<{ total: number; rows: any[]; summary: { n_rows?: number; rows?: number; n_unique?: number; n_broken?: number; n_redirects?: number } }>(
+    req<{ total: number; rows: any[]; summary: { rows: number; unique_urls: number; broken: number; redirects: number } }>(
       "GET", `/api/v2/runs/${runId}/facts/${dataset}?${new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))}`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
   presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
