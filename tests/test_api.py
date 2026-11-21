@@ -114,7 +114,10 @@ def test_workspace_isolation_and_runs(world):
     c = world["c"]
     assert c.get(f"/api/v2/sites/{world['other_site']}", headers=H).status_code == 404
     assert c.get(f"/api/v2/sites/{world['other_site']}/fixes", headers=H).status_code == 404
-    r = c.post(f"/api/v2/sites/{world['site']}/runs", headers=H, json={"kind": "coverage", "options": {"urls": ["x"]}})
+    base = c.get(f"/api/v2/sites/{world['site']}", headers=H).json()["base_url"]
+    assert c.post(f"/api/v2/sites/{world['site']}/runs", headers=H,
+                  json={"kind": "coverage", "options": {"urls": ["x"]}}).status_code == 400      # not an address of this site
+    r = c.post(f"/api/v2/sites/{world['site']}/runs", headers=H, json={"kind": "coverage", "options": {"urls": [base + "/product/0"]}})
     assert r.status_code == 201
     r2 = c.post(f"/api/v2/sites/{world['site']}/runs", headers=H, json={"kind": "coverage"})
     assert r2.status_code == 409

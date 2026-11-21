@@ -368,7 +368,7 @@ async def today(site_id: int, me=Depends(current_member)):
     s = await site_for(site_id, me)
     pool = await get_pool()
     last = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 1", site_id)
-    done = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 1", site_id)
+    done = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT 1", site_id)
     cards: List[Dict[str, Any]] = []
     for f in await pool.fetch("SELECT * FROM fixes WHERE site_id = $1 AND regressed AND status = 'open' ORDER BY pages_affected DESC LIMIT 3", site_id):
         cards.append({"kind": "regressed", "fix_id": f["id"], "title": f["title"], "text": "It was fixed and verified before; the last check found it again.",
@@ -405,7 +405,7 @@ async def today(site_id: int, me=Depends(current_member)):
     jr = await pool.fetchrow("""SELECT count(*) AS total, count(*) FILTER (WHERE jr.status = 'passed') AS passed FROM journeys j
                                 JOIN LATERAL (SELECT status FROM journey_runs WHERE journey_id = j.id ORDER BY id DESC LIMIT 1) jr ON true
                                 WHERE j.site_id = $1 AND j.enabled""", site_id)
-    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 8""", site_id)
+    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT 8""", site_id)
     ev = {(r["run_id"], r["kind"]): r["n"] for r in await pool.fetch(
         """SELECT e.run_id, e.kind, count(DISTINCT e.fix_id) AS n FROM fix_events e JOIN fixes f ON f.id = e.fix_id
            WHERE f.site_id = $1 AND e.run_id = ANY($2::bigint[]) AND e.kind IN ('found','verified','regressed') GROUP BY 1, 2""",
@@ -437,7 +437,7 @@ async def presets(site_id: int, me=Depends(current_member)):
     from qc6.presets import DEFAULT_PRESET, PRESETS, estimate
     s = await site_for(site_id, me)
     pool = await get_pool()
-    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed'
+    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot')
                                    AND summary ? 'pages' ORDER BY id DESC LIMIT 1""", site_id)
     st = s["settings"] or {}
     return {"current": st.get("preset", DEFAULT_PRESET), "rate_rps": st.get("rate_rps"), "pages": pages,
@@ -573,8 +573,14 @@ async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     await site_for(site_id, me)
     allowed = {"urls", "sitemap", "max_pages", "rate_rps", "preset", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
     opts = {k: v for k, v in body.options.items() if k in allowed}
-    if "urls" in opts and (not isinstance(opts["urls"], list) or len(opts["urls"]) > 300_000):
-        raise problem(400, "urls must be a list of at most 3,00,000 addresses")
+    if "urls" in opts:
+        from qc6.url_lists import ListError, for_site
+        if not isinstance(opts["urls"], list):
+            raise problem(400, "urls must be a list of addresses")
+        try:
+            opts["urls"] = for_site([str(u) for u in opts["urls"]], await site_for(site_id, me))["urls"]
+        except ListError as e:
+            raise problem(400, "Check the addresses", str(e))
     pool = await get_pool()
     try:
         rid = await services.start_run(pool, site_id, body.kind, opts, me["id"])
@@ -583,12 +589,69 @@ async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     return {"run_id": rid}
 
 
+class SpotIn(BaseModel):
+    text: str = Field(max_length=20_000_000)
+    kind: str = "coverage"
+    whole_site: bool = False
+
+
+async def _start_list_check(site_id: int, me, urls: List[str], kind: str, whole_site: bool, source: str, name: str = ""):
+    from qc6.url_lists import ListError, for_site
+    can_edit(me)
+    s = await site_for(site_id, me)
+    if kind not in ("coverage", "full"):
+        raise problem(400, "Pick a page check or a full check")
+    try:
+        got = for_site(urls, s)
+    except ListError as e:
+        raise problem(400, "Check the addresses", str(e))
+    n = len(got["urls"])
+    label = (got["urls"][0] if n == 1 else f"{n:,} pages" + (f" from {name}" if name else ""))
+    opts: Dict[str, Any] = {"urls": got["urls"]}
+    if not whole_site:
+        opts["spot"] = {"label": label, "source": source, "file": name or None, "count": n}
+    pool = await get_pool()
+    try:
+        rid = await services.start_run(pool, site_id, kind, opts, me["id"])
+    except services.NotAllowed as e:
+        raise problem(409, "A check is already running", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "run.start_list", f"run:{rid}", {"source": source, "file": name, "urls": n})
+    return {"run_id": rid, "urls": n, "other_hosts": got["other_hosts"], "other_examples": got["other_examples"],
+            "duplicates": got["duplicates"], "spot": not whole_site, "label": label}
+
+
+@app.post("/api/v2/sites/{site_id}/checks/urls", status_code=201)
+async def check_urls(site_id: int, body: SpotIn, me=Depends(current_member)):
+    """Check one address or a pasted list. A spot check: results of its own, site-wide figures untouched."""
+    from qc6.url_lists import from_text
+    urls = from_text(body.text)
+    return await _start_list_check(site_id, me, urls, body.kind, body.whole_site, "single" if len(urls) == 1 else "list")
+
+
+@app.post("/api/v2/sites/{site_id}/checks/upload", status_code=201)
+async def check_upload(site_id: int, request: Request, me=Depends(current_member)):
+    """Check the URLs in an uploaded sheet (.csv, .tsv, .txt or .xlsx; the URL column or any http(s) cell)."""
+    from qc6.url_lists import ListError, MAX_BYTES, from_upload
+    form = await request.form()
+    f = form.get("file")
+    if f is None or not hasattr(f, "read"):
+        raise problem(400, "Choose a file to upload")
+    data = await f.read(MAX_BYTES + 1)
+    name = os.path.basename(getattr(f, "filename", "") or "list")[:120]
+    try:
+        urls = from_upload(data, name)
+    except ListError as e:
+        raise problem(400, "That file can't be used", str(e))
+    return await _start_list_check(site_id, me, urls, str(form.get("kind") or "coverage"),
+                                   str(form.get("whole_site") or "").lower() in ("1", "true", "on", "yes"), "sheet", name)
+
+
 @app.get("/api/v2/sites/{site_id}/runs")
 async def runs(site_id: int, me=Depends(current_member)):
     await site_for(site_id, me)
     pool = await get_pool()
-    rows = await pool.fetch("SELECT id, kind, status, progress, summary, error, created_at, started_at, finished_at "
-                            "FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 50", site_id)
+    rows = await pool.fetch("SELECT id, kind, status, progress, summary, error, created_at, started_at, finished_at, "
+                            "options->'spot' AS spot FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 50", site_id)
     return {"runs": [dict(r) for r in rows]}
 
 
@@ -685,7 +748,7 @@ async def templates_(site_id: int, me=Depends(current_member)):
         (SELECT COUNT(*) FROM visits v WHERE v.template_id = t.id) AS visits,
         (SELECT COUNT(*) FROM fixes f WHERE f.template_id = t.id AND f.status IN ('open','in_progress')) AS open_fixes
         FROM templates t WHERE t.site_id = $1 AND t.id IN (SELECT DISTINCT template_id FROM pages p JOIN runs r ON r.id = p.run_id
-        WHERE r.site_id = $1 AND r.id = (SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full')))
+        WHERE r.site_id = $1 AND r.id = (SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full') AND NOT (options ? 'spot')))
         ORDER BY t.page_count DESC""", site_id)
     return {"templates": [dict(r) for r in rows]}
 
@@ -709,7 +772,7 @@ async def page(site_id: int, url: str, me=Depends(current_member)):
 async def pages(site_id: int, q: str = "", limit: int = Query(50, le=500), me=Depends(current_member)):
     await site_for(site_id, me)
     pool = await get_pool()
-    rid = await pool.fetchval("SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full')", site_id)
+    rid = await pool.fetchval("SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full') AND NOT (options ? 'spot')", site_id)
     rows = await pool.fetch("""SELECT p.url, p.http_status, p.title, t.name AS template_name FROM pages p LEFT JOIN templates t
         ON t.id = p.template_id WHERE p.run_id = $1 AND ($2 = '' OR p.url ILIKE '%' || $2 || '%' OR p.title ILIKE '%' || $2 || '%')
         ORDER BY p.url LIMIT $3""",
@@ -725,8 +788,8 @@ async def _inventory_run(site_id: int, run: Optional[int], pool) -> int:
     checks = await checks_with_pages(pool, site_id)
     if not checks:
         raise problem(404, "No finished check yet", "Pages appear here after the first check.")
-    if run is None:
-        return checks[0]["id"]
+    if run is None:                                   # the latest check of the whole site, not a spot check
+        return next((c["id"] for c in checks if not c["spot"]), checks[0]["id"])
     if run not in {c["id"] for c in checks}:
         raise problem(404, "That check isn't one of this site's finished checks")
     return run

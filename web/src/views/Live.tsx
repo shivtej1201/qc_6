@@ -91,6 +91,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
     : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked, ${count(run.summary?.visited)} visited in a real browser.`
       : run.status === "failed" ? `This check stopped: ${run.error}` : `This check was ${run.status}.`;
   const imported = run.options?.imported_from === "QC V5";
+  const spot = run.spot || run.options?.spot;
 
   return (
     <div className="view" ref={ref}>
@@ -107,6 +108,8 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
             {STATUS[run.status] || run.status}</span>
         </div>
       </div>
+      {spot && <p className="pill new" style={{ marginBottom: 14 }}>Spot check: {spot.label}{spot.file ? ` (from ${spot.file})` : ""}.
+        Its results are its own; the site's health score and fixes list aren't changed by it.</p>}
       {imported && <p className="pill new" style={{ marginBottom: 14 }}>Imported from QC V5 ({run.options?.v5_name || run.options?.v5_job}).
         V5 kept no page HTML, so page types come from URL patterns; there were no real-browser visits.</p>}
       {live && <div className="progress-line" aria-hidden="true"><i style={{ width: `${(frac * 100).toFixed(1)}%` }} /></div>}

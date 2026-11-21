@@ -14,7 +14,7 @@ SEV_ORDER = ["critical", "high", "medium", "low"]
 async def site_insights(pool, site_id: int, runs: int = 12) -> Dict[str, Any]:
     run_rows = await pool.fetch(
         """SELECT id, kind, status, started_at, finished_at, summary FROM runs
-           WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT $2""", site_id, runs)
+           WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT $2""", site_id, runs)
     run_rows = list(reversed(run_rows))
     run_ids = [r["id"] for r in run_rows]
     last = run_rows[-1]["id"] if run_rows else None

@@ -7,8 +7,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const headers: Record<string, string> = {};
   const user = localStorageGet("qc6-user");
   if (user) headers["X-QC-User"] = user;
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const form = typeof FormData !== "undefined" && body instanceof FormData;
+  if (body !== undefined && !form) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body) });
   const ct = r.headers.get("content-type") || "";
   const data = ct.includes("json") ? await r.json() : await r.text();
   if (!r.ok) {
@@ -34,7 +35,8 @@ export interface Fix { id: number; rule: string; severity: Severity; dimension: 
   texts: { title: string; why: string; fix: string; verify: string }; example_url?: string | null; source: string;
   ticket_url?: string | null; updated_at: string }
 export interface Run { id: number; kind: string; status: string; progress: Record<string, any>; summary: Record<string, any>;
-  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null; options?: Record<string, any> }
+  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null; options?: Record<string, any>;
+  spot?: { label: string; source: string; file: string | null; count: number } | null }
 export interface Member { id: number; name: string; email: string; role: string }
 export interface TodayCard { kind: string; title: string; text: string; action: string; fix_id?: number; journey_run_id?: number }
 export interface Today { greeting: string; lede: string; cards: TodayCard[]; score: number | null; trend: { score: number; at: string }[];
@@ -67,7 +69,7 @@ export interface InvPage { url: string; http_status: number | null; title: strin
   canonical?: string; canonical_url?: string; depth?: number | null; inlinks?: number | null; authority?: number | null; words?: number | null;
   open_fixes?: number; change: string | null; previous_status: number | null }
 export interface Inventory { run_id: number; previous_run_id: number | null; total: number; pages: InvPage[];
-  changes: { new?: number; status_changed?: number; gone?: number }; checks: { id: number; finished_at: string; pages: number | null; imported: string | null }[] }
+  changes: { new?: number; status_changed?: number; gone?: number }; checks: { id: number; finished_at: string; pages: number | null; imported: string | null; spot: string | null }[] }
 export interface Compare { a: { id: number; finished_at: string }; b: { id: number; finished_at: string };
   pages: { before: number; after: number; added: number; removed: number; status_changed: number };
   samples: { added: { url: string; http_status: number }[]; removed: { url: string; http_status: number }[];
@@ -87,6 +89,8 @@ export interface SearchData {
   cannibalisation: { query: string; impressions: number; clicks: number; pages_top20: number; pages: { page: string; position: number; clicks: number; impressions: number }[] }[];
   thresholds: { striking_min_impressions: number; cannibal_min_impressions: number } }
 
+export interface SpotStarted { run_id: number; urls: number; other_hosts: number; other_examples: string[]; duplicates: number; spot: boolean; label: string }
+
 export const api = {
   me: () => req<{ member: Member; workspace: { id: number; name: string } }>("GET", "/api/v2/me"),
   members: () => req<{ members: Member[] }>("GET", "/api/v2/members"),
@@ -101,6 +105,13 @@ export const api = {
   patchFix: (id: number, b: Record<string, unknown>) => req<Fix>("PATCH", `/api/v2/fixes/${id}`, b),
   runs: (sid: number) => req<{ runs: Run[] }>("GET", `/api/v2/sites/${sid}/runs`),
   run: (id: number) => req<{ run: Run; recent_visits: any[]; found: { id: number; title: string; severity: Severity; pages: number }[] }>("GET", `/api/v2/runs/${id}`),
+  checkUrls: (sid: number, text: string, kind: string) =>
+    req<SpotStarted>("POST", `/api/v2/sites/${sid}/checks/urls`, { text, kind }),
+  checkUpload: (sid: number, file: File, kind: string, wholeSite: boolean) => {
+    const f = new FormData();
+    f.append("file", file); f.append("kind", kind); f.append("whole_site", String(wholeSite));
+    return req<SpotStarted>("POST", `/api/v2/sites/${sid}/checks/upload`, f);
+  },
   startRun: (sid: number, kind: string, options: Record<string, unknown> = {}) =>
     req<{ run_id: number }>("POST", `/api/v2/sites/${sid}/runs`, { kind, options }),
   inventory: (sid: number, params: Record<string, string>) =>

@@ -22,7 +22,7 @@ from qcv5.reports.on_page_csv_packager import build_on_page_csv_package
 from qc6.domain import templates as T
 from qc6.linkgraph import text_simhash
 from qc6.settings import settings
-from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score
+from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score, spot_pages
 
 log = logging.getLogger("qc6.coverage")
 
@@ -190,6 +190,7 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
 async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str, job: str,
                           fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any],
                           text_fps: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    spot = await spot_pages(pool, run_id)
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
     pages = c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title, s.page_type, s.business,
@@ -248,8 +249,9 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
                 pick = min(same_pattern or cands, default=None)
                 if pick is not None:
                     tid = pick[1]
-                    await conn.execute("UPDATE templates SET name = $2, path_pattern = $3, page_count = $4 WHERE id = $1",
-                                       tid, tpl_name(t), t["pattern"], t["pages"])
+                    if spot is None:                  # a spot check matches page types but doesn't redefine them
+                        await conn.execute("UPDATE templates SET name = $2, path_pattern = $3, page_count = $4 WHERE id = $1",
+                                           tid, tpl_name(t), t["pattern"], t["pages"])
                 else:
                     tid = await conn.fetchval(
                         "INSERT INTO templates (site_id, fingerprint, name, path_pattern, page_count) VALUES ($1,$2,$3,$4,$5) RETURNING id",
@@ -277,11 +279,12 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         it = map_issue(r, tpl, site["primary_host"])
         if it is not None:
             items.append(it)
-    graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items)
-    applied = await apply(pool, run_id, site["id"], items, template_names=names)
+    graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items, spot=spot is not None)
+    applied = await apply(pool, run_id, site["id"], items, template_names=names, spot=spot is not None)
     complete = int(stats.get("source_pages_pending") or 0) == 0
-    moved = await close_run(pool, run_id, site["id"], ["coverage"], complete=complete)
-    sc = await snapshot_score(pool, run_id, site["id"], len(pages))
+    moved = await close_run(pool, run_id, site["id"], ["coverage"], complete=complete, pages=spot)
+    # a spot check doesn't speak for the whole site: no health score from it
+    sc = await snapshot_score(pool, run_id, site["id"], len(pages)) if spot is None else {"score": None}
     summary = {"pages": len(pages), "templates": len(db_tpl), "issues_v5": len(issues), **applied, "lifecycle": moved,
                "link_graph": graph,
                "score": sc.get("score"), "trust_gate": pkg.get("final_qc_status"), "zip": pkg.get("zip_path"),
@@ -290,7 +293,7 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
 
 
 async def _link_intelligence(pool, run_id: int, site: Dict[str, Any], pages, page_tpl: Dict[str, int], db_tpl: Dict[int, int],
-                             text_fps: Dict[str, int], items: List[Item]) -> Dict[str, Any]:
+                             text_fps: Dict[str, int], items: List[Item], spot: bool = False) -> Dict[str, Any]:
     """Click depth, link strength and inlinks into each page's facts; deep / unreachable pages, canonical targets and
     near-duplicates become fixes like any other finding. Uses the links already exported to Parquet."""
     from qc6 import facts, linkgraph
@@ -303,6 +306,10 @@ async def _link_intelligence(pool, run_id: int, site: Dict[str, Any], pages, pag
         log.warning("link analysis failed for run %s", run_id, exc_info=True)
         return {"error": "link analysis failed; see the worker log"}
     m = res["metrics"]
+    if spot:                                           # a few pages are not the site's link graph
+        for v in m.values():
+            v["depth"] = v["inlinks"] = v["authority"] = None
+        res["problems"] = [p for p in res["problems"] if p[1] not in ("DEEP_PAGE", "NOT_REACHABLE_FROM_HOME")]
     urls = list(m)
     await pool.execute("""UPDATE pages p SET facts = p.facts || jsonb_strip_nulls(jsonb_build_object(
                               'depth', x.depth, 'inlinks', x.inlinks, 'authority', x.authority, 'canonical_url', x.canonical))

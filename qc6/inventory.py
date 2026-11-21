@@ -15,14 +15,18 @@ SORTS = {"url": "p.url", "status": "p.http_status", "fixes": "open_fixes", "type
 
 async def checks_with_pages(pool, site_id: int) -> List[Dict[str, Any]]:
     """Completed checks that have a page list, newest first."""
-    rows = await pool.fetch("""SELECT r.id, r.kind, r.finished_at, (r.summary->>'pages')::int AS pages, r.options->>'imported_from' AS imported
+    rows = await pool.fetch("""SELECT r.id, r.kind, r.finished_at, (r.summary->>'pages')::int AS pages, r.options->>'imported_from' AS imported,
+                                      r.options->'spot'->>'label' AS spot
                                FROM runs r WHERE r.site_id = $1 AND r.status = 'completed'
                                  AND EXISTS (SELECT 1 FROM pages p WHERE p.run_id = r.id) ORDER BY r.id DESC LIMIT 60""", site_id)
     return [dict(r) for r in rows]
 
 
 async def previous_check(pool, site_id: int, run_id: int) -> Optional[int]:
+    if await pool.fetchval("SELECT options ? 'spot' FROM runs WHERE id = $1", run_id):
+        return None                                   # a spot check isn't compared with the whole site
     return await pool.fetchval("""SELECT max(r.id) FROM runs r WHERE r.site_id = $1 AND r.status = 'completed' AND r.id < $2
+                                  AND NOT (r.options ? 'spot')
                                   AND EXISTS (SELECT 1 FROM pages p WHERE p.run_id = r.id)""", site_id, run_id)
 
 
