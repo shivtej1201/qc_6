@@ -57,6 +57,30 @@ async def security_headers(request: Request, call_next):
     return resp
 
 
+ETAG_SKIP = ("/api/v2/stream", "/api/v2/objects/", "/metrics")
+
+
+@app.middleware("http")
+async def etag(request: Request, call_next):
+    """ETag on JSON reads (blueprint §11): an API client that sends If-None-Match gets 304 when nothing changed.
+    Cache-Control stays no-store, so browsers never keep workspace data on disk."""
+    resp = await call_next(request)
+    path = request.url.path
+    if (request.method != "GET" or not path.startswith("/api/") or resp.status_code != 200 or path.startswith(ETAG_SKIP)
+            or not resp.headers.get("content-type", "").startswith("application/json")):
+        return resp
+    body = b"".join([chunk async for chunk in resp.body_iterator])
+    import hashlib
+    tag = '"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
+    headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
+    headers["ETag"] = tag
+    from fastapi import Response
+    inm = request.headers.get("if-none-match", "")
+    if tag in [t.strip() for t in inm.split(",")]:
+        return Response(status_code=304, headers={k: v for k, v in headers.items() if k.lower() != "content-type"})
+    return Response(body, status_code=200, headers=headers, media_type="application/json")
+
+
 def problem(status: int, title: str, detail: str = "") -> HTTPException:
     return HTTPException(status, {"title": title, "detail": detail})
 
@@ -272,6 +296,8 @@ async def test_alert(site_id: int, me=Depends(current_member)):
                 sent.append({"channel": ch, "ok": False, "error": type(e).__name__})
     if not sent:
         raise problem(400, "No alert channel set", "Add a Slack or Teams webhook first.")
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "alerts.test", f"site:{site_id}",
+                       {"sent": [x["channel"] for x in sent]})
     return {"sent": sent}
 
 
@@ -708,6 +734,7 @@ async def save_journey(site_id: int, body: JourneyIn, me=Depends(current_member)
         jid = await services.save_journey(await get_pool(), site_id, body.yaml)
     except SpecError as e:
         raise problem(400, "The journey can't be saved", str(e))
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "journey.save", f"journey:{jid}", {"site_id": site_id})
     return {"journey_id": jid}
 
 
@@ -784,7 +811,26 @@ async def integration_run(iid: str, body: IntegrationRun, me=Depends(current_mem
     from qcv5.integrations import BY_ID, run_integration
     if iid not in BY_ID:
         raise problem(404, "Unknown integration")
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "integration.run", f"integration:{iid}", {"url": body.url})
     return await run_integration(iid, body.url, **{k: v for k, v in body.params.items() if isinstance(v, (str, int, float, bool, list))})
+
+
+# ------------------------------------------------------------------ metrics (blueprint §13)
+@app.get("/metrics", include_in_schema=False)
+async def metrics_(request: Request):
+    """Prometheus text format. With QC6_METRICS_TOKEN set, scrapers send `Authorization: Bearer <token>`;
+    without it, only this machine may read it (no workspace data beyond counts is exposed either way)."""
+    import hmac
+    from fastapi.responses import PlainTextResponse
+    from qc6 import metrics
+    token = os.environ.get("QC6_METRICS_TOKEN", "")
+    if token:
+        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(given.encode(), token.encode()):
+            raise problem(401, "Metrics need the scrape token")
+    elif (request.client.host if request.client else "") not in ("127.0.0.1", "::1", "testclient"):
+        raise problem(403, "Metrics are only served to this machine", "Set QC6_METRICS_TOKEN to let a remote Prometheus scrape them.")
+    return PlainTextResponse(await metrics.render(await get_pool()), media_type="text/plain; version=0.0.4")
 
 
 # ------------------------------------------------------------------ web app

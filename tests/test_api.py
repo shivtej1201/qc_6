@@ -210,3 +210,45 @@ def test_v5_importer(world, migrated):
     assert hashlib.sha256(open(db, "rb").read()).hexdigest() == before
     names = {t["name"] for t in world["c"].get(f"/api/v2/sites/{sid}/templates", headers=H).json()["templates"]}
     assert {"Product pages", "B2C BLOG pages"} <= names                  # URL pattern + the site's data-pageType label
+
+
+def test_metrics(world, monkeypatch):
+    c = world["c"]
+    r = c.get("/metrics")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+    t = r.text
+    for name in ("qc6_runs_queued", "qc6_oldest_queued_job_seconds", "qc6_visit_failure_ratio_24h", "qc6_host_paused",
+                 "qc6_fixes_open", "qc6_disk_free_bytes", "qc6_visits_24h"):
+        assert f"# TYPE {name} gauge" in t
+    assert 'qc6_runs_24h{status="completed"}' in t
+    monkeypatch.setenv("QC6_METRICS_TOKEN", "s3cret")
+    assert c.get("/metrics").status_code == 401
+    assert c.get("/metrics", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_etag_revalidation(world):
+    c = world["c"]
+    r = c.get(f"/api/v2/sites/{world['site']}/insights", headers=H)
+    tag = r.headers["etag"]
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-frame-options"] == "DENY"
+    again = c.get(f"/api/v2/sites/{world['site']}/insights", headers={**H, "If-None-Match": tag})
+    assert again.status_code == 304 and again.content == b""
+    assert c.get(f"/api/v2/sites/{world['site']}/insights", headers={**H, "If-None-Match": '"stale"'}).status_code == 200
+
+
+def test_every_write_is_audited(world, migrated):
+    c = world["c"]
+    sid = world["site"]
+    c.post(f"/api/v2/sites/{sid}/journeys", json={"yaml": JOURNEY.replace("Apply flow", "Audited flow")}, headers=H)
+    c.patch(f"/api/v2/sites/{sid}", json={"visitors": 3}, headers=H)
+
+    async def actions():
+        import asyncpg
+        conn = await asyncpg.connect(migrated)
+        rows = await conn.fetch("SELECT action, actor_id FROM audit_log ORDER BY id")
+        await conn.close()
+        return rows
+    rows = asyncio.run(actions())
+    acts = {r["action"] for r in rows}
+    assert {"site.create", "run.start", "journey.save", "site.update", "fix.update"} <= acts
+    assert all(r["actor_id"] for r in rows if r["action"] in ("journey.save", "site.update"))
