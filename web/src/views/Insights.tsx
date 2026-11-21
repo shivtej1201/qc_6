@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { api, type Insights, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
-import { ErrorBox, Sev, count, day, useLoad } from "../ui";
+import { DownloadMenu, ErrorBox, Sev, count, day, useLoad } from "../ui";
 
 /* Insights (dashboard). Charts follow the data-viz method: one axis, thin marks, legend + direct labels, hover
    tooltip, a table view for every chart, ratings shown as words (never colour alone). Series colours come from
@@ -27,7 +27,7 @@ export function InsightsView({ site }: { site: Site; params: URLSearchParams }) 
           <p className="lede">How {site.primary_host} and the team are trending, from the checks QC has run. Every number says what it's based on.</p>
         </div>
         <div className="row">
-        <a className="btn" href={`/api/v2/sites/${site.id}/report.pdf`} download>Download report (PDF)</a>
+        <DownloadMenu siteId={site.id} />
         <div className="seg" role="group" aria-label="How many checks">
           {RANGES.map(([n, label]) => <button key={n} aria-pressed={runs === n} onClick={() => setRuns(n)}>{label}</button>)}
         </div>

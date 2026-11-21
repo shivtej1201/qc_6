@@ -144,7 +144,8 @@ function FixDrawer({ id, members, onChanged }: { id: number; members: Member[]; 
             )}
             <p className="section-label" style={{ marginTop: 20 }}>Pages ({count(f.pages_affected)})</p>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-              {d.data.pages.slice(0, 8).map((u) => <li key={u}><a href={`#/page?url=${encodeURIComponent(u)}`} className="mono">{u}</a></li>)}
+              {d.data.pages.slice(0, 8).map((u) => <li key={u}><a href={`#/page?url=${encodeURIComponent(u)}`} className="mono">{u}</a>
+                {d.data!.page_history?.[u] && <span className="seen-before">{d.data!.page_history[u]}</span>}</li>)}
             </ul>
             <p className="section-label" style={{ marginTop: 20 }}>History</p>
             <ul className="timeline">

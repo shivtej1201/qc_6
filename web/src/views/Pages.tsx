@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Compare, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
-import { ErrorBox, Sev, count, day, useLoad } from "../ui";
+import { DownloadMenu, ErrorBox, Sev, count, day, useLoad } from "../ui";
 import { SpotCheckButton } from "./SpotCheck";
 
 /* All pages of a check, filterable, with what changed since the check before; and two checks side by side. */
@@ -93,7 +93,8 @@ function Explorer({ site }: { site: Site }) {
       <div className="row" style={{ justifyContent: "space-between", margin: "4px 0 10px" }}>
         <span className="dim">{!x ? "Loading…" : f.change === "gone" ? `${count(x.total)} page${x.total === 1 ? "" : "s"} in check #${x.previous_run_id} but not in check #${x.run_id}`
           : `${count(x.total)} page${x.total === 1 ? "" : "s"} in check #${x.run_id}`}</span>
-        <a className="btn quiet" href={api.inventoryCsv(site.id, csvParams)} download>Download as CSV</a>
+        <span className="row"><a className="btn quiet" href={api.inventoryCsv(site.id, csvParams)} download>This list as CSV</a>
+          {x && <DownloadMenu siteId={site.id} run={x.run_id} />}</span>
       </div>
       <div className="table-wrap" tabIndex={0} role="region" aria-label="Pages">
         <table>

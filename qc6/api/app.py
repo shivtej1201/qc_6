@@ -478,7 +478,10 @@ async def get_fix(fix_id: int, me=Depends(current_member)):
         WHERE f.id = $1 AND s.workspace_id = $2""", fix_id, me["workspace_id"])
     if f is None:
         raise problem(404, "Fix not found")
-    pages = await pool.fetch("SELECT DISTINCT page_url FROM findings WHERE fix_id = $1 AND run_id = $2 LIMIT 50", fix_id, f["last_seen_run"])
+    pages = await pool.fetch("SELECT DISTINCT page_url FROM findings WHERE fix_id = $1 AND run_id = $2 ORDER BY page_url LIMIT 50",
+                             fix_id, f["last_seen_run"])
+    from qc6 import history
+    hist = await history.for_run(pool, f["last_seen_run"], [fix_id], [r["page_url"] for r in pages]) if f["last_seen_run"] else {}
     shots = await pool.fetch("""SELECT DISTINCT ON (fd.page_url) fd.page_url, fd.evidence->>'screenshot' AS screenshot
         FROM findings fd WHERE fd.fix_id = $1 AND fd.evidence ? 'screenshot' ORDER BY fd.page_url LIMIT 3""", fix_id)
     if not shots and f["template_id"] is not None:
@@ -487,6 +490,7 @@ async def get_fix(fix_id: int, me=Depends(current_member)):
     events = await pool.fetch("""SELECT e.kind, e.detail, e.created_at, m.name AS actor FROM fix_events e
         LEFT JOIN members m ON m.id = e.actor_id WHERE e.fix_id = $1 ORDER BY e.id DESC LIMIT 50""", fix_id)
     return {"fix": fix_out(f), "pages": [r["page_url"] for r in pages],
+            "page_history": {r["page_url"]: history.remark(hist.get((fix_id, r["page_url"]))) for r in pages},
             "examples": [dict(r) for r in shots if r["screenshot"]], "events": [dict(e) for e in events]}
 
 
@@ -763,8 +767,11 @@ async def page(site_id: int, url: str, me=Depends(current_member)):
         raise problem(404, "We haven't checked this page yet")
     v = await pool.fetchrow("""SELECT v.* FROM visits v JOIN runs r ON r.id = v.run_id WHERE r.site_id = $1 AND v.page_url = $2
         ORDER BY v.id DESC LIMIT 1""", site_id, url)
-    fixes = await pool.fetch("""SELECT DISTINCT f.id, f.title, f.severity, f.status FROM findings fd JOIN fixes f ON f.id = fd.fix_id
-        WHERE f.site_id = $1 AND fd.page_url = $2 AND f.status != 'verified'""", site_id, url)
+    fixes = await pool.fetch("""SELECT f.id, f.title, f.severity, f.status, count(DISTINCT fd.run_id) AS checks,
+                                       min(coalesce(r.finished_at, r.started_at)) AS first_seen, max(coalesce(r.finished_at, r.started_at)) AS last_seen
+        FROM findings fd JOIN fixes f ON f.id = fd.fix_id JOIN runs r ON r.id = fd.run_id AND r.status = 'completed'
+        WHERE f.site_id = $1 AND fd.page_url = $2 AND f.status != 'verified'
+        GROUP BY f.id ORDER BY CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END""", site_id, url)
     return {"page": dict(p), "visit": dict(v) if v else None, "fixes": [dict(f) for f in fixes]}
 
 
@@ -822,6 +829,29 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
     name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
     return StreamingResponse(csv_rows(pool, site_id, rid, f), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
+
+
+@app.get("/api/v2/sites/{site_id}/export.{fmt}")
+async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
+    """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
+    from qc6 import export as ex
+    if fmt not in ("csv", "xlsx", "zip"):
+        raise problem(404, "Not found")
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    name = f"qc-report-{re.sub(r'[^a-z0-9.-]+', '-', s['primary_host'].lower())}-check-{rid}.{fmt}"
+    await services.log(pool, me["workspace_id"], me["id"], f"report.{fmt}", f"run:{rid}", {})
+    if fmt == "csv":
+        return StreamingResponse(ex.csv_stream(pool, s, rid), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    from starlette.background import BackgroundTask
+    if fmt == "zip":
+        path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
+        return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
+    path = await ex.xlsx_file(pool, s, rid)
+    return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/v2/sites/{site_id}/compare")

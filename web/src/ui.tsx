@@ -131,3 +131,25 @@ export function Spark({ values }: { values: number[] }) {
     </svg>
   );
 }
+
+
+/* Report downloads in one menu: PDF summary, Excel (one sheet), CSV, ZIP (the CSV, compressed). */
+export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | null }) {
+  const q = run ? `?run=${run}` : "";
+  const items: [string, string, string][] = [
+    [`/api/v2/sites/${siteId}/report.pdf`, "PDF summary", "one page for people"],
+    [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row"],
+    [`/api/v2/sites/${siteId}/export.csv${q}`, "CSV", "the same, as plain text"],
+    [`/api/v2/sites/${siteId}/export.zip${q}`, "ZIP", "the CSV compressed: smallest"],
+  ];
+  return (
+    <details className="menu">
+      <summary className="btn"><Icon name="page" />Download report</summary>
+      <ul role="list">
+        {items.filter(([u]) => !(run && u.endsWith("report.pdf"))).map(([u, l, d]) => (
+          <li key={u}><a href={u} download><b>{l}</b><span>{d}</span></a></li>
+        ))}
+      </ul>
+    </details>
+  );
+}
