@@ -95,6 +95,39 @@ _r("CONTENT_ONLY_AFTER_JS", "template", "medium", "experience",
    "{template} show their main heading only after JavaScript runs",
    "Search engines that don't run JavaScript, and visitors on slow phones, see an empty page first.",
    "Render the heading and main text in the server HTML of the {template} template.")
+# ---- link graph, canonical targets, near-duplicates (computed after the crawl) --------------------------------
+_r("DEEP_PAGE", "template", "low", "links",
+   "{n_pages} {template} are more than 3 clicks from the home page",
+   "People rarely dig that deep, and search engines visit deep pages less often and treat them as less important.",
+   "Link to these pages from higher up: category pages, hubs, related links or breadcrumbs. The deepest is {value} clicks.",
+   "The next check finds them within 3 clicks of the home page.")
+_r("NOT_REACHABLE_FROM_HOME", "template", "medium", "links",
+   "{n_pages} {template} can't be reached by clicking from the home page",
+   "Other pages link to them, but no path of links starts at the home page, so visitors and crawlers browsing the site never get there.",
+   "Link to these pages, or to the pages that link to them, from a page that is reachable from the home page.",
+   "The next check finds a path of links from the home page to each of them.")
+_r("CANONICAL_TO_BROKEN", "template", "high", "technical",
+   "{n_pages} {template} name a broken page as the main version",
+   "The canonical tells search engines which address to show. Pointing it at an error page can drop these pages from search.",
+   "Point the canonical at the working address of the page, usually the page itself, or fix {subject}.",
+   "The next check finds every canonical pointing at a page that loads.")
+_r("CANONICAL_TO_REDIRECT", "template", "medium", "technical",
+   "{n_pages} {template} name an address that redirects as the main version",
+   "Search engines have to follow the redirect to find the real page and may ignore the canonical.",
+   "Point the canonical at the final address the redirect lands on, not at {subject}.")
+_r("CANONICAL_TO_NOINDEX", "template", "high", "technical",
+   "{n_pages} {template} name a page that asks not to be indexed as the main version",
+   "The signals contradict each other: keep this one out of search, but use that one instead. Search engines may drop both.",
+   "Point the canonical at an indexable page, or remove noindex from {subject} if it should be found.")
+_r("CANONICAL_CHAIN", "template", "medium", "technical",
+   "{n_pages} {template} name a main version that points somewhere else again",
+   "A chain of canonicals is easy for search engines to ignore, so the page you meant may not be the one shown.",
+   "Point the canonical straight at the final main version, not at {subject}.")
+_r("NEAR_DUPLICATE", "subject", "medium", "content",
+   "{value} pages have almost the same main text",
+   "Search engines pick one of them to show and may ignore the rest, and visitors can't tell them apart.",
+   "Make each page's text specific to what it's about, or merge them and point the others at one main version (for example {subject}).",
+   "The next check finds the main text of these pages clearly different.")
 _r("LINKS_ONLY_AFTER_JS", "template", "low", "experience",
    "{template} add {value} links only after JavaScript runs",
    "Search engines may not follow links that are not in the server HTML.",
@@ -190,8 +223,28 @@ def render(code: str, **fields) -> Dict[str, str]:
         f["template"] = f"{f['template']} pages"
     if fields.get("n_pages") == 1 and str(f.get("template", "")).endswith(" pages"):
         f["template"] = str(f["template"])[:-1]                     # "1 Product page", not "1 Product pages"
-    return {"title": r.title.format_map(f), "why": r.why.format_map(f), "fix": r.fix.format_map(f),
-            "verify": r.verify.format_map(f)}
+    title = r.title.format_map(f)
+    if fields.get("n_pages") == 1:
+        title = _singular_verb(title)
+    return {"title": title, "why": r.why.format_map(f), "fix": r.fix.format_map(f), "verify": r.verify.format_map(f)}
+
+
+_IRREGULAR = {"are": "is", "have": "has", "do": "does", "go": "goes"}
+_AFTER_PAGE = re.compile(r"^(1 .*?\bpage) (can't |don't )?([a-z]+)\b")
+
+
+def _singular_verb(title: str) -> str:
+    """'1 Product page have no main heading' -> '1 Product page has no main heading'."""
+    m = _AFTER_PAGE.match(title)
+    if not m:
+        return title
+    aux, verb = m.group(2), m.group(3)
+    if aux:                                          # "can't be reached" stays; "don't" -> "doesn't"
+        new = m.group(1) + " " + ("doesn't " if aux == "don't " else aux) + verb
+    else:
+        v = _IRREGULAR.get(verb) or (verb + "es" if verb.endswith(("s", "sh", "ch", "x")) else verb + "s")
+        new = m.group(1) + " " + v
+    return new + title[m.end():]
 
 
 def format_count(n: int, system: str = "in") -> str:

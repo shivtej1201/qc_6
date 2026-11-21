@@ -97,9 +97,10 @@ async def import_job(pool, db: str, job: Dict[str, Any], site: Dict[str, Any], v
     try:
         stats = {"source_pages_pending": job["source_pages_pending"] or 0,
                  "url_relationships_persisted": job["url_relationships_persisted"]}
+        fact_counts = await asyncio.to_thread(facts.export, db, job["job_id"], run_id)   # links first: the link analysis reads them
         summary = await import_coverage(pool, run_id, site, db, job["job_id"], url_fingerprints(db, job["job_id"]), stats,
                                         {"final_qc_status": trust})
-        summary["facts"] = await asyncio.to_thread(facts.export, db, job["job_id"], run_id)
+        summary["facts"] = fact_counts
         summary.update({"imported_from": "QC V5", "v5_job": job["job_id"], "template_basis": "url_pattern",
                         "trust_gate": trust or "NOT VERIFIED (V5 result.json not given)"})
         await pool.execute("UPDATE runs SET status = 'completed', summary = $2, finished_at = $3 WHERE id = $1",

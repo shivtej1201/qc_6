@@ -1202,8 +1202,10 @@ class OnPageAuditEngine:
                 self.metrics["http_requests"] += 1
                 self.metrics["requests_by_kind"]["probe"] += 1
                 r = await client.get(probe_url, timeout=10.0)
-                if r.status_code == 200:
-                    print(f"[READY] Primary edge open ({probe_url} -> 200 on probe #{attempt})", flush=True)
+                # The edge is open unless it refuses us (403 / 429 / 503) or the server is failing: a site with no
+                # robots.txt answers 404, which still means requests get through (V6 probes the site's own robots.txt).
+                if r.status_code < 500 and r.status_code not in (403, 429):
+                    print(f"[READY] Primary edge open ({probe_url} -> {r.status_code} on probe #{attempt})", flush=True)
                     return
                 print(f"[COOLDOWN] Probe #{attempt}: HTTP {r.status_code}; waiting {self.probe_interval_sec:.0f}s...", flush=True)
             except Exception as e:
