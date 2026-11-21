@@ -39,7 +39,8 @@ export function flash(el: Element | null) {
 
 export function slideIn(el: Element | null, backdrop: Element | null) {
   if (reducedMotion()) return;
-  if (el) gsap.fromTo(el, { x: 24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.3, ease: "power3.out" });
+  // opacity, not autoAlpha: autoAlpha starts at visibility:hidden, and a hidden dialog can't take focus when it opens
+  if (el) gsap.fromTo(el, { x: 24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.3, ease: "power3.out" });
   if (backdrop) gsap.fromTo(backdrop, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.25 });
 }
 

@@ -153,9 +153,9 @@ function Card({ title, basis, table, children, style }: { title: string; basis: 
   );
 }
 
-function SimpleTable({ head, rows }: { head: string[]; rows: (string | number | null)[][] }) {
+function SimpleTable({ head, rows, label }: { head: string[]; rows: (string | number | null)[][]; label?: string }) {
   return (
-    <div className="table-wrap flat">
+    <div className="table-wrap flat" tabIndex={0} role="region" aria-label={label || head.join(", ")}>
       <table>
         <thead><tr>{head.map((h, i) => <th key={h} className={i ? "num" : ""}>{h}</th>)}</tr></thead>
         <tbody>{rows.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className={j ? "num nowrap" : "title nowrap"}>{c ?? "—"}</td>)}</tr>)}</tbody>
@@ -199,7 +199,7 @@ function ScoreLine({ points }: { points: Insights["score"]["points"] }) {
         <text x={W - PAD.r} y={H - 6} textAnchor="end" className="axis">{day(last.at)}</text>
         {points.map((p, i) => (
           <rect key={`h${p.run_id}`} x={X(i) - iw / (points.length - 1) / 2} y={PAD.t} width={iw / (points.length - 1)} height={ih}
-            fill="transparent" onMouseEnter={() => setHover(i)} onFocus={() => setHover(i)} tabIndex={0}
+            fill="transparent" role="img" onMouseEnter={() => setHover(i)} onFocus={() => setHover(i)} tabIndex={0}
             aria-label={`Check ${p.run_id}, ${day(p.at)}: ${Math.round(p.score)}`} />
         ))}
       </svg>
@@ -240,7 +240,7 @@ function FlowBars({ runs }: { runs: Insights["fix_flow"]["runs"] }) {
               {bar(x0, r.new, "m-new")}{bar(x0 + bw + 2, r.verified, "m-done")}{bar(x0 + 2 * (bw + 2), r.regressed, "m-back")}
               {(i === lastI || hover === i) && ([[r.new, 0], [r.verified, 1], [r.regressed, 2]] as const).map(([v, k]) => v > 0 &&
                 <text key={k} x={x0 + k * (bw + 2) + bw / 2} y={Y(v) - 5} textAnchor="middle" className="label">{v}</text>)}
-              <rect x={PAD.l + i * slot} y={PAD.t} width={slot} height={ih} fill="transparent" tabIndex={0}
+              <rect x={PAD.l + i * slot} y={PAD.t} width={slot} height={ih} fill="transparent" role="img" tabIndex={0}
                 onMouseEnter={() => setHover(i)} onFocus={() => setHover(i)}
                 aria-label={`Check ${r.run_id}: ${r.new} new, ${r.verified} confirmed fixed, ${r.regressed} back again`} />
             </g>
@@ -298,7 +298,7 @@ function PageTypes({ items }: { items: Insights["page_types"]["items"] }) {
   if (!items.length) return <p className="empty">No page types yet.</p>;
   const max = Math.max(1, ...items.map((t) => t.pages));
   return (
-    <div className="table-wrap flat">
+    <div className="table-wrap flat" tabIndex={0} role="region" aria-label="Page types">
       <table>
         <thead><tr><th>Page type</th><th>Pages</th><th className="num">Open fixes</th><th>Worst</th><th className="num">Visited</th><th className="num">Visits with trouble</th></tr></thead>
         <tbody>{items.map((t) => (
@@ -323,7 +323,7 @@ function Vitals({ items }: { items: Insights["vitals"]["items"] }) {
       <span className="num">{unit === "" ? v : `${count(v)} ${unit}`}</span>{rating && <>{"\u00a0·\u00a0"}{RATING[rating]?.[1] || rating}</>}</span>
   );
   return (
-    <div className="table-wrap flat">
+    <div className="table-wrap flat" tabIndex={0} role="region" aria-label="Speed and stability by page type">
       <table>
         <thead><tr><th>Page type</th><th>Device</th><th className="num">Visits</th><th title="Largest Contentful Paint">Main content shown</th>
           <th title="Cumulative Layout Shift">Layout shift</th><th title="Interaction to Next Paint">Reacts to a tap</th><th title="Time to First Byte">First byte</th></tr></thead>
