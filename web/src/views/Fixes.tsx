@@ -7,7 +7,7 @@ import { Avatar, ErrorBox, Sev, count, day, statusPill, useLoad, useToast } from
 const VIEWS: [string, string][] = [["needs", "Needs you"], ["verify", "Waiting for check"], ["verified", "Verified"], ["all", "All"]];
 
 export function FixesView({ site, params }: { site: Site; params: URLSearchParams }) {
-  const [view, setView] = useState("needs");
+  const [view, setView] = useState(() => (VIEWS.some(([k]) => k === params.get("view")) ? params.get("view")! : "needs"));
   const [q, setQ] = useState("");
   const [query, setQuery] = useState("");
   const list = useLoad(() => api.fixes(site.id, view, query), [site.id, view, query]);

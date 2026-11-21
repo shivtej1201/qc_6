@@ -400,7 +400,24 @@ async def today(site_id: int, me=Depends(current_member)):
                 (f"{n} thing{'s' if n != 1 else ''} need{'s' if n == 1 else ''} you." if n else "Nothing needs you right now."))
     else:
         lede = "Run the first check to see how the site is doing."
-    return {"greeting": f"Hello, {first}" if first else "Hello", "lede": lede, "cards": cards[:5],
+    sev = {r["severity"]: r["n"] for r in await pool.fetch(
+        "SELECT severity, count(*) AS n FROM fixes WHERE site_id = $1 AND status IN ('open','in_progress') GROUP BY severity", site_id)}
+    jr = await pool.fetchrow("""SELECT count(*) AS total, count(*) FILTER (WHERE jr.status = 'passed') AS passed FROM journeys j
+                                JOIN LATERAL (SELECT status FROM journey_runs WHERE journey_id = j.id ORDER BY id DESC LIMIT 1) jr ON true
+                                WHERE j.site_id = $1 AND j.enabled""", site_id)
+    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 8""", site_id)
+    ev = {(r["run_id"], r["kind"]): r["n"] for r in await pool.fetch(
+        """SELECT e.run_id, e.kind, count(DISTINCT e.fix_id) AS n FROM fix_events e JOIN fixes f ON f.id = e.fix_id
+           WHERE f.site_id = $1 AND e.run_id = ANY($2::bigint[]) AND e.kind IN ('found','verified','regressed') GROUP BY 1, 2""",
+        site_id, [r["id"] for r in flow_runs])}
+    flow = [{"run_id": r["id"], "at": r["finished_at"], "new": ev.get((r["id"], "found"), 0), "verified": ev.get((r["id"], "verified"), 0),
+             "regressed": ev.get((r["id"], "regressed"), 0)} for r in reversed(flow_runs)]
+    summ = (done["summary"] if done else None) or {}
+    kpis = {"open_by_severity": {k: sev.get(k, 0) for k in ("critical", "high", "medium", "low")},
+            "pages": summ.get("pages"), "visited": summ.get("visited"),
+            "journeys": {"total": jr["total"], "passed": jr["passed"]} if jr else {"total": 0, "passed": 0},
+            "score_change": round(scores[0]["score"] - scores[1]["score"], 1) if len(scores) > 1 else None}
+    return {"greeting": f"Hello, {first}" if first else "Hello", "lede": lede, "cards": cards[:5], "kpis": kpis, "flow": flow,
             "score": scores[0]["score"] if scores else None,
             "trend": [{"score": r["score"], "at": r["created_at"]} for r in reversed(scores)],
             "checked": _ago_sentence(done), "last_run": dict(last) if last else None, "fixes": dict(counts),
@@ -694,7 +711,8 @@ async def pages(site_id: int, q: str = "", limit: int = Query(50, le=500), me=De
     pool = await get_pool()
     rid = await pool.fetchval("SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full')", site_id)
     rows = await pool.fetch("""SELECT p.url, p.http_status, p.title, t.name AS template_name FROM pages p LEFT JOIN templates t
-        ON t.id = p.template_id WHERE p.run_id = $1 AND ($2 = '' OR p.url ILIKE '%' || $2 || '%') ORDER BY p.url LIMIT $3""",
+        ON t.id = p.template_id WHERE p.run_id = $1 AND ($2 = '' OR p.url ILIKE '%' || $2 || '%' OR p.title ILIKE '%' || $2 || '%')
+        ORDER BY p.url LIMIT $3""",
                             rid, q, limit)
     return {"pages": [dict(r) for r in rows]}
 
@@ -760,13 +778,14 @@ async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member
 async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
                         min_impressions: int = Query(2500, ge=1), me=Depends(current_member)):
     """Pages ranked by QC's opportunity score, with the reasons in words and an action bucket (CrawlPulse FEAT-15)."""
-    from qc6.opportunity import page_opportunities
+    from qc6.opportunity import explain, page_opportunities
     await site_for(site_id, me)
     pool = await get_pool()
     rid = await _inventory_run(site_id, None, pool)
-    d = await page_opportunities(pool, site_id, rid, min_impressions)
+    d = await page_opportunities(pool, site_id, rid, min_impressions, with_reasons=0)
     rows = [p for p in d["pages"] if not bucket or p["bucket"] == bucket]
-    return {**{k: v for k, v in d.items() if k != "pages"}, "total": len(rows), "pages": rows[offset:offset + limit]}
+    return {**{k: v for k, v in d.items() if k not in ("pages", "_explain")}, "total": len(rows),
+            "pages": explain(d, rows[offset:offset + limit])}
 
 
 @app.get("/api/v2/sites/{site_id}/growth/search")

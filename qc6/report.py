@@ -56,13 +56,15 @@ def _trend_svg(points: List[Dict[str, Any]], w: int = 520, h: int = 120) -> str:
 async def gather(pool, site: Dict[str, Any]) -> Dict[str, Any]:
     from qc6.insights import site_insights
     from qc6.inventory import checks_with_pages, compare
-    from qc6.opportunity import page_opportunities
+    from qc6.opportunity import explain, page_opportunities
     ins = await site_insights(pool, site["id"], 12)
     checks = await checks_with_pages(pool, site["id"])
     cmp = None
     if len(checks) >= 2:
         cmp = await compare(pool, site["id"], checks[1]["id"], checks[0]["id"], sample=5)
-    opps = (await page_opportunities(pool, site["id"], checks[0]["id"])) if checks else None
+    opps = (await page_opportunities(pool, site["id"], checks[0]["id"], with_reasons=0)) if checks else None
+    if opps:
+        opps["pages"] = explain(opps, [p for p in opps["pages"] if p["bucket"] != "monitor"][:8])
     fixes = await pool.fetch("""SELECT f.title, f.severity, f.pages_affected, f.status, m.name AS owner, f.texts->>'fix' AS how
                                 FROM fixes f LEFT JOIN members m ON m.id = f.owner_id
                                 WHERE f.site_id = $1 AND f.status IN ('open', 'in_progress', 'fixed_pending_check')

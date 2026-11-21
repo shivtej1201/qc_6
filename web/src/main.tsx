@@ -1,8 +1,9 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles/app.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
 import { ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
+import { Palette, type Screen } from "./palette";
 import { InsightsView } from "./views/Insights";
 import { GrowthView } from "./views/Growth";
 import { TodayView } from "./views/Today";
@@ -28,11 +29,20 @@ export function go(view: string, params: Record<string, string | number> = {}) {
   window.location.hash = `/${view}${q ? "?" + q : ""}`;
 }
 
-const NAV: [string, string, string][] = [
-  ["today", "today", "Today"], ["insights", "up", "Insights"], ["growth", "growth", "Growth"], ["live", "live", "Live run"], ["fixes", "fix", "Fixes"], ["pages", "layers", "All pages"], ["page", "page", "Page"],
-  ["links", "layers", "Links & images"], ["journeys", "journey", "Journeys"], ["integrations", "plug", "Integrations"],
-  ["access", "shield", "Crawler access"], ["settings", "settings", "Settings"],
+const NAV_GROUPS: { label: string; items: [string, string, string, string][] }[] = [
+  { label: "Overview", items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
+    ["growth", "growth", "Growth", "opportunities search console queries"]] },
+  { label: "Work", items: [["fixes", "fix", "Fixes", "issues problems inbox"], ["journeys", "journey", "Journeys", "flows paths"],
+    ["live", "live", "Live run", "check running progress"]] },
+  { label: "Explore", items: [["pages", "layers", "All pages", "inventory urls compare"], ["links", "link", "Links & images", "broken redirects"]] },
+  { label: "Setup", items: [["integrations", "plug", "Integrations", "tools"], ["access", "shield", "Crawler access", "cdn waf allow rule"],
+    ["settings", "settings", "Settings", "speed schedule alerts tickets staging"]] },
 ];
+const NAV = NAV_GROUPS.flatMap((g) => g.items);
+const SCREENS: Screen[] = [...NAV.map(([view, icon, label, words]) => ({ view, icon, label, words })),
+  { view: "setup", icon: "page", label: "Add a site", words: "new site create" }];
+const TABS: [string, string, string][] = [["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"], ["pages", "layers", "Pages"]];
+const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", setup: "Add a site" };
 
 function App() {
   const [route, setRoute] = useState<Route>(parseHash);
@@ -52,7 +62,33 @@ function App() {
     if (theme) document.documentElement.dataset.theme = theme;
     else delete document.documentElement.dataset.theme;
   }, [theme]);
-  useEffect(() => { document.title = `QC V6 · ${NAV.find((n) => n[0] === route.view)?.[2] || "Today"}`; }, [route.view]);
+  useEffect(() => { document.title = `QC V6 · ${TITLES[route.view] || "Today"}`; }, [route.view]);
+  const [palette, setPalette] = useState(false);
+  const [menu, setMenu] = useState(false);
+  useEffect(() => { setMenu(false); }, [route.view, route.params.toString()]);
+  useEffect(() => {                                       // a modal open: everything behind it is inert
+    const phoneMenu = menu && window.matchMedia("(max-width: 900px)").matches;
+    const behind = palette ? ["main", ".rail", ".topbar", ".tabbar", ".skip"] : phoneMenu ? ["main", ".topbar", ".tabbar", ".skip"] : [];
+    document.querySelectorAll("main, .rail, .topbar, .tabbar, .skip").forEach((el) => el.removeAttribute("inert"));
+    behind.forEach((sel) => document.querySelector(sel)?.setAttribute("inert", ""));
+  }, [palette, menu, route.view]);
+  const wasOpen = useRef(false);
+  useEffect(() => {                                       // phone menu: focus goes in when it opens, back when it closes
+    if (!window.matchMedia("(max-width: 900px)").matches) return;
+    if (menu) (document.querySelector(".rail-close") as HTMLElement | null)?.focus();
+    else if (wasOpen.current) (document.querySelector('.topbar .icon-btn[aria-controls="rail"]') as HTMLElement | null)?.focus({ preventScroll: true });
+    wasOpen.current = menu;
+  }, [menu]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target as HTMLElement)?.tagName) || (e.target as HTMLElement)?.isContentEditable;
+      if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey)) { e.preventDefault(); setPalette(true); }
+      else if (e.key === "/" && !typing && !palette) { e.preventDefault(); setPalette(true); }
+      else if (e.key === "Escape" && menu) setMenu(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [palette, menu]);
 
   const toggleTheme = () => {
     const cur = theme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
@@ -74,30 +110,55 @@ function App() {
     }[route.view] || <TodayView {...p} />;
   }
 
+  const pickSite = (v: number) => { setSiteId(v); localStorageSet("qc6-site", String(v)); };
+  const current = route.view === "page" ? "pages" : route.view;
   return (
-    <div className="app">
-      <aside className="rail" aria-label="Main">
-        <div className="logo"><div className="logo-mark">QC</div><div><b>QC V6</b><span>Site quality</span></div></div>
+    <div className={`app ${menu ? "menu-open" : ""}`}>
+      <a className="skip" href="#main">Skip to content</a>
+      <header className="topbar">
+        <button className="icon-btn" aria-label="Open the menu" aria-expanded={menu} aria-controls="rail" onClick={() => setMenu(true)}><Icon name="menu" /></button>
+        <div className="topbar-title"><b>{TITLES[route.view] || "Today"}</b>{site && <span>{site.primary_host}</span>}</div>
+        <button className="icon-btn" aria-label="Quick jump" onClick={() => setPalette(true)}><Icon name="search" /></button>
+      </header>
+      {menu && <div className="rail-back" onClick={() => setMenu(false)} />}
+      <aside className="rail" id="rail" aria-label="Main">
+        <div className="logo"><div className="logo-mark">QC</div><div><b>QC V6</b><span>Site quality</span></div>
+          <button className="icon-btn rail-close" aria-label="Close the menu" onClick={() => setMenu(false)}><Icon name="close" /></button></div>
         {sites.data && sites.data.sites.length > 0 && (
           <div className="site-switch">
             <label className="sr-only" htmlFor="site-select">Site</label>
-            <select id="site-select" value={site?.id} onChange={(e) => { const v = Number(e.target.value); setSiteId(v); localStorageSet("qc6-site", String(v)); }}>
+            <select id="site-select" value={site?.id} onChange={(e) => pickSite(Number(e.target.value))}>
               {sites.data.sites.map((s) => <option key={s.id} value={s.id}>{s.primary_host}</option>)}
             </select>
           </div>
         )}
-        {NAV.map(([v, icon, label]) => (
-          <a key={v} className="nav" href={`#/${v}`} aria-current={route.view === v ? "page" : undefined}>
-            <Icon name={icon} />{label}
-            {v === "fixes" && site?.open_fixes ? <span className="count">{site.open_fixes}</span> : null}
-          </a>
-        ))}
+        <button className="jump" onClick={() => setPalette(true)}><Icon name="search" /><span>Jump to…</span><kbd>Ctrl K</kbd></button>
+        <nav aria-label="Sections">
+          {NAV_GROUPS.map((g) => (
+            <div className="nav-group" key={g.label} role="group" aria-labelledby={`ng-${g.label}`}>
+              <p className="nav-label" id={`ng-${g.label}`}>{g.label}</p>
+              {g.items.map(([v, icon, label]) => (
+                <a key={v} className="nav" href={`#/${v}`} aria-current={current === v ? "page" : undefined}>
+                  <Icon name={icon} />{label}
+                  {v === "fixes" && site?.open_fixes ? <span className="count" aria-label={`${site.open_fixes} open`}>{site.open_fixes}</span> : null}
+                </a>
+              ))}
+            </div>
+          ))}
+        </nav>
         <div className="foot">
           <a className="nav" href="#/setup" style={{ padding: "4px 0" }}>Add a site</a>
           <button className="btn quiet" onClick={toggleTheme} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>Switch light / dark</button>
         </div>
       </aside>
-      <main key={`${route.view}-${site?.id}`}>{body}</main>
+      <main id="main" key={`${route.view}-${site?.id}`} tabIndex={-1}>{body}</main>
+      <nav className="tabbar" aria-label="Main sections">
+        {TABS.map(([v, icon, label]) => (
+          <a key={v} href={`#/${v}`} aria-current={current === v ? "page" : undefined}><Icon name={icon} /><span>{label}</span></a>
+        ))}
+        <button aria-expanded={menu} aria-controls="rail" onClick={() => setMenu(true)}><Icon name="more" /><span>More</span></button>
+      </nav>
+      {palette && <Palette site={site} screens={SCREENS} onClose={() => setPalette(false)} />}
     </div>
   );
 }

@@ -46,6 +46,8 @@ function Explorer({ site }: { site: Site }) {
     .filter(([, v]) => v !== "" && v != null));
   const d = useLoad(() => api.inventory(site.id, params), [site.id, JSON.stringify(params)]);
   const set = (k: string, v: string) => { setF({ ...f, [k]: v }); setOffset(0); };
+  const [showFilters, setShowFilters] = useState(false);
+  const active = Object.entries(f).filter(([k, v]) => v && k !== "q").length;
   const head = (key: string, label: string, num = false) => (
     <th className={num ? "num" : ""} aria-sort={sort[0] === key ? (sort[1] ? "descending" : "ascending") : "none"}>
       <button className="th-sort" onClick={() => setSort([key, sort[0] === key ? !sort[1] : num])}>{label}{sort[0] === key ? (sort[1] ? " ↓" : " ↑") : ""}</button>
@@ -66,7 +68,9 @@ function Explorer({ site }: { site: Site }) {
           <span className="faint" style={{ fontSize: 13 }}>since check #{x.previous_run_id}</span>
         </div>
       )}
-      <div className="filters" data-reveal>
+      <button className="btn filters-toggle" aria-expanded={showFilters} aria-controls="page-filters" onClick={() => setShowFilters(!showFilters)}>
+        Filters{active ? ` · ${active}` : ""}</button>
+      <div className={`filters ${showFilters ? "open" : ""}`} id="page-filters" data-reveal>
         {FILTERS.map((fl) => (
           <label key={fl.key}><span>{fl.label}</span>
             <select className="input" value={f[fl.key] || ""} onChange={(e) => set(fl.key, e.target.value)}>
