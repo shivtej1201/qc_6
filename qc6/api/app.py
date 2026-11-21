@@ -798,6 +798,34 @@ async def search_sync(site_id: int, me=Depends(current_member)):
     return out
 
 
+REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+
+@app.get("/api/v2/sites/{site_id}/report.{fmt}")
+async def report(site_id: int, fmt: str, me=Depends(current_member)):
+    """Executive summary (CrawlPulse FEAT-18-02) as a self-contained page, or the same page printed to PDF."""
+    from fastapi.responses import HTMLResponse, Response
+    from qc6 import report as rep
+    if fmt not in ("html", "pdf"):
+        raise problem(404, "Not found")
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM runs WHERE site_id = $1 AND status = 'completed')", site_id):
+        raise problem(404, "No finished check yet", "The report needs at least one finished check.")
+    doc = rep.render_html(await rep.gather(pool, s))
+    name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
+    if fmt == "html":
+        return HTMLResponse(doc, headers={"Content-Security-Policy": REPORT_CSP})
+    try:
+        pdf = await rep.to_pdf(doc)
+    except Exception as e:                              # Chromium missing or failed: say so, offer the HTML
+        raise problem(503, "The PDF couldn't be made", f"Chromium isn't available on the server ({type(e).__name__}). "
+                      "The same report is at report.html; your browser can print it to PDF.")
+    await services.log(pool, me["workspace_id"], me["id"], "report.pdf", f"site:{site_id}", {})
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="qc-report-{name}.pdf"'})
+
+
 @app.get("/api/v2/runs/{run_id}/facts/{dataset}")
 async def facts_query(run_id: int, dataset: str, filter: str = "", q: str = Query("", max_length=300), page_url: str = "",
                       sort: str = "page", desc: bool = False, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),

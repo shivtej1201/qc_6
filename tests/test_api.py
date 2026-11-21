@@ -292,3 +292,18 @@ def test_inventory_endpoints(world):
     assert c.get(f"/api/v2/sites/{sid}/inventory?run=999999", headers=H).status_code == 404
     assert c.get(f"/api/v2/sites/{sid}/compare?a={world['run']}&b={world['run']}", headers=H).status_code == 400
     assert c.get(f"/api/v2/sites/{world['other_site']}/inventory", headers=H).status_code == 404
+
+
+def test_executive_report(world):
+    c, sid = world["c"], world["site"]
+    c.patch(f"/api/v2/sites/{sid}", json={"name": "Fixture <script>alert(1)</script>"}, headers=H)
+    r = c.get(f"/api/v2/sites/{sid}/report.html", headers=H)
+    assert r.status_code == 200 and r.headers["content-security-policy"].startswith("default-src 'none'")
+    assert "<script>alert" not in r.text and "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+    assert "The fixes that matter most" in r.text and "health out of 100" in r.text
+    pdf = c.get(f"/api/v2/sites/{sid}/report.pdf", headers=H)
+    assert pdf.status_code == 200 and pdf.content[:5] == b"%PDF-" and len(pdf.content) > 5000
+    assert "attachment" in pdf.headers["content-disposition"]
+    assert c.get(f"/api/v2/sites/{world['other_site']}/report.pdf", headers=H).status_code == 404
+    assert c.get(f"/api/v2/sites/{sid}/report.docx", headers=H).status_code == 404
+    c.patch(f"/api/v2/sites/{sid}", json={"name": "Fixture API"}, headers=H)
