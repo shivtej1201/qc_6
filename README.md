@@ -19,6 +19,8 @@ Site quality checks that work the way a careful person would:
   from home, canonicals that point at broken, redirecting, noindex or chained pages, and near-duplicate main text.
 * **Growth**: pages ranked by an opportunity score with an action (fix, grow, improve CTR, refresh content, add links,
   consolidate) and the reasons in words; Search Console queries close to page one and pages competing for one query.
+* **Easy to get around**: the menu in four groups (Overview, Work, Explore, Setup), quick jump to any screen, fix or
+  page with Ctrl+K (or /), and on phones a top bar, a slide-in menu and bottom tabs. Today opens as a dashboard.
 * **Executive report**: a one-page PDF summary, printed by the local Chromium.
 * **Built to keep running**: a check whose worker dies is picked up again and resumes; crawl scope (include /
   exclude patterns) and logins for pre-production sites, sent only to the site's own hosts.
@@ -78,7 +80,8 @@ qc6/            the application
                   site_access.py  crawl scope, staging login, site-only headers;  report.py  executive PDF
 engine/qcv5/    the crawl engine used by the coverage check (only the modules V6 uses)
 web/            React + TypeScript + GSAP web app (source in src/, built app in dist/)
-tests/          81 tests (real Chromium, real Postgres), including an end-to-end UI walk with axe on every screen
+tests/          81 tests (real Chromium, real Postgres), including an end-to-end UI walk with axe on every screen,
+                quick jump and the phone menu, and every screen at phone width
 docs/           architecture blueprint, design spec, clickable prototype, screenshots
 scripts/demo.py local demo site + seed data
 ```
