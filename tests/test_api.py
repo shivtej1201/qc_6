@@ -179,3 +179,34 @@ def test_site_page_type_names_the_template(world):
     c = world["c"]
     names = [t["name"] for t in c.get(f"/api/v2/sites/{world['site']}/templates", headers=H).json()["templates"]]
     assert "B2C BLOG pages" in names and "Product pages" in names     # no data-pageType -> named from the URL
+
+
+def test_v5_importer(world, migrated):
+    """A V5 audit database (same engine, same tables) becomes a V6 check with fixes; re-import is skipped; source untouched."""
+    import hashlib
+    from qc6.import_v5 import import_all, list_jobs
+    db = os.path.join(settings.data_dir, "runs", str(world["run"]), "coverage.db")
+    before = hashlib.sha256(open(db, "rb").read()).hexdigest()
+    jobs = list_jobs(db)
+    assert [j["job_id"] for j in jobs] == [f"RUN{world['run']}"] and jobs[0]["status"] == "COMPLETED" and jobs[0]["issues"] > 0
+
+    async def go():
+        import asyncpg
+        from qc6.db.pool import _init
+        pool = await asyncpg.create_pool(migrated, min_size=1, max_size=2, init=_init)
+        ws = await pool.fetchval("SELECT workspace_id FROM sites WHERE id = $1", world["site"])
+        sid = await services.create_site(pool, ws, "Imported from V5", "http://localhost:1")
+        first = await import_all(pool, db, sid)
+        again = await import_all(pool, db, sid)
+        run = await pool.fetchrow("SELECT * FROM runs WHERE id = $1", first[0]["run_id"])
+        n_fix = await pool.fetchval("SELECT count(*) FROM fixes WHERE site_id = $1", sid)
+        await pool.close()
+        return sid, first, again, run, n_fix
+    sid, first, again, run, n_fix = asyncio.run(go())
+    assert run["status"] == "completed" and run["options"]["imported_from"] == "QC V5"
+    assert run["summary"]["template_basis"] == "url_pattern" and run["summary"]["pages"] == jobs[0]["source_pages_total"]
+    assert first[0]["fixes"] == n_fix > 0
+    assert "already imported" in again[0]["skipped"]
+    assert hashlib.sha256(open(db, "rb").read()).hexdigest() == before
+    names = {t["name"] for t in world["c"].get(f"/api/v2/sites/{sid}/templates", headers=H).json()["templates"]}
+    assert {"Product pages", "B2C BLOG pages"} <= names                  # URL pattern + the site's data-pageType label

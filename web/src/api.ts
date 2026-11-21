@@ -34,7 +34,7 @@ export interface Fix { id: number; rule: string; severity: Severity; dimension: 
   texts: { title: string; why: string; fix: string; verify: string }; example_url?: string | null; source: string;
   ticket_url?: string | null; updated_at: string }
 export interface Run { id: number; kind: string; status: string; progress: Record<string, any>; summary: Record<string, any>;
-  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null }
+  error?: string | null; created_at: string; started_at?: string | null; finished_at?: string | null; options?: Record<string, any> }
 export interface Member { id: number; name: string; email: string; role: string }
 export interface TodayCard { kind: string; title: string; text: string; action: string; fix_id?: number; journey_run_id?: number }
 export interface Today { greeting: string; lede: string; cards: TodayCard[]; score: number | null; trend: { score: number; at: string }[];

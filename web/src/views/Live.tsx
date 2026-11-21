@@ -90,6 +90,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
       : `${count(pagesDone)} of ${count(pagesTotal)} pages checked.`)
     : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked, ${count(run.summary?.visited)} visited in a real browser.`
       : run.status === "failed" ? `This check stopped: ${run.error}` : `This check was ${run.status}.`;
+  const imported = run.options?.imported_from === "QC V5";
 
   return (
     <div className="view" ref={ref}>
@@ -106,6 +107,8 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
             {STATUS[run.status] || run.status}</span>
         </div>
       </div>
+      {imported && <p className="pill new" style={{ marginBottom: 14 }}>Imported from QC V5 ({run.options?.v5_name || run.options?.v5_job}).
+        V5 kept no page HTML, so page types come from URL patterns; there were no real-browser visits.</p>}
       {live && <div className="progress-line" aria-hidden="true"><i style={{ width: `${(frac * 100).toFixed(1)}%` }} /></div>}
       <p className="faint" style={{ fontSize: 13, margin: "0 0 20px" }}>
         Stage: {run.status === "paused" ? `paused after ${(p.stages_done || []).length ? (p.stages_done || []).join(", ") : "part of the page check"}` : p.stage === "visits" ? "real-visitor checks" : p.stage === "coverage" ? "every page and link" : live ? "starting" : "finished"} ·
