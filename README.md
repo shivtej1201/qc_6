@@ -10,6 +10,11 @@ Site quality checks that work the way a careful person would:
 * **Journeys**: paths customers take, walked at a person's pace; never presses Submit or Pay.
 * **Fixes**, not rows: one fix per root cause, in plain language (what's wrong, why it matters, how to fix, how we'll
   know), owned by a person, verified by the next check. Alerts to Slack/Teams, tickets in GitHub/Jira.
+* **Insights**: health over time, fixes new / confirmed / back again per check, time to confirm a fix, page types
+  ranked by open fixes, speed and stability per page type, visit outcomes, owners, journeys. Every number says what
+  it's based on; every chart has a table view.
+* **Carries V5 over**: V5's speed presets (with V5's measured time estimate), page limit, timeout and retries per
+  site, the site's own `data-pageType` names for page types, and an importer that turns V5 audits into V6 checks.
 
 QC identifies itself honestly on every request (`QC-Audit/6.0` in the user agent and an `X-QC-Audit` token). It never
 disguises itself or gets around bot protection: if a CDN challenges it, it stops and gives you the allow rule.
@@ -58,9 +63,11 @@ qc6/            the application
   crawl/          human pacing, shared per-site speed limit, bot-challenge detection
   auth.py, scheduler.py, notify.py, tickets.py, recorder.py, ga4.py, facts.py
   db/             Postgres pool + migrations
+  insights.py     Insights dashboard numbers;  presets.py  V5 speed presets + settings;  import_v5.py  V5 importer
+  metrics.py      Prometheus metrics
 engine/qcv5/    the crawl engine used by the coverage check (only the modules V6 uses)
 web/            React + TypeScript + GSAP web app (source in src/, built app in dist/)
-tests/          37 tests (real Chromium, real Postgres)
+tests/          60 tests (real Chromium, real Postgres), including an end-to-end UI walk with axe on every screen
 docs/           architecture blueprint, design spec, clickable prototype, screenshots
 scripts/demo.py local demo site + seed data
 ```
@@ -89,10 +96,35 @@ python -m pytest -q
 | `QC6_NU_URL`, `QC6_LANGUAGETOOL_URL`, `QC6_LIGHTHOUSE_CMD`, `QC6_CHROME_PATH` | optional extra checks (self-hosted Nu HTML checker, LanguageTool, local Lighthouse) |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | GA4-led sampling (site setting `ga4_property_id`) and the V5 Search Console integration |
 | `QC6_GITHUB_TOKEN`, `QC6_JIRA_TOKEN` | ticket creation (repository / Jira site set per site in Settings) |
+| `QC6_METRICS_TOKEN` | lets a remote Prometheus scrape `/metrics` with `Authorization: Bearer …` (without it, only this machine can) |
+| `QC6_DB_PASSWORD` | database password on its own, so symbols like `@` need no escaping in `QC6_DATABASE_URL` |
 
-Site settings (Settings page or `PATCH /api/v2/sites/{id}`): speed limit, visitors, cookie answer, sitemap,
+Site settings (Settings page or `PATCH /api/v2/sites/{id}`): speed preset (Careful 8 / Standard 12 / Fast 14 /
+Large site 16→18 requests a second, from V5), speed limit, most pages per check, page timeout, retries, visitors, cookie answer, sitemap,
 `check_schedule` ("daily 06:30", "weekdays 07:15", "every 6 hours"), Slack/Teams webhooks and which events alert,
 GitHub/Jira. Journeys can carry their own `schedule:`.
+
+## Moving from QC V5
+
+```bash
+python -m qc6.admin list-sites
+python -m qc6.import_v5 list   path/to/qc_v5/audit_cache.db                     # what's in the V5 database
+python -m qc6.import_v5 import path/to/qc_v5/audit_cache.db --site 1 --v5-data path/to/qc_v5/data/onpage
+python -m qc6.admin import-v5-config 1 path/to/qc_v5/.env                       # page limit, timeout, retries, rate
+```
+
+Each completed V5 audit becomes a V6 check (oldest first), its issues become fixes through the same grouping and
+wording a V6 check uses, links and images go into the explorer, and the V5 trust gate is carried over when
+`--v5-data` is given. Importing again skips audits already imported; the V5 database is only read. V5 kept no page
+HTML, so imported page types come from URL patterns (or the site's `data-pageType`), and imported checks had no
+real-browser visits. The check page says so.
+
+## Operations
+
+* `GET /metrics`: Prometheus text: waiting/running checks, oldest waiting check, check ETA, visits and their failure
+  share, hosts that paused QC, open fixes, journey outcomes, free disk. Suggested alerts are in `qc6/metrics.py`.
+* Every change a person makes is in the `audit_log` table (who, what, when).
+* API reads carry an `ETag`; send `If-None-Match` to get `304 Not Modified`. Responses are `no-store`.
 
 ## Measured
 
@@ -112,7 +144,8 @@ GitHub/Jira. Journeys can carry their own `schedule:`.
 | 3 Real-visitor review | Done, including visual change between checks |
 | 4 Journeys | Done: YAML, runner, filmstrip, irreversible-action guard, schedules, recorder (Playwright codegen → steps), Slack/Teams alerts |
 | 5 Integrations | Done: GA4-led sampling, Nu HTML checker, LanguageTool, local Lighthouse, GitHub/Jira tickets with status sync, V5 free integrations |
-| 6 Hardening | Partly: security headers, SSRF guard on every browser request, webhook/ticket hosts allow-listed, auth tests, dependency audit in CI. Not done: an external security review, a 300K-page run inside V6, behaviour against a real Akamai/Cloudflare edge |
+| 6 Hardening | Partly: security headers, SSRF guard on every browser request, webhook/ticket hosts allow-listed, auth tests, dependency audit in CI, Prometheus metrics, audit log of every change, ETag, end-to-end UI test with axe (0 serious/critical on every screen, light and dark). Not done: an external security review, a 300K-page run inside V6, behaviour against a real Akamai/Cloudflare edge |
+| Migration (§15) | Done: V5 importer (audits → checks and fixes), V5 presets and settings, V5 `.env` import. V5 retirement is your call after two V6 checks per site match V5 within the trust gate |
 
 Known limits: in a full check the real-visitor stage starts after the coverage stage (the blueprint runs them in
 parallel); visits need the page types the coverage stage produces. Live progress for a check started elsewhere
