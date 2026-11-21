@@ -62,12 +62,15 @@ def _filters(f: Dict[str, Any], args: List[Any]) -> List[str]:
     return where
 
 
-def _query(f: Dict[str, Any], run_id: int, prev: Optional[int], site_id: int) -> Tuple[str, List[Any]]:
+def _query(f: Dict[str, Any], run_id: int, prev: Optional[int], site_id: int, with_fc: bool = True) -> Tuple[str, List[Any]]:
+    """The explorer query. with_fc=False leaves out per-page open-fix counts (the expensive part on 300K pages);
+    they are then looked up only for the rows shown."""
     args: List[Any] = [run_id, site_id, prev]
     where = _filters(f, args)
+    fc_cte = f"""WITH fc AS (SELECT fd.page_url, count(DISTINCT fd.fix_id) AS n FROM findings fd JOIN fixes x ON x.id = fd.fix_id
+                  WHERE fd.run_id = $1 AND x.site_id = $2 AND x.status IN {OPEN} GROUP BY fd.page_url)""" if with_fc else ""
     sql = f"""
-      WITH fc AS (SELECT fd.page_url, count(DISTINCT fd.fix_id) AS n FROM findings fd JOIN fixes x ON x.id = fd.fix_id
-                  WHERE fd.run_id = $1 AND x.site_id = $2 AND x.status IN {OPEN} GROUP BY fd.page_url)
+      {fc_cte}
       SELECT p.url, p.http_status, p.final_url, p.title, t.name AS template_name, p.template_id,
              coalesce(p.facts->>'noindex', '0') IN ('1', 'true') AS noindex,
              CASE WHEN coalesce(p.facts->>'canonical_url', '') = '' THEN 'missing'
@@ -75,35 +78,61 @@ def _query(f: Dict[str, Any], run_id: int, prev: Optional[int], site_id: int) ->
              p.facts->>'canonical_url' AS canonical_url,
              (p.facts->>'depth')::int AS depth, (p.facts->>'authority')::float AS authority, (p.facts->>'inlinks')::int AS inlinks,
              (p.facts->>'word_count')::int AS words,
-             coalesce(fc.n, 0) AS open_fixes,
+             {"coalesce(fc.n, 0)" if with_fc else "NULL::bigint"} AS open_fixes,
              CASE WHEN $3::bigint IS NULL THEN NULL WHEN prev.url IS NULL THEN 'new'
                   WHEN prev.http_status IS DISTINCT FROM p.http_status THEN 'status' ELSE NULL END AS change,
              prev.http_status AS previous_status
       FROM pages p
       LEFT JOIN templates t ON t.id = p.template_id
-      LEFT JOIN fc ON fc.page_url = p.url
+      {"LEFT JOIN fc ON fc.page_url = p.url" if with_fc else ""}
       LEFT JOIN pages prev ON prev.run_id = $3 AND prev.url = p.url
-      WHERE p.run_id = $1 {"AND " + " AND ".join(where) if where else ""}"""
+      WHERE p.run_id = $1 {"" if with_fc else "AND $2::bigint IS NOT NULL"} {"AND " + " AND ".join(where) if where else ""}"""
     return sql, args
+
+
+_CHANGES: Dict[Tuple[int, Optional[int]], Dict[str, int]] = {}
+
+
+async def changes_since(pool, run_id: int, prev: Optional[int]) -> Dict[str, int]:
+    """New / changed-status / gone page counts between two checks. Fixed once both checks exist, so cached."""
+    if not prev:
+        return {"new": 0, "status_changed": 0, "gone": 0}
+    key = (run_id, prev)
+    if key not in _CHANGES:
+        r = await pool.fetchrow("""SELECT count(*) FILTER (WHERE o.url IS NULL) AS new,
+                                          count(*) FILTER (WHERE o.url IS NOT NULL AND o.http_status IS DISTINCT FROM p.http_status) AS status_changed
+                                   FROM pages p LEFT JOIN pages o ON o.run_id = $2 AND o.url = p.url WHERE p.run_id = $1""", run_id, prev)
+        gone = await pool.fetchval("""SELECT count(*) FROM pages o WHERE o.run_id = $2
+                                      AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.run_id = $1 AND p.url = o.url)""", run_id, prev)
+        if len(_CHANGES) > 64:
+            _CHANGES.clear()
+        _CHANGES[key] = {"new": r["new"], "status_changed": r["status_changed"], "gone": gone}
+    return _CHANGES[key]
 
 
 async def list_pages(pool, site_id: int, run_id: int, f: Dict[str, Any], sort: str = "url", desc: bool = False,
                      limit: int = 100, offset: int = 0) -> Dict[str, Any]:
     prev = await previous_check(pool, site_id, run_id)
+    changes = await changes_since(pool, run_id, prev)
     if f.get("change") == "gone":
-        return await _gone(pool, run_id, prev, f, limit, offset)
-    sql, args = _query(f, run_id, prev, site_id)
-    total = await pool.fetchval(f"SELECT count(*) FROM ({sql}) x", *args)
+        out = await _gone(pool, run_id, prev, f, limit, offset)
+        out["changes"] = changes
+        return out
+    need_fc = f.get("fixes") in ("yes", "no") or sort == "fixes"
+    count_sql, count_args = _query(f, run_id, prev, site_id, with_fc=need_fc)
+    total = await pool.fetchval(f"SELECT count(*) FROM ({count_sql}) x", *count_args)
     order = SORTS.get(sort, "p.url")
-    rows = await pool.fetch(f"{sql} ORDER BY {order} {'DESC' if desc else 'ASC'} NULLS LAST, p.url LIMIT {int(limit)} OFFSET {int(offset)}",
-                            *args)
-    summary = await pool.fetchrow(f"""SELECT count(*) FILTER (WHERE change = 'new') AS new,
-                                             count(*) FILTER (WHERE change = 'status') AS status_changed
-                                      FROM ({_query({}, run_id, prev, site_id)[0]}) x""", run_id, site_id, prev)
-    gone = await pool.fetchval("""SELECT count(*) FROM pages o WHERE o.run_id = $2
-                                  AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.run_id = $1 AND p.url = o.url)""", run_id, prev) if prev else 0
-    return {"run_id": run_id, "previous_run_id": prev, "total": total, "pages": [dict(r) for r in rows],
-            "changes": {"new": summary["new"], "status_changed": summary["status_changed"], "gone": gone}}
+    sql, args = _query(f, run_id, prev, site_id, with_fc=need_fc)
+    rows = [dict(r) for r in await pool.fetch(
+        f"{sql} ORDER BY {order} {'DESC' if desc else 'ASC'} NULLS LAST, p.url LIMIT {int(limit)} OFFSET {int(offset)}", *args)]
+    if not need_fc and rows:                     # open fixes for just the rows on screen (index: findings run + page)
+        counts = {r["page_url"]: r["n"] for r in await pool.fetch(
+            f"""SELECT fd.page_url, count(DISTINCT fd.fix_id) AS n FROM findings fd JOIN fixes x ON x.id = fd.fix_id
+                WHERE fd.run_id = $1 AND x.site_id = $2 AND x.status IN {OPEN} AND fd.page_url = ANY($3::text[])
+                GROUP BY fd.page_url""", run_id, site_id, [r["url"] for r in rows])}
+        for r in rows:
+            r["open_fixes"] = counts.get(r["url"], 0)
+    return {"run_id": run_id, "previous_run_id": prev, "total": total, "pages": rows, "changes": changes}
 
 
 async def _gone(pool, run_id: int, prev: Optional[int], f: Dict[str, Any], limit: int, offset: int) -> Dict[str, Any]:
