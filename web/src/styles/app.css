@@ -279,6 +279,14 @@ td.nowrap { white-space: nowrap; }
 .btn.danger:disabled { opacity: 0.5; }
 .danger-zone { border-color: color-mix(in srgb, var(--critical) 35%, var(--line)); }
 tr[aria-current="true"] td { background: var(--measure-soft); }
+.ai-box { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; background: var(--surface-2); }
+.ai-draft { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+.ai-draft.rejected { opacity: 0.7; }
+.ai-td { margin: 8px 0 0; display: grid; gap: 2px; } .ai-td dt { font-weight: 600; font-size: 13px; } .ai-td dd { margin: 0 0 6px; }
+.ai-steps { margin: 6px 0 0; padding-left: 20px; font-size: 13.5px; display: grid; gap: 3px; }
+.ai-warn { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--medium); }
+.ai-ev { font: 11.5px var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 .spot-tag { font: 500 11px var(--mono); border: 1px dashed var(--ink-3); border-radius: 999px; padding: 1px 8px; color: var(--ink-2); }
 
 /* ---------- Today: KPI strip ---------- */

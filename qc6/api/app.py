@@ -700,6 +700,99 @@ async def stop_run(run_id: int, me=Depends(current_member)):
                                  "Pause it first; a paused or queued check can be cancelled.")
 
 
+# ------------------------------------------------------------------ AI drafts (local model)
+@app.get("/api/v2/ai/status")
+async def ai_status(me=Depends(current_member)):
+    from qc6 import ai
+    return await ai.status()
+
+
+class AIDraftIn(BaseModel):
+    page_url: Optional[str] = Field(default=None, max_length=2000)
+
+
+async def _fix_row(pool, fix_id: int, me) -> Dict[str, Any]:
+    f = await pool.fetchrow("""SELECT f.*, t.name AS template_name, s.base_url, s.primary_host, s.access_token, s.settings AS site_settings,
+                                      s.id AS sid FROM fixes f JOIN sites s ON s.id = f.site_id LEFT JOIN templates t ON t.id = f.template_id
+                               WHERE f.id = $1 AND s.workspace_id = $2""", fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    return dict(f)
+
+
+@app.post("/api/v2/fixes/{fix_id}/ai", status_code=201)
+async def ai_draft(fix_id: int, body: AIDraftIn, me=Depends(current_member)):
+    """Ask the local model for a draft (fix steps, or a title and description). Saved as a draft for a person to review."""
+    from qc6 import ai
+    from qc6.linkgraph import main_text_words
+    from qc6.workers.extras import fetch_html
+    can_edit(me)
+    pool = await get_pool()
+    f = await _fix_row(pool, fix_id, me)
+    url = body.page_url or await pool.fetchval("SELECT page_url FROM findings WHERE fix_id = $1 ORDER BY run_id DESC, page_url LIMIT 1", fix_id)
+    page = await pool.fetchrow("""SELECT p.* FROM pages p JOIN runs r ON r.id = p.run_id WHERE r.site_id = $1 AND p.url = $2
+                                  ORDER BY p.id DESC LIMIT 1""", f["sid"], url) if url else None
+    site = {"id": f["sid"], "base_url": f["base_url"], "primary_host": f["primary_host"], "access_token": f["access_token"],
+            "settings": f["site_settings"]}
+    text = ""
+    if url:
+        try:
+            html = await fetch_html(url, site)
+            text = " ".join(main_text_words(html or ""))[:1800]
+        except httpx.HTTPError:
+            text = ""
+    kind = "title_description" if ai.wants_title(f) else "fix_steps"
+    ev = ai.evidence_for(f, dict(page) if page else None, text)
+    try:
+        out = await ai.generate(kind, ev)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    row = await pool.fetchrow("""INSERT INTO ai_suggestions (site_id, fix_id, page_url, kind, model, evidence, draft, created_by)
+                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+                              f["sid"], fix_id, url, kind, out.pop("model"), ev, out, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "ai.draft", f"fix:{fix_id}", {"kind": kind, "suggestion": row["id"]})
+    return dict(row)
+
+
+@app.get("/api/v2/fixes/{fix_id}/ai")
+async def ai_list(fix_id: int, me=Depends(current_member)):
+    pool = await get_pool()
+    await _fix_row(pool, fix_id, me)
+    rows = await pool.fetch("""SELECT a.*, m.name AS decided_by_name FROM ai_suggestions a LEFT JOIN members m ON m.id = a.decided_by
+                               WHERE a.fix_id = $1 ORDER BY a.id DESC LIMIT 20""", fix_id)
+    return {"suggestions": [dict(r) for r in rows]}
+
+
+class AIDecision(BaseModel):
+    status: str
+    final: Optional[Dict[str, Any]] = None
+
+
+@app.patch("/api/v2/ai/{sid}")
+async def ai_decide(sid: int, body: AIDecision, me=Depends(current_member)):
+    """Approve (optionally with edits) or reject a draft. Approving adds a note to the fix's history."""
+    from qc6 import ai
+    can_edit(me)
+    if body.status not in ("approved", "rejected"):
+        raise problem(400, "Approve or reject the draft")
+    pool = await get_pool()
+    a = await pool.fetchrow("""SELECT a.* FROM ai_suggestions a JOIN sites s ON s.id = a.site_id WHERE a.id = $1 AND s.workspace_id = $2""",
+                            sid, me["workspace_id"])
+    if a is None:
+        raise problem(404, "Draft not found")
+    final = None
+    if body.status == "approved":
+        merged = {**(a["draft"] or {}), **(body.final or {})}
+        final = ai.clean(a["kind"], merged)                     # edited text is plain text too, with the same length checks
+    row = await pool.fetchrow("""UPDATE ai_suggestions SET status = $2, final = $3, decided_by = $4, decided_at = now()
+                                 WHERE id = $1 RETURNING *""", sid, body.status, final, me["id"])
+    if body.status == "approved" and a["fix_id"]:
+        await services.update_fix(pool, a["fix_id"], me["id"], comment="Approved an AI draft: " +
+                                  (f"title \"{final.get('title')}\"" if final.get("title") else "; ".join(final.get("steps", [])[:2]))[:500])
+    await services.log(pool, me["workspace_id"], me["id"], f"ai.{body.status}", f"ai:{sid}", {})
+    return dict(row)
+
+
 # ------------------------------------------------------------------ delete
 @app.delete("/api/v2/runs/{run_id}")
 async def delete_run(run_id: int, me=Depends(current_member)):

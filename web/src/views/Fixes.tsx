@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Fix, type Member, type Site } from "../api";
+import { api, type AIDraft, type AIText, type Fix, type Member, type Site } from "../api";
 import { go } from "../main";
 import { flash, slideIn, useViewMotion } from "../motion";
 import { Avatar, ErrorBox, Sev, count, day, statusPill, useLoad, useToast } from "../ui";
@@ -122,6 +122,7 @@ function FixDrawer({ id, members, onChanged }: { id: number; members: Member[]; 
               <div><h3>How to fix</h3><p>{f.texts.fix}</p></div>
               <div><h3>How we'll know</h3><p>{f.texts.verify}</p></div>
             </div>
+            <AISection fixId={id} onChanged={() => d.reload()} />
             <div className="row">
               {f.status !== "in_progress" && f.status !== "verified" && <button className="btn" disabled={busy} onClick={() => change({ status: "in_progress" }, "Marked as in progress.")}>Start working</button>}
               {["open", "in_progress"].includes(f.status) && <button className="btn primary" disabled={busy} onClick={() => change({ status: "fixed_pending_check" }, "Marked fixed. The next check will confirm it.")}>I've fixed it</button>}
@@ -175,4 +176,75 @@ function eventText(e: { kind: string; detail: any; actor: string | null }, membe
     case "ticket": return `${who} linked a ticket`;
     default: return e.kind;
   }
+}
+
+
+function AISection({ fixId, onChanged }: { fixId: number; onChanged: () => void }) {
+  const st = useLoad(() => api.aiStatus().catch(() => null), []);
+  const list = useLoad(() => api.aiDrafts(fixId), [fixId]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [edit, setEdit] = useState<{ id: number; title: string; description: string } | null>(null);
+  const toast = useToast();
+  const make = async () => {
+    setBusy(true); setErr(null);
+    try { await api.aiDraft(fixId); list.reload(); } catch (e: any) { setErr(e.detail || e.message); } finally { setBusy(false); }
+  };
+  const decide = async (a: AIDraft, status: "approved" | "rejected", final?: Partial<AIText>) => {
+    try { await api.aiDecide(a.id, status, final); toast(status === "approved" ? "Approved. It's noted on the fix." : "Rejected."); setEdit(null); list.reload(); onChanged(); }
+    catch (e: any) { toast(e.detail || e.message); }
+  };
+  const drafts = list.data?.suggestions || [];
+  return (
+    <section className="ai-box" aria-labelledby="ai-h">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h3 id="ai-h">Draft with local AI</h3>
+        <button className="btn small" disabled={busy || !st.data?.ready} onClick={make}>{busy ? "Writing… (can take a minute)" : drafts.length ? "Another draft" : "Write a draft"}</button>
+      </div>
+      <p className="faint" style={{ fontSize: 12.5, margin: "4px 0 0" }}>
+        {st.data?.ready ? `Uses ${st.data.model} on your own machine through Ollama. A draft is only a suggestion: approve, edit or reject it.`
+          : st.data?.help || "Checking for Ollama…"}</p>
+      {err && <div className="error-box" style={{ marginTop: 8 }}>{err}</div>}
+      {drafts.map((a) => {
+        const t = a.final || a.draft;
+        const editing = edit?.id === a.id;
+        return (
+          <div className={`ai-draft ${a.status}`} key={a.id}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span className={`pill ${a.status === "approved" ? "good" : a.status === "rejected" ? "bad" : "new"}`}>
+                {a.status === "approved" ? `Approved${a.decided_by_name ? ` by ${a.decided_by_name}` : ""}` : a.status === "rejected" ? "Rejected" : "Draft"}</span>
+              <span className="faint" style={{ fontSize: 12 }}>{a.model}</span>
+            </div>
+            {a.kind === "title_description" && (editing ? (
+              <div className="grid" style={{ gap: 6, marginTop: 8 }}>
+                <label className="grid" style={{ gap: 2 }}>Title <span className="faint">{edit!.title.length} characters (30-60)</span>
+                  <input className="input" value={edit!.title} onChange={(e) => setEdit({ ...edit!, title: e.target.value })} /></label>
+                <label className="grid" style={{ gap: 2 }}>Description <span className="faint">{edit!.description.length} characters (70-160)</span>
+                  <textarea className="input" rows={3} value={edit!.description} onChange={(e) => setEdit({ ...edit!, description: e.target.value })} /></label>
+              </div>
+            ) : (
+              <dl className="ai-td">
+                <dt>Title <span className="faint">{(t.title || "").length} characters</span></dt><dd>{t.title}</dd>
+                <dt>Description <span className="faint">{(t.description || "").length} characters</span></dt><dd>{t.description}</dd>
+              </dl>
+            ))}
+            {t.warnings?.length > 0 && <ul className="ai-warn">{t.warnings.map((w) => <li key={w}>{w}</li>)}</ul>}
+            {t.steps?.length > 0 && <ol className="ai-steps">{t.steps.map((x, i) => <li key={i}>{x}</li>)}</ol>}
+            {t.reason && <p className="dim" style={{ fontSize: 13, margin: "6px 0 0" }}>{t.reason}</p>}
+            <details style={{ marginTop: 6 }}><summary className="faint" style={{ cursor: "pointer", fontSize: 12.5 }}>What the model was given</summary>
+              <pre className="ai-ev">{JSON.stringify(a.evidence, null, 2)}</pre></details>
+            {a.status === "draft" && (
+              <div className="row" style={{ marginTop: 8 }}>
+                {editing ? <button className="btn primary small" onClick={() => decide(a, "approved", { title: edit!.title, description: edit!.description })}>Approve my edit</button>
+                  : <button className="btn primary small" onClick={() => decide(a, "approved")}>Approve</button>}
+                {a.kind === "title_description" && !editing &&
+                  <button className="btn small" onClick={() => setEdit({ id: a.id, title: t.title || "", description: t.description || "" })}>Edit</button>}
+                <button className="btn quiet small" onClick={() => decide(a, "rejected")}>Reject</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
 }

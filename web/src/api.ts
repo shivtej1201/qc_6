@@ -89,6 +89,9 @@ export interface SearchData {
   cannibalisation: { query: string; impressions: number; clicks: number; pages_top20: number; pages: { page: string; position: number; clicks: number; impressions: number }[] }[];
   thresholds: { striking_min_impressions: number; cannibal_min_impressions: number } }
 
+export interface AIDraft { id: number; kind: "fix_steps" | "title_description"; model: string; page_url: string | null; status: "draft" | "approved" | "rejected";
+  evidence: Record<string, any>; draft: AIText; final: AIText | null; decided_by_name?: string | null; created_at: string }
+export interface AIText { title?: string; description?: string; steps: string[]; reason: string; check?: string; warnings: string[] }
 export interface SpotStarted { run_id: number; urls: number; other_hosts: number; other_examples: string[]; duplicates: number; spot: boolean; label: string }
 
 export const api = {
@@ -104,6 +107,10 @@ export const api = {
     events: { kind: string; detail: any; created_at: string; actor: string | null }[]; page_history?: Record<string, string> }>("GET", `/api/v2/fixes/${id}`),
   patchFix: (id: number, b: Record<string, unknown>) => req<Fix>("PATCH", `/api/v2/fixes/${id}`, b),
   runs: (sid: number) => req<{ runs: Run[] }>("GET", `/api/v2/sites/${sid}/runs`),
+  aiStatus: () => req<{ ready: boolean; reachable: boolean; model: string; models: string[]; help: string | null }>("GET", "/api/v2/ai/status"),
+  aiDrafts: (fixId: number) => req<{ suggestions: AIDraft[] }>("GET", `/api/v2/fixes/${fixId}/ai`),
+  aiDraft: (fixId: number) => req<AIDraft>("POST", `/api/v2/fixes/${fixId}/ai`, {}),
+  aiDecide: (id: number, status: "approved" | "rejected", final?: Partial<AIText>) => req<AIDraft>("PATCH", `/api/v2/ai/${id}`, { status, final }),
   deleteRun: (id: number) => req<{ pages: number; fixes_removed: number; screenshots_removed: number }>("DELETE", `/api/v2/runs/${id}`),
   deleteJourney: (id: number) => req<{ runs: number }>("DELETE", `/api/v2/journeys/${id}`),
   deleteSite: (sid: number, confirm: string) => req<{ checks: number }>("DELETE", `/api/v2/sites/${sid}`, { confirm }),
