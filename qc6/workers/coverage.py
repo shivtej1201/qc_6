@@ -94,13 +94,16 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     db_path = os.path.join(run_dir, "coverage.db")
     job = f"RUN{run_id}"
     host = site["primary_host"]
-    rate = float(opts.get("rate_rps", site["settings"].get("rate_rps", 12)))
-    coverage_rate = max(0.5, rate * (1.0 - settings.visit_share)) if opts.get("with_visits", True) else rate
+    from qc6.presets import engine_options
+    eo = engine_options(site.get("settings") or {}, opts)          # V5 presets + per-site V5 settings
+    share = (1.0 - settings.visit_share) if opts.get("with_visits", True) else 1.0   # visitors get the rest of the budget
+    coverage_rate, coverage_max = max(0.5, eo["target_rps"] * share), max(0.5, eo["max_rps"] * share)
     eng = FingerprintEngine(
         db_path=db_path, job_id=job, job_name=f"Run {run_id}", allow_local=settings.allow_private_targets,
-        primary_domain=host, target_rps=coverage_rate, min_rps=max(0.5, coverage_rate / 3), max_rps=coverage_rate,
-        source_concurrency=int(opts.get("source_concurrency", 20)), dest_concurrency=int(opts.get("dest_concurrency", 20)),
-        image_concurrency=int(opts.get("image_concurrency", 30)), audit_images=opts.get("images", True),
+        primary_domain=host, target_rps=coverage_rate, min_rps=max(0.5, coverage_rate / 3), max_rps=coverage_max,
+        source_concurrency=eo["source_concurrency"], dest_concurrency=eo["dest_concurrency"],
+        image_concurrency=eo["image_concurrency"], audit_images=opts.get("images", True),
+        read_timeout=eo.get("read_timeout"), max_retries=eo.get("max_retries"),
         audit_seo=True, probe_url=f"{site['base_url'].rstrip('/')}/robots.txt")
     eng.extra_headers = identity_headers(site)
     entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
@@ -154,13 +157,14 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
                           fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any]) -> Dict[str, Any]:
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
-    pages = c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title,
+    pages = c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title, s.page_type, s.business,
                                 p.h1_count, p.title_length, p.meta_description_length, p.word_count, p.internal_links,
                                 p.external_links, p.noindex, p.canonical_url, p.schema_types, p.js_rendering_suspected
                            FROM on_page_source_pages s LEFT JOIN on_page_seo_pages p
                              ON p.job_id = s.job_id AND p.source_page_url = s.source_page_url
                           WHERE s.job_id = ?""", (job,)).fetchall() if _has_col(c, "on_page_seo_pages", "canonical_url") else \
-        c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title, p.h1_count, p.title_length,
+        c.execute("""SELECT s.source_page_url AS url, s.http_status, s.final_url, s.page_title, s.page_type, s.business,
+                            p.h1_count, p.title_length,
                             p.meta_description_length, p.word_count, p.internal_links, p.external_links, p.noindex,
                             '' AS canonical_url, p.schema_types, p.js_rendering_suspected
                        FROM on_page_source_pages s LEFT JOIN on_page_seo_pages p
@@ -174,6 +178,23 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         fp = fingerprints.get(r["url"])
         if fp is not None:
             page_tpl[r["url"]] = idx.assign(fp, urllib.parse.urlsplit(r["url"]).path)
+    # the site's own page-type labels (V5 reads data-pageType, e.g. "b2c-pdp" -> "B2C PDP") name a template when
+    # most of its pages agree; otherwise the name comes from the URL pattern
+    from collections import Counter
+    from qc6.presets import page_type_label
+    site_labels: Dict[int, Counter] = {}
+    for r in pages:
+        t = page_tpl.get(r["url"])
+        lab = page_type_label(r["page_type"], r["business"])
+        if t is not None:
+            site_labels.setdefault(t, Counter())[lab] += 1
+    def tpl_name(t: Dict[str, Any]) -> str:
+        cnt = site_labels.get(t["id"])
+        if cnt:
+            lab, n = cnt.most_common(1)[0]
+            if lab and n >= 0.6 * sum(cnt.values()):
+                return f"{lab} pages"
+        return t["name"]
     db_tpl: Dict[int, int] = {}
     names: Dict[int, str] = {}
     async with pool.acquire() as conn:
@@ -193,21 +214,23 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
                 if pick is not None:
                     tid = pick[1]
                     await conn.execute("UPDATE templates SET name = $2, path_pattern = $3, page_count = $4 WHERE id = $1",
-                                       tid, t["name"], t["pattern"], t["pages"])
+                                       tid, tpl_name(t), t["pattern"], t["pages"])
                 else:
                     tid = await conn.fetchval(
                         "INSERT INTO templates (site_id, fingerprint, name, path_pattern, page_count) VALUES ($1,$2,$3,$4,$5) RETURNING id",
-                        site["id"], T.to_signed(fp), t["name"], t["pattern"], t["pages"])
+                        site["id"], T.to_signed(fp), tpl_name(t), t["pattern"], t["pages"])
                 taken.add(tid)
                 db_tpl[t["id"]] = tid
-                names[tid] = t["name"]
+                names[tid] = tpl_name(t)
             await conn.executemany(
                 """INSERT INTO pages (run_id, url, path, template_id, http_status, final_url, title, facts, fetched_at)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now()) ON CONFLICT (run_id, url) DO NOTHING""",
                 [(run_id, r["url"], urllib.parse.urlsplit(r["url"]).path or "/",
                   db_tpl.get(page_tpl.get(r["url"], -1)), r["http_status"], r["final_url"], r["page_title"],
-                  {k: r[k] for k in ("h1_count", "title_length", "meta_description_length", "word_count", "internal_links",
-                                     "external_links", "noindex", "canonical_url", "schema_types", "js_rendering_suspected")})
+                  {**{k: r[k] for k in ("h1_count", "title_length", "meta_description_length", "word_count", "internal_links",
+                                        "external_links", "noindex", "canonical_url", "schema_types", "js_rendering_suspected")},
+                   **({"site_page_type": page_type_label(r["page_type"], r["business"])}
+                      if page_type_label(r["page_type"], r["business"]) else {})})
                  for r in pages])
 
     # issues -> findings -> fixes

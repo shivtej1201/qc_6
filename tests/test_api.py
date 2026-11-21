@@ -157,3 +157,25 @@ def test_insights(world):
     assert d["time_to_verify"]["count"] == 0 and "no fix" in d["time_to_verify"]["basis"]
     assert all(isinstance(h, str) and h.endswith(".") for h in d["headlines"])
     assert c.get(f"/api/v2/sites/{world['other_site']}/insights", headers=H).status_code == 404   # another workspace's site
+
+
+def test_presets_and_v5_settings(world):
+    c = world["c"]
+    p = c.get(f"/api/v2/sites/{world['site']}/presets", headers=H).json()
+    assert [x["id"] for x in p["presets"]] == ["conservative", "target", "max_tested", "enterprise_150k"]
+    assert p["pages"] and all(x["estimate"]["minutes"] > 0 for x in p["presets"])
+    r = c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "conservative", "max_pages": 5000, "read_timeout": 20, "max_retries": 1},
+                headers=H)
+    st = r.json()["settings"]
+    assert (st["preset"], st["rate_rps"], st["max_pages"], st["read_timeout"], st["max_retries"]) == ("conservative", 8.0, 5000, 20, 1)
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "warp"}, headers=H).status_code == 400
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"max_pages": 0}, headers=H).status_code == 422
+    assert c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "target"}, headers={"X-QC-User": "view@api.test"}).status_code == 403
+    c.patch(f"/api/v2/sites/{world['site']}", json={"preset": "target", "max_pages": 300000}, headers=H)   # put back for later tests
+
+
+def test_site_page_type_names_the_template(world):
+    """Article pages carry data-pageType="b2c-blog": V5's classifier reads it and V6 names the page type after it."""
+    c = world["c"]
+    names = [t["name"] for t in c.get(f"/api/v2/sites/{world['site']}/templates", headers=H).json()["templates"]]
+    assert "B2C BLOG pages" in names and "Product pages" in names     # no data-pageType -> named from the URL

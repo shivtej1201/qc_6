@@ -171,6 +171,17 @@ td .sub { display: block; font-weight: 400; font-size: 12.5px; color: var(--ink-
   padding: 10px 16px; border-radius: 8px; font-size: 14px; z-index: 60; max-width: calc(100% - 32px); }
 .code-box { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 12.5px/1.5 var(--mono); overflow-wrap: anywhere; }
 
+/* ---------- Speed presets (Settings) ---------- */
+.presets { border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.presets legend { padding: 0; margin-bottom: 8px; }
+.preset { position: relative; display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 12px 40px; cursor: pointer; font-size: 13px; }
+.preset:hover { border-color: var(--ink-3); }
+.preset.on { border-color: var(--measure); background: var(--measure-soft); }
+.preset input { position: absolute; left: 14px; top: 15px; accent-color: var(--measure); }
+.preset-head { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+.preset-time { font: 500 13px var(--mono); color: var(--ink); }
+@media (max-width: 760px) { .presets { grid-template-columns: minmax(0, 1fr); } }
+
 /* ---------- Insights ---------- */
 .g-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .headlines ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 16px; }

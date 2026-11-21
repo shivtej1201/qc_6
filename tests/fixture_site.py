@@ -39,7 +39,7 @@ def article(n: int) -> str:
     paras = "".join(f"<p>Paragraph {k} of article {n}.</p>" for k in range(8))
     imgs = "".join(f'<img loading="lazy" src="/img/a{n}{k}.png" width="200" height="120" alt="Figure {k}">' for k in range(3))
     return (HEAD.format(title=f"How EMIs work, part {n}") +
-            f'<main class="post"><article class="story"><h1>How EMIs work, part {n}</h1>{paras}<div class="tall"></div>{imgs}</article></main>' + FOOT)
+            f'<main class="post" data-pageType="b2c-blog"><article class="story"><h1>How EMIs work, part {n}</h1>{paras}<div class="tall"></div>{imgs}</article></main>' + FOOT)
 
 
 def city(n: int) -> str:

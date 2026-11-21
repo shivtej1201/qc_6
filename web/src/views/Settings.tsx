@@ -5,6 +5,7 @@ import { ErrorBox, useLoad, useToast } from "../ui";
 
 export function SettingsView({ site }: { site: Site; params: URLSearchParams }) {
   const s = useLoad(() => api.site(site.id), [site.id]);
+  const pr = useLoad(() => api.presets(site.id), [site.id]);
   const ref = useViewMotion<HTMLDivElement>([!!s.data]);
   const toast = useToast();
   const [form, setForm] = useState<Record<string, any>>({});
@@ -14,7 +15,8 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
     if (!s.data) return;
     const st = s.data.settings || {};
     setForm({
-      name: s.data.name, rate_rps: st.rate_rps ?? 12, visitors: st.visitors ?? 6, consent: st.consent ?? "accept",
+      name: s.data.name, preset: st.preset ?? "target", rate_rps: st.rate_rps ?? 12, visitors: st.visitors ?? 6, consent: st.consent ?? "accept",
+      max_pages: st.max_pages ?? "", read_timeout: st.read_timeout ?? "", max_retries: st.max_retries ?? "",
       check_schedule: st.check_schedule ?? "", sitemap: st.sitemap ?? "",
       slack: st.alerts?.slack_webhook ?? "", teams: st.alerts?.teams_webhook ?? "",
       on: st.alerts?.on ?? ["summary", "regressed", "journey_failed", "access"],
@@ -31,7 +33,10 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
       : form.provider === "jira" ? { provider: "jira", base_url: form.base_url, project: form.project, email: form.email } : { provider: "none" };
     try {
       await api.patchSite(site.id, {
-        name: form.name, rate_rps: Number(form.rate_rps), visitors: Number(form.visitors), consent: form.consent,
+        name: form.name, preset: form.preset, rate_rps: Number(form.rate_rps), visitors: Number(form.visitors), consent: form.consent,
+        max_pages: form.max_pages === "" ? undefined : Number(form.max_pages),
+        read_timeout: form.read_timeout === "" ? undefined : Number(form.read_timeout),
+        max_retries: form.max_retries === "" ? undefined : Number(form.max_retries),
         check_schedule: form.check_schedule, sitemap: form.sitemap || undefined,
         alerts: { slack_webhook: form.slack, teams_webhook: form.teams, on: form.on }, tickets,
       });
@@ -56,7 +61,21 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
         <section className="panel grid" data-reveal>
           <h2>Checking</h2>
           <Field id="s-name" label="Name"><input id="s-name" className="input" value={form.name || ""} onChange={set("name")} /></Field>
-          <Field id="s-rate" label="Speed limit" hint="Requests per second to this site, shared by every check. Ask the site's operators what the CDN allows.">
+          <fieldset className="presets">
+            <legend><b>Speed</b> <span className="faint" style={{ fontSize: 13 }}>
+              {pr.data?.pages ? `Times are for this site's ${pr.data.pages.toLocaleString("en-IN")} pages, from QC V5's measured request model.` : "Times appear after the first check."}</span></legend>
+            {(pr.data?.presets || []).map((p) => (
+              <label key={p.id} className={`preset ${form.preset === p.id ? "on" : ""}`}>
+                <input type="radio" name="preset" value={p.id} checked={form.preset === p.id}
+                  onChange={() => setForm({ ...form, preset: p.id, rate_rps: p.target_rps })} />
+                <span className="preset-head"><b>{p.label}</b><span className="mono">{p.target_rps} req/s</span></span>
+                <span className="faint">{p.description}</span>
+                {p.estimate && <span className="preset-time num">{p.estimate.minutes < 1 ? "under a minute" : p.estimate.minutes < 90
+                  ? `about ${Math.round(p.estimate.minutes)} min` : `about ${(p.estimate.minutes / 60).toFixed(1)} h`}</span>}
+              </label>
+            ))}
+          </fieldset>
+          <Field id="s-rate" label="Speed limit" hint="Requests per second to this site, shared by every check. A number you type here is never exceeded. Ask the site's operators what the CDN allows.">
             <input id="s-rate" className="input" type="number" min={0.5} max={200} step={0.5} value={form.rate_rps ?? ""} onChange={set("rate_rps")} /></Field>
           <Field id="s-vis" label="Visitors at a time" hint="People-like browser visits in parallel (1–20). Each reads one page at a time.">
             <input id="s-vis" className="input" type="number" min={1} max={20} value={form.visitors ?? ""} onChange={set("visitors")} /></Field>
@@ -66,6 +85,18 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
             <input id="s-sched" className="input" placeholder="daily 06:30" value={form.check_schedule || ""} onChange={set("check_schedule")} /></Field>
           <Field id="s-sitemap" label="Sitemap" hint="Leave empty to find it from robots.txt.">
             <input id="s-sitemap" className="input" placeholder={`${site.base_url}/sitemap.xml`} value={form.sitemap || ""} onChange={set("sitemap")} /></Field>
+          <details>
+            <summary style={{ cursor: "pointer" }}>More: page limit, timeout, retries</summary>
+            <div className="grid g-3" style={{ marginTop: 12 }}>
+              <Field id="s-max" label="Most pages per check" hint="Empty: 300,000.">
+                <input id="s-max" className="input" type="number" min={1} max={1000000} value={form.max_pages} onChange={set("max_pages")} /></Field>
+              <Field id="s-rto" label="Wait for a page (seconds)" hint="Empty: 15, as in V5.">
+                <input id="s-rto" className="input" type="number" min={2} max={120} value={form.read_timeout} onChange={set("read_timeout")} /></Field>
+              <Field id="s-ret" label="Retries" hint="Empty: 1, as in V5.">
+                <input id="s-ret" className="input" type="number" min={0} max={5} value={form.max_retries} onChange={set("max_retries")} /></Field>
+            </div>
+            <p className="faint" style={{ fontSize: 13, margin: "10px 0 0" }}>Moving from QC V5? <span className="mono">python -m qc6.admin import-v5-config {site.id} path/to/.env</span> copies these from your V5 settings.</p>
+          </details>
         </section>
         <section className="panel grid" data-reveal>
           <h2>Alerts</h2>

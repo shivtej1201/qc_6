@@ -195,6 +195,10 @@ class SitePatch(BaseModel):
     sitemap: Optional[str] = Field(default=None, max_length=500)
     alerts: Optional[Dict[str, Any]] = None
     tickets: Optional[Dict[str, Any]] = None
+    preset: Optional[str] = None
+    max_pages: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    read_timeout: Optional[float] = Field(default=None, ge=2, le=120)
+    max_retries: Optional[int] = Field(default=None, ge=0, le=5)
 
 
 @app.patch("/api/v2/sites/{site_id}")
@@ -233,7 +237,14 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
             st["tickets"] = clean_config({**(st.get("tickets") or {}), **body.tickets})
         except ValueError as e:
             raise problem(400, "Check the ticket settings", str(e))
-    for k in ("rate_rps", "visitors", "mobile_share", "consent", "check_schedule", "sitemap"):
+    if body.preset is not None:
+        from qc6.presets import PRESETS
+        if body.preset not in PRESETS:
+            raise problem(400, "Pick one of the speed presets", ", ".join(PRESETS))
+        st["preset"] = body.preset
+        if body.rate_rps is None:                          # choosing a preset sets its speed
+            st["rate_rps"] = PRESETS[body.preset]["target_rps"]
+    for k in ("rate_rps", "visitors", "mobile_share", "consent", "check_schedule", "sitemap", "max_pages", "read_timeout", "max_retries"):
         v = getattr(body, k)
         if v is not None:
             st[k] = v
@@ -345,6 +356,19 @@ async def insights(site_id: int, runs: int = Query(12, ge=2, le=60), me=Depends(
     from qc6.insights import site_insights
     await site_for(site_id, me)
     return await site_insights(await get_pool(), site_id, runs)
+
+
+@app.get("/api/v2/sites/{site_id}/presets")
+async def presets(site_id: int, me=Depends(current_member)):
+    """V5 speed presets with how long the page check would take for this site (from its last check's size)."""
+    from qc6.presets import DEFAULT_PRESET, PRESETS, estimate
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed'
+                                   AND summary ? 'pages' ORDER BY id DESC LIMIT 1""", site_id)
+    st = s["settings"] or {}
+    return {"current": st.get("preset", DEFAULT_PRESET), "rate_rps": st.get("rate_rps"), "pages": pages,
+            "presets": [{"id": k, **v, "estimate": estimate(pages, v["target_rps"]) if pages else None} for k, v in PRESETS.items()]}
 
 
 # ------------------------------------------------------------------ fixes
@@ -474,7 +498,7 @@ class RunIn(BaseModel):
 async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     can_edit(me)
     await site_for(site_id, me)
-    allowed = {"urls", "sitemap", "max_pages", "rate_rps", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
+    allowed = {"urls", "sitemap", "max_pages", "rate_rps", "preset", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
     opts = {k: v for k, v in body.options.items() if k in allowed}
     if "urls" in opts and (not isinstance(opts["urls"], list) or len(opts["urls"]) > 300_000):
         raise problem(400, "urls must be a list of at most 3,00,000 addresses")
