@@ -17,6 +17,7 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
     setForm({
       name: s.data.name, preset: st.preset ?? "target", rate_rps: st.rate_rps ?? 12, visitors: st.visitors ?? 6, consent: st.consent ?? "accept",
       max_pages: st.max_pages ?? "", read_timeout: st.read_timeout ?? "", max_retries: st.max_retries ?? "",
+      gsc_property: st.gsc_property ?? "", ga4_property_id: st.ga4_property_id ?? "",
       include: (st.scope?.include || []).join("\n"), exclude: (st.scope?.exclude || []).join("\n"),
       stg_user: st.staging?.username ?? "", stg_pass: "",
       stg_headers: (st.staging?.header_names || []).map((h: string) => `${h}: •••`).join("\n"),
@@ -42,6 +43,7 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
         read_timeout: form.read_timeout === "" ? undefined : Number(form.read_timeout),
         max_retries: form.max_retries === "" ? undefined : Number(form.max_retries),
         scope: { include: lines(form.include), exclude: lines(form.exclude) },
+        gsc_property: form.gsc_property.trim(), ga4_property_id: form.ga4_property_id.trim(),
         staging: stagingBody(form, s.data?.settings?.staging),
         check_schedule: form.check_schedule, sitemap: form.sitemap || undefined,
         alerts: { slack_webhook: form.slack, teams_webhook: form.teams, on: form.on }, tickets,
@@ -123,6 +125,16 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
             <textarea id="s-sh" className="input" rows={2} value={form.stg_headers} onChange={setT("stg_headers")} placeholder="X-Env: staging" /></Field>
           {s.data?.settings?.staging && <div><button type="button" className="btn quiet" onClick={async () => {
             await api.patchSite(site.id, { staging: { clear: true } }); toast("Staging login removed."); s.reload(); }}>Remove the staging login</button></div>}
+        </section>
+        <section className="panel grid" data-reveal>
+          <h2>Search Console and GA4</h2>
+          <p className="faint" style={{ fontSize: 13, margin: 0 }}>Free. QC reads your own numbers with a Google service account; see Growth, Search queries for the steps.</p>
+          <div className="grid g-2">
+            <Field id="s-gsc" label="Search Console property" hint={`For example sc-domain:${site.primary_host.replace(/^www\./, "")}`}>
+              <input id="s-gsc" className="input" value={form.gsc_property} onChange={set("gsc_property")} /></Field>
+            <Field id="s-ga4" label="GA4 property id" hint="Optional. A number, from GA4 Admin, Property details.">
+              <input id="s-ga4" className="input" inputMode="numeric" value={form.ga4_property_id} onChange={set("ga4_property_id")} /></Field>
+          </div>
         </section>
         <section className="panel grid" data-reveal>
           <h2>Alerts</h2>

@@ -223,6 +223,8 @@ class SitePatch(BaseModel):
     alerts: Optional[Dict[str, Any]] = None
     tickets: Optional[Dict[str, Any]] = None
     preset: Optional[str] = None
+    gsc_property: Optional[str] = Field(default=None, max_length=300)
+    ga4_property_id: Optional[str] = Field(default=None, max_length=20)
     scope: Optional[Dict[str, List[str]]] = None
     staging: Optional[Dict[str, Any]] = None
     max_pages: Optional[int] = Field(default=None, ge=1, le=1_000_000)
@@ -278,6 +280,16 @@ async def patch_site(site_id: int, body: SitePatch, me=Depends(current_member)):
                 st["staging"] = stg
     except AccessError as e:
         raise problem(400, "Check the crawl scope / staging access", str(e))
+    if body.gsc_property is not None:
+        g = body.gsc_property.strip()
+        if g and not (g.startswith("sc-domain:") or re.match(r"^https?://[^/\s]+/$", g)):
+            raise problem(400, "Check the Search Console property",
+                          'Use "sc-domain:example.com" for a domain property or the full address ending in / for a URL-prefix property.')
+        st["gsc_property"] = g
+    if body.ga4_property_id is not None:
+        if body.ga4_property_id and not body.ga4_property_id.isdigit():
+            raise problem(400, "The GA4 property id is a number", "Find it in GA4 under Admin, Property details.")
+        st["ga4_property_id"] = body.ga4_property_id
     if body.preset is not None:
         from qc6.presets import PRESETS
         if body.preset not in PRESETS:
@@ -742,6 +754,48 @@ async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member
         raise problem(400, str(e))
     except LookupError as e:
         raise problem(404, str(e))
+
+
+@app.get("/api/v2/sites/{site_id}/growth/opportunities")
+async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+                        min_impressions: int = Query(2500, ge=1), me=Depends(current_member)):
+    """Pages ranked by QC's opportunity score, with the reasons in words and an action bucket (CrawlPulse FEAT-15)."""
+    from qc6.opportunity import page_opportunities
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, None, pool)
+    d = await page_opportunities(pool, site_id, rid, min_impressions)
+    rows = [p for p in d["pages"] if not bucket or p["bucket"] == bucket]
+    return {**{k: v for k, v in d.items() if k != "pages"}, "total": len(rows), "pages": rows[offset:offset + limit]}
+
+
+@app.get("/api/v2/sites/{site_id}/growth/search")
+async def search_insights(site_id: int, striking_min: int = Query(2500, ge=1), cannibal_min: int = Query(1000, ge=1),
+                          me=Depends(current_member)):
+    from qc6 import search_console as sc
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    return {**await sc.status(pool, s), "striking": await sc.striking_distance(pool, site_id, striking_min),
+            "cannibalisation": await sc.cannibalisation(pool, site_id, cannibal_min),
+            "thresholds": {"striking_min_impressions": striking_min, "cannibal_min_impressions": cannibal_min}}
+
+
+@app.post("/api/v2/sites/{site_id}/growth/sync")
+async def search_sync(site_id: int, me=Depends(current_member)):
+    from qc6 import search_console as sc
+    can_edit(me)
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    try:
+        out = await sc.sync(pool, s)
+    except (RuntimeError, ValueError) as e:
+        await sc.record_error(pool, site_id, str(e))
+        raise problem(400, "Search Console sync didn't work", str(e))
+    except httpx.HTTPError as e:
+        await sc.record_error(pool, site_id, f"Google didn't answer ({type(e).__name__}).")
+        raise problem(502, "Google didn't answer", type(e).__name__)
+    await services.log(pool, me["workspace_id"], me["id"], "search.sync", f"site:{site_id}", {"rows": out["rows"]})
+    return out
 
 
 @app.get("/api/v2/runs/{run_id}/facts/{dataset}")

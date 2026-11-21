@@ -80,6 +80,7 @@ export function TodayView({ site }: { site: Site; params: URLSearchParams }) {
               <span className="dim">{d.trend.length > 1 ? trendText(d.trend.map((x) => x.score)) : "out of 100"}</span></div>
             <Spark values={d.trend.map((x) => x.score)} />
           </div>
+          <TopOpportunities site={site} />
           <div className="panel" data-reveal>
             <p className="section-label">What we checked</p>
             <p style={{ margin: 0 }}>{d.checked}</p>
@@ -92,6 +93,21 @@ export function TodayView({ site }: { site: Site; params: URLSearchParams }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TopOpportunities({ site }: { site: Site }) {
+  const o = useLoad(() => api.opportunities(site.id, "", 3).catch(() => null), [site.id]);
+  const top = (o.data?.pages || []).filter((p) => p.bucket !== "monitor");
+  if (!top.length) return null;
+  return (
+    <div className="panel" data-reveal>
+      <div className="panel-head"><p className="section-label" style={{ margin: 0 }}>Worth doing first</p>
+        <button className="btn quiet" onClick={() => go("growth")}>All opportunities</button></div>
+      <ul className="opp-list">{top.map((p) => <li key={p.url}><b className="num">{p.score.toFixed(0)}</b>
+        <span><a className="mono" href={`#/page?url=${encodeURIComponent(p.url)}`}>{(() => { try { return new URL(p.url).pathname; } catch { return p.url; } })()}</a>
+        <span className="faint">{o.data?.buckets.find((b) => b.id === p.bucket)?.label}</span></span></li>)}</ul>
     </div>
   );
 }

@@ -73,6 +73,17 @@ export interface Compare { a: { id: number; finished_at: string }; b: { id: numb
   score: { before: number; after: number; change: number; dimensions: Record<string, number> } | null;
   page_types: { name: string; before: number; after: number }[] }
 
+export interface Opportunity { url: string; template: string; score: number; bucket: string; reasons: string[];
+  clicks: number | null; impressions: number | null; sessions: number | null; depth: number | null; authority: number | null }
+export interface Opportunities { run_id: number; total: number; pages: Opportunity[]; buckets: { id: string; label: string; pages: number }[];
+  data: { search_console: boolean; ga4: boolean; links: boolean }; confidence: number; basis: string }
+export interface SearchData {
+  config: { service_account: boolean; service_account_error: string | null; gsc_property: string | null; ga4_property_id: string | null; ready: boolean };
+  last_sync: { synced_at: string; start_date: string; end_date: string; gsc_rows: number; ga4_pages: number; truncated: boolean; error: string | null } | null;
+  striking: { query: string; page: string; clicks: number; impressions: number; ctr: number; position: number; expected_ctr: number; clicks_at_position_3: number }[];
+  cannibalisation: { query: string; impressions: number; clicks: number; pages_top20: number; pages: { page: string; position: number; clicks: number; impressions: number }[] }[];
+  thresholds: { striking_min_impressions: number; cannibal_min_impressions: number } }
+
 export const api = {
   me: () => req<{ member: Member; workspace: { id: number; name: string } }>("GET", "/api/v2/me"),
   members: () => req<{ members: Member[] }>("GET", "/api/v2/members"),
@@ -93,6 +104,10 @@ export const api = {
     req<Inventory>("GET", `/api/v2/sites/${sid}/inventory?${new URLSearchParams(params)}`),
   inventoryCsv: (sid: number, params: Record<string, string>) => `/api/v2/sites/${sid}/inventory.csv?${new URLSearchParams(params)}`,
   compare: (sid: number, a: number, b: number) => req<Compare>("GET", `/api/v2/sites/${sid}/compare?a=${a}&b=${b}`),
+  opportunities: (sid: number, bucket = "", limit = 50, offset = 0) =>
+    req<Opportunities>("GET", `/api/v2/sites/${sid}/growth/opportunities?${new URLSearchParams({ bucket, limit: String(limit), offset: String(offset) })}`),
+  searchData: (sid: number) => req<SearchData>("GET", `/api/v2/sites/${sid}/growth/search`),
+  searchSync: (sid: number) => req<{ rows: number; ga4_pages: number }>("POST", `/api/v2/sites/${sid}/growth/sync`),
   templates: (sid: number) => req<{ templates: { id: number; name: string; path_pattern: string; page_count: number; visits: number; open_fixes: number }[] }>("GET", `/api/v2/sites/${sid}/templates`),
   pages: (sid: number, q: string) => req<{ pages: { url: string; http_status: number; title: string; template_name: string }[] }>("GET", `/api/v2/sites/${sid}/pages?${new URLSearchParams({ q })}`),
   page: (sid: number, url: string) => req<{ page: any; visit: any; fixes: { id: number; title: string; severity: Severity; status: string }[] }>("GET", `/api/v2/sites/${sid}/page?${new URLSearchParams({ url })}`),
