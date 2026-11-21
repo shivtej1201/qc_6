@@ -104,6 +104,9 @@ export const api = {
     events: { kind: string; detail: any; created_at: string; actor: string | null }[]; page_history?: Record<string, string> }>("GET", `/api/v2/fixes/${id}`),
   patchFix: (id: number, b: Record<string, unknown>) => req<Fix>("PATCH", `/api/v2/fixes/${id}`, b),
   runs: (sid: number) => req<{ runs: Run[] }>("GET", `/api/v2/sites/${sid}/runs`),
+  deleteRun: (id: number) => req<{ pages: number; fixes_removed: number; screenshots_removed: number }>("DELETE", `/api/v2/runs/${id}`),
+  deleteJourney: (id: number) => req<{ runs: number }>("DELETE", `/api/v2/journeys/${id}`),
+  deleteSite: (sid: number, confirm: string) => req<{ checks: number }>("DELETE", `/api/v2/sites/${sid}`, { confirm }),
   run: (id: number) => req<{ run: Run; recent_visits: any[]; found: { id: number; title: string; severity: Severity; pages: number }[] }>("GET", `/api/v2/runs/${id}`),
   checkUrls: (sid: number, text: string, kind: string) =>
     req<SpotStarted>("POST", `/api/v2/sites/${sid}/checks/urls`, { text, kind }),

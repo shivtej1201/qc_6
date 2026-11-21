@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
-import { ErrorBox, ago, useLoad, useToast } from "../ui";
+import { Confirm, ErrorBox, ago, useLoad, useToast } from "../ui";
 
 const EXAMPLE = `name: Check loan eligibility
 device: mobile
@@ -41,6 +41,7 @@ export function JourneysView({ site, params }: { site: Site; params: URLSearchPa
     } catch (e: any) { setErr(e.detail || e.message); }
   };
   const toast = useToast();
+  const [toDelete, setToDelete] = useState<{ id: number; name: string } | null>(null);
 
   const save = async () => {
     setErr(null);
@@ -82,9 +83,9 @@ export function JourneysView({ site, params }: { site: Site; params: URLSearchPa
       )}
       <div className="table-wrap" data-reveal style={{ marginBottom: 18 }}>
         <table>
-          <thead><tr><th>Journey</th><th>Device</th><th>Recent runs</th><th>Last run</th></tr></thead>
+          <thead><tr><th>Journey</th><th>Device</th><th>Recent runs</th><th>Last run</th><th><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
-            {js.length === 0 && <tr><td colSpan={4} className="empty">No journeys yet. Add one to check a path like "apply for a loan".</td></tr>}
+            {js.length === 0 && <tr><td colSpan={5} className="empty">No journeys yet. Add one to check a path like "apply for a loan".</td></tr>}
             {js.map((j) => {
               const last = j.recent[j.recent.length - 1];
               return (
@@ -96,12 +97,21 @@ export function JourneysView({ site, params }: { site: Site; params: URLSearchPa
                     {j.recent.map((r) => <i key={r.id} className={r.status === "passed" ? "" : "f"} />)}</span></td>
                   <td>{last ? <span className={`pill ${last.status === "passed" ? "good" : "bad"}`}>
                     {last.status === "passed" ? `Passed · ${(last.duration_ms / 1000).toFixed(0)} s` : `Failed at step ${last.failed_step}`}</span> : <span className="faint">Not run yet</span>}</td>
+                  <td><button className="btn quiet small" aria-label={`Delete journey ${j.name}`}
+                    onClick={(e) => { e.stopPropagation(); setToDelete({ id: j.id, name: j.name }); }}>Delete</button></td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+      {toDelete && (
+        <Confirm title={`Delete the journey "${toDelete.name}"?`} confirmText="Delete the journey" onClose={() => setToDelete(null)}
+          onConfirm={async () => { const out = await api.deleteJourney(toDelete.id); toast(`Journey deleted with its ${out.runs} run${out.runs === 1 ? "" : "s"}.`);
+            setToDelete(null); list.reload(); go("journeys"); }}>
+          <p style={{ margin: 0 }}>Its steps, past runs and screenshots are removed, and it won't run with future checks. This can't be undone.</p>
+        </Confirm>
+      )}
       {jr.data && (
         <div className="panel" data-reveal>
           <div className="panel-head">

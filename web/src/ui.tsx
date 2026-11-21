@@ -153,3 +153,50 @@ export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | n
     </details>
   );
 }
+
+
+/* A modal "are you sure": what will go, a red confirm button, Esc / Cancel to back out. Focus stays inside. */
+export function Confirm({ title, children, confirmText, onConfirm, onClose, typeToConfirm }: {
+  title: string; children: ReactNode; confirmText: string; onConfirm: () => Promise<void> | void; onClose: () => void; typeToConfirm?: string }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null;
+    box.current?.querySelector<HTMLElement>(typeToConfirm ? "input" : "button.quiet")?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "Tab" && box.current) {
+        const els = [...box.current.querySelectorAll<HTMLElement>("button, input")].filter((x) => !x.hasAttribute("disabled"));
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("keydown", key); prev?.focus?.(); };
+  }, []);
+  const ok = !typeToConfirm || typed.trim() === typeToConfirm;
+  return (
+    <>
+      <div className="palette-back" onClick={onClose} />
+      <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body" ref={box}>
+        <h2 id="confirm-title">{title}</h2>
+        <div id="confirm-body" className="dim" style={{ margin: "8px 0 14px" }}>{children}</div>
+        {typeToConfirm && (
+          <label className="grid" style={{ gap: 4, marginBottom: 14 }}>Type <b>{typeToConfirm}</b> to confirm
+            <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" /></label>
+        )}
+        {err && <div className="error-box" style={{ marginBottom: 12 }}>{err}</div>}
+        <div className="row">
+          <button className="btn danger" disabled={!ok || busy} onClick={async () => {
+            setBusy(true); setErr(null);
+            try { await onConfirm(); } catch (e: any) { setErr(e.detail || e.title || e.message); setBusy(false); }
+          }}>{busy ? "Deleting…" : confirmText}</button>
+          <button className="btn quiet" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </>
+  );
+}

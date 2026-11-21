@@ -700,6 +700,59 @@ async def stop_run(run_id: int, me=Depends(current_member)):
                                  "Pause it first; a paused or queued check can be cancelled.")
 
 
+# ------------------------------------------------------------------ delete
+@app.delete("/api/v2/runs/{run_id}")
+async def delete_run(run_id: int, me=Depends(current_member)):
+    """Delete a check (full or spot) with its pages, findings, visits, scores and files. Not while it runs."""
+    from qc6 import deletion
+    can_edit(me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2)",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    try:
+        out = await deletion.delete_check(pool, run_id)
+    except deletion.Refused as e:
+        raise problem(409, "This check can't be deleted now", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "run.delete", f"run:{run_id}", out)
+    return out
+
+
+@app.delete("/api/v2/journeys/{journey_id}")
+async def delete_journey(journey_id: int, me=Depends(current_member)):
+    from qc6 import deletion
+    can_edit(me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM journeys j JOIN sites s ON s.id = j.site_id WHERE j.id = $1 AND s.workspace_id = $2)",
+                               journey_id, me["workspace_id"]):
+        raise problem(404, "Journey not found")
+    out = await deletion.delete_journey(pool, journey_id)
+    await services.log(pool, me["workspace_id"], me["id"], "journey.delete", f"journey:{journey_id}", out)
+    return out
+
+
+class SiteDelete(BaseModel):
+    confirm: str
+
+
+@app.delete("/api/v2/sites/{site_id}")
+async def delete_site(site_id: int, body: SiteDelete, me=Depends(current_member)):
+    """Delete a site and everything QC stored about it. Owners only; type the site's name to confirm."""
+    from qc6 import deletion
+    if me["role"] != "owner":
+        raise problem(403, "Only an owner can delete a site")
+    s = await site_for(site_id, me)
+    if body.confirm.strip() != s["name"]:
+        raise problem(400, "Type the site's name to confirm", f'Type "{s["name"]}" exactly.')
+    pool = await get_pool()
+    try:
+        out = await deletion.delete_site(pool, site_id)
+    except deletion.Refused as e:
+        raise problem(409, "The site can't be deleted now", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "site.delete", f"site:{site_id}", out)
+    return out
+
+
 @app.get("/api/v2/stream")
 async def stream(run: int, request: Request, me=Depends(current_member)):
     """Server-Sent Events for one run: progress, visitor steps, journeys, completion."""

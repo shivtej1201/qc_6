@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Run, type Site } from "../api";
 import { go } from "../main";
 import { fadeText, useViewMotion } from "../motion";
-import { ErrorBox, Icon, Sev, ago, count, useLoad, useToast } from "../ui";
+import { Confirm, ErrorBox, Icon, Sev, ago, count, useLoad, useToast } from "../ui";
 
 const STATUS: Record<string, string> = { running: "Running", queued: "Waiting to start", pausing: "Pausing…", paused: "Paused",
   completed: "Completed", failed: "Stopped", cancelled: "Cancelled" };
@@ -64,6 +64,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.id, run?.status === "running" || run?.status === "queued"]);
 
+  const [toDelete, setToDelete] = useState<Run | null>(null);
   if (runs.error || detail.error) return <ErrorBox text={(runs.error || detail.error)!} onRetry={detail.reload} />;
   if (!runs.data) return <p className="faint">Loading…</p>;
   if (!runId || !run) return (
@@ -144,6 +145,38 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
           )}
         </div>
       </div>
+      <div className="panel" data-reveal style={{ marginTop: 16 }}>
+        <div className="panel-head"><h2>Past checks</h2><span className="faint" style={{ fontSize: 13 }}>the last 50</span></div>
+        <div className="table-wrap flat" tabIndex={0} role="region" aria-label="Past checks">
+          <table>
+            <thead><tr><th>Check</th><th>What</th><th>Status</th><th>Finished</th><th className="num">Pages</th><th><span className="sr-only">Actions</span></th></tr></thead>
+            <tbody>{(runs.data?.runs || []).map((r) => (
+              <tr key={r.id} aria-current={r.id === run.id ? "true" : undefined}>
+                <td className="num nowrap">#{r.id}</td>
+                <td className="nowrap">{r.spot ? <><span className="spot-tag">spot</span> {r.spot.label}</> : r.options?.imported_from ? "Imported from V5"
+                  : ({ full: "Full check", coverage: "Page check", visit: "Real-browser visits", journey: "Journeys" } as Record<string, string>)[r.kind] || r.kind}</td>
+                <td>{STATUS[r.status] || r.status}</td>
+                <td className="nowrap">{r.finished_at ? ago(r.finished_at) : "—"}</td>
+                <td className="num">{count(r.summary?.pages)}</td>
+                <td className="nowrap"><button className="btn quiet small" onClick={() => go("live", { run: r.id })}>Open</button>
+                  {!["running", "pausing"].includes(r.status) &&
+                    <button className="btn quiet small" onClick={() => setToDelete(r)} aria-label={`Delete check ${r.id}`}>Delete</button>}</td>
+              </tr>))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {toDelete && (
+        <Confirm title={`Delete check #${toDelete.id}?`} confirmText="Delete the check" onClose={() => setToDelete(null)}
+          onConfirm={async () => {
+            const out = await api.deleteRun(toDelete.id);
+            toast(`Check #${toDelete.id} deleted: ${count(out.pages)} pages` + (out.fixes_removed ? `, ${out.fixes_removed} fixes only it had found` : "") + ".");
+            setToDelete(null); runs.reload(); go("live");
+          }}>
+          <p style={{ margin: 0 }}>Its pages, findings, visits, screenshots and report files are removed. Fixes that no other check found go too,
+            unless someone commented on them or opened a ticket. This can't be undone; the audit log keeps a note of it.</p>
+        </Confirm>
+      )}
     </div>
   );
 }
