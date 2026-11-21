@@ -136,3 +136,24 @@ def test_links_explorer(world):
     assert c.get(f"/api/v2/runs/{world['run']}/facts/links?filter=bogus", headers=H).status_code == 400
     csvr = c.get(f"/api/v2/runs/{world['run']}/export/links.csv?filter=broken", headers=H)
     assert csvr.status_code == 200 and csvr.text.count("\n") == 13
+
+
+def test_insights(world):
+    c = world["c"]
+    r = c.get(f"/api/v2/sites/{world['site']}/insights", headers=H)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["runs_considered"] == 1 and d["last_run_id"] == world["run"]
+    assert len(d["score"]["points"]) == 1 and d["score"]["points"][0]["score"] is not None
+    flow = d["fix_flow"]["runs"]
+    assert flow[0]["new"] > 0 and flow[0]["verified"] == 0                       # first check: everything is new
+    open_total = sum(s["open"] for s in d["backlog"]["by_severity"])
+    assert open_total == sum(v for k, v in d["backlog"]["by_status"].items() if k in ("open", "in_progress", "fixed_pending_check"))
+    assert d["page_types"]["items"] and all("open_fixes" in t for t in d["page_types"]["items"])
+    assert sum(d["crawl"]["status_mix"].values()) > 0
+    assert d["visits"]["total"] == sum(d["visits"]["by_status"].values()) > 0
+    assert any(v["lcp"] is not None for v in d["vitals"]["items"])
+    assert d["journeys"]["items"][0]["runs"] == 1
+    assert d["time_to_verify"]["count"] == 0 and "no fix" in d["time_to_verify"]["basis"]
+    assert all(isinstance(h, str) and h.endswith(".") for h in d["headlines"])
+    assert c.get(f"/api/v2/sites/{world['other_site']}/insights", headers=H).status_code == 404   # another workspace's site

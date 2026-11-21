@@ -340,6 +340,13 @@ async def today(site_id: int, me=Depends(current_member)):
             "site": public_site(s)}
 
 
+@app.get("/api/v2/sites/{site_id}/insights")
+async def insights(site_id: int, runs: int = Query(12, ge=2, le=60), me=Depends(current_member)):
+    from qc6.insights import site_insights
+    await site_for(site_id, me)
+    return await site_insights(await get_pool(), site_id, runs)
+
+
 # ------------------------------------------------------------------ fixes
 VIEWS = {"needs": "status IN ('open','in_progress')", "verify": "status = 'fixed_pending_check'",
          "verified": "status = 'verified'", "all": "true"}

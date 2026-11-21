@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/app.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
 import { ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
+import { InsightsView } from "./views/Insights";
 import { TodayView } from "./views/Today";
 import { LiveView } from "./views/Live";
 import { FixesView } from "./views/Fixes";
@@ -26,7 +27,7 @@ export function go(view: string, params: Record<string, string | number> = {}) {
 }
 
 const NAV: [string, string, string][] = [
-  ["today", "today", "Today"], ["live", "live", "Live run"], ["fixes", "fix", "Fixes"], ["page", "page", "Page"],
+  ["today", "today", "Today"], ["insights", "up", "Insights"], ["live", "live", "Live run"], ["fixes", "fix", "Fixes"], ["page", "page", "Page"],
   ["links", "layers", "Links & images"], ["journeys", "journey", "Journeys"], ["integrations", "plug", "Integrations"],
   ["access", "shield", "Crawler access"], ["settings", "settings", "Settings"],
 ];
@@ -65,7 +66,7 @@ function App() {
   else {
     const p = { site, params: route.params };
     body = {
-      today: <TodayView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, page: <PageView {...p} />,
+      today: <TodayView {...p} />, insights: <InsightsView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, page: <PageView {...p} />,
       journeys: <JourneysView {...p} />, integrations: <IntegrationsView {...p} />, access: <AccessView {...p} />,
       links: <LinksView {...p} />, settings: <SettingsView {...p} />,
     }[route.view] || <TodayView {...p} />;
