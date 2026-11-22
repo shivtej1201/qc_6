@@ -76,7 +76,9 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str) -> No
         opts: Dict[str, Any] = {"sitemap": sitemap_url, "max_pages": MAX_URLS}
         urls = await discover_urls(site, opts, progress_callback=progress)
         if not urls:
-            raise ListError("No page addresses were found in that sitemap. Open it in a browser to check it lists <loc> entries.")
+            raise ListError("No page addresses came back from that sitemap. Open it in your browser: if it shows the addresses, "
+                            "the site is probably showing QC a bot check instead. Save the sitemap from your browser (Ctrl+S) "
+                            "and use Upload a file; for the crawl, give the site's CDN team the allow rule from Crawler access.")
         await pool.execute("UPDATE url_lists SET status = 'ready', urls = $2, url_count = $3, updated_at = now(), "
                            "note = note || $4::jsonb WHERE id = $1 AND status = 'extracting'", lid, urls, len(urls),
                            {"outside_scope": int(opts.get("_scope_excluded") or 0), "capped": len(urls) >= MAX_URLS})
@@ -85,7 +87,13 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str) -> No
         raise
     except Exception as e:                      # shown to the person as is: keep it plain
         log.warning("sitemap list %s failed: %s", lid, e)
-        msg = str(e) if isinstance(e, (ListError, RuntimeError)) else f"The sitemap couldn't be read ({type(e).__name__}: {e})"
+        if isinstance(e, ModuleNotFoundError):
+            msg = (f"A Python package QC needs isn't installed ({e.name}). Close QC and start it again with start.bat "
+                   "(or ./start.sh): it installs what's missing.")
+        elif isinstance(e, (ListError, RuntimeError)):
+            msg = str(e)
+        else:
+            msg = f"The sitemap couldn't be read ({type(e).__name__}: {e})"
         await pool.execute("UPDATE url_lists SET status = 'failed', error = $2, updated_at = now() WHERE id = $1 AND status = 'extracting'",
                            lid, msg[:600])
     finally:

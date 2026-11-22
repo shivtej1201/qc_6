@@ -11,7 +11,7 @@ type Source = "sitemap" | "single" | "sheet";
 const SOURCES: [Source, string, string][] = [
   ["sitemap", "Sitemap", "Paste the sitemap address. QC reads it, and any sitemaps it lists, for every page address."],
   ["single", "One page", "Check a single page."],
-  ["sheet", "Upload a sheet", "A CSV, Excel (.xlsx) or text file with page addresses in any column."],
+  ["sheet", "Upload a file", "A sheet (CSV, Excel .xlsx, text) with page addresses in any column, or sitemap files saved from your browser (.xml, .xml.gz). You can pick several files."],
 ];
 const SEV: Severity[] = ["critical", "high", "medium", "low"];
 const SEV_TEXT: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
@@ -41,7 +41,7 @@ function duration(s: number | null): string {
 export function StartView({ params, onSite }: { params: URLSearchParams; onSite: (siteId: number) => void }) {
   const [source, setSource] = useState<Source>("sitemap");
   const [value, setValue] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const jobs = useLoad(() => api.jobs(), []);
@@ -83,8 +83,9 @@ export function StartView({ params, onSite }: { params: URLSearchParams; onSite:
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      const j = source === "sheet" ? await api.uploadList(file!) : await api.newList(source, value.trim());
-      setValue(""); setFile(null); if (fileRef.current) fileRef.current.value = "";
+      const j: Job & { skipped_files?: string[] } = source === "sheet" ? await api.uploadList(files) : await api.newList(source, value.trim());
+      if (j.skipped_files?.length) toast(`Some files were left out: ${j.skipped_files[0]}`);
+      setValue(""); setFiles([]); if (fileRef.current) fileRef.current.value = "";
       jobs.reload();
       open(j.id);
     } catch (x: any) { setErr(x.detail ? `${x.title}. ${x.detail}` : x.title || x.message); }
@@ -113,8 +114,10 @@ export function StartView({ params, onSite }: { params: URLSearchParams; onSite:
         <p className="faint" style={{ margin: 0, fontSize: 14 }}>{SOURCES.find((s) => s[0] === source)![2]}</p>
         {source === "sheet" ? (
           <label className="drop">
-            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xlsm" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-            <Icon name="page" /><span>{file ? <><b>{file.name}</b> ({count(Math.round(file.size / 1024))} KB)</> : <>Choose a file, or drop it here</>}</span>
+            <input ref={fileRef} type="file" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xml,.gz" onChange={(e) => setFiles([...(e.target.files || [])])} />
+            <Icon name="page" /><span>{files.length === 1 ? <><b>{files[0].name}</b> ({count(Math.round(files[0].size / 1024))} KB)</>
+              : files.length > 1 ? <><b>{files.length} files</b> ({files.slice(0, 3).map((f) => f.name).join(", ")}{files.length > 3 ? "…" : ""})</>
+              : <>Choose files, or drop them here</>}</span>
           </label>
         ) : (
           <div className="row start-input">
@@ -125,8 +128,8 @@ export function StartView({ params, onSite }: { params: URLSearchParams; onSite:
           </div>
         )}
         {err && <div className="error-box" role="alert">{err}</div>}
-        <div><button className="btn primary" type="submit" disabled={busy || (source === "sheet" ? !file : !value.trim())}>
-          {busy ? "Working…" : source === "sitemap" ? "Get the URLs" : source === "single" ? "Add this page" : "Read the sheet"}</button></div>
+        <div><button className="btn primary" type="submit" disabled={busy || (source === "sheet" ? files.length === 0 : !value.trim())}>
+          {busy ? "Working…" : source === "sitemap" ? "Get the URLs" : source === "single" ? "Add this page" : files.length > 1 ? "Read the files" : "Read the file"}</button></div>
       </form>
 
       {jobId > 0 && (job ? <JobCard job={job} onChange={() => { setNonce((n) => n + 1); jobs.reload(); worker.reload(); }} toast={toast} />
@@ -161,7 +164,7 @@ export function StartView({ params, onSite }: { params: URLSearchParams; onSite:
   );
 }
 
-const SOURCE_TEXT: Record<string, string> = { sitemap: "Sitemap", single: "Page", sheet: "Sheet", list: "List" };
+const SOURCE_TEXT: Record<string, string> = { sitemap: "Sitemap", single: "Page", sheet: "File", list: "List" };
 const PILL: Record<string, [string, string]> = {
   extracting: ["warn", "Reading sitemap"], ready: ["new", "URLs ready"], queued: ["warn", "Waiting to start"], running: ["warn", "Crawling"],
   pausing: ["warn", "Pausing…"], paused: ["new", "Paused"], completed: ["good", "Report ready"], failed: ["bad", "Stopped"], cancelled: ["", "Cancelled"],
@@ -219,7 +222,7 @@ function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; 
         <div className="row"><button className="btn" disabled={busy} onClick={() => act(() => api.cancelList(j.id), "Stopped reading the sitemap.")}>Cancel</button></div>
       </>)}
 
-      {j.status === "failed" && <div className="error-box" role="alert">{j.error}</div>}
+      {j.status === "failed" && <div className="error-box" role="alert" style={{ whiteSpace: "pre-line" }}>{j.error}</div>}
       {j.status === "cancelled" && <p>Reading the sitemap was cancelled. Paste it again above to start over.</p>}
 
       {j.status === "ready" && ph === "ready" && (<>

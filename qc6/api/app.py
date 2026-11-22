@@ -791,23 +791,39 @@ async def make_list(body: ListIn, me=Depends(current_member)):
 
 @app.post("/api/v2/lists/upload", status_code=201)
 async def upload_list(request: Request, me=Depends(current_member)):
-    """A URL list from a sheet (.csv, .tsv, .txt or .xlsx; the URL column, or any cell starting with http)."""
+    """A URL list from uploaded files: sheets (.csv, .tsv, .txt, .xlsx; the URL column or any http cell) or sitemap
+    files saved from a browser (.xml, .xml.gz). Several files at once are combined into one list."""
     from qc6 import jobs
     from qc6.url_lists import ListError, MAX_BYTES, from_upload
     can_edit(me)
     form = await request.form()
-    f = form.get("file")
-    if f is None or not hasattr(f, "read"):
+    files = [f for f in form.getlist("file") if hasattr(f, "read")][:200]
+    if not files:
         raise problem(400, "Choose a file to upload")
-    data = await f.read(MAX_BYTES + 1)
-    name = os.path.basename(getattr(f, "filename", "") or "sheet")[:120]
+    urls: List[str] = []
+    names: List[str] = []
+    problems: List[str] = []
+    for f in files:
+        data = await f.read(MAX_BYTES + 1)
+        name = os.path.basename(getattr(f, "filename", "") or "file")[:120]
+        try:
+            urls += from_upload(data, name)
+            names.append(name)
+        except ListError as e:
+            problems.append(str(e))
+    if not urls:
+        raise problem(400, "That file can't be used" if len(files) == 1 else "Those files can't be used",
+                      problems[0] if problems else "No address starting with http:// or https:// was found.")
+    label = names[0] + (f" and {len(names) - 1} more file{'s' if len(names) > 2 else ''}" if len(names) > 1 else "")
     pool = await get_pool()
     try:
-        lid = await jobs.from_urls(pool, me, from_upload(data, name), "sheet", name)
+        lid = await jobs.from_urls(pool, me, urls, "sheet", label)
     except (ListError, services.NotAllowed) as e:
         raise problem(400, "That file can't be used", str(e))
-    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}", {"source": "sheet", "file": name})
-    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}", {"source": "sheet", "files": names[:20]})
+    out = _list_out(await jobs.get(pool, me["workspace_id"], lid))
+    out["skipped_files"] = problems[:5]
+    return out
 
 
 @app.get("/api/v2/lists")

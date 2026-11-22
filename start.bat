@@ -32,7 +32,16 @@ if errorlevel 1 (echo Could not create the virtual environment. & pause & exit /
 .venv\Scripts\python -m pip install -q --upgrade pip
 .venv\Scripts\python -m pip install -q -r requirements.txt
 if errorlevel 1 (echo Installing packages failed. Check your internet connection. & rmdir /s /q .venv & pause & exit /b 1)
+copy /y requirements.txt .venv\requirements.installed >nul
 :have_venv
+REM ---- an update added or changed packages (requirements.txt differs from what was installed): install them
+fc /b requirements.txt .venv\requirements.installed >nul 2>nul
+if errorlevel 1 (
+  echo Updating QC V6 packages - a minute or two...
+  .venv\Scripts\python -m pip install -q -r requirements.txt
+  if errorlevel 1 (echo Installing packages failed. Check your internet connection, then run start.bat again. & pause & exit /b 1)
+  copy /y requirements.txt .venv\requirements.installed >nul
+)
 if exist .venv\.chromium-ok goto have_chromium
 .venv\Scripts\python -m playwright install chromium
 if errorlevel 1 (echo WARNING: Chromium could not be downloaded. Page checks work; real-visitor checks and journeys need it.) else (type nul > .venv\.chromium-ok)

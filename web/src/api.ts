@@ -167,7 +167,7 @@ export const api = {
   job: (id: number) => req<Job>("GET", `/api/v2/lists/${id}`),
   newList: (source: "sitemap" | "single" | "list", value: string) =>
     req<Job>("POST", "/api/v2/lists", source === "list" ? { source, text: value } : { source, url: value }),
-  uploadList: (file: File) => { const f = new FormData(); f.append("file", file); return req<Job>("POST", "/api/v2/lists/upload", f); },
+  uploadList: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("file", x)); return req<Job & { skipped_files?: string[] }>("POST", "/api/v2/lists/upload", f); },
   cancelList: (id: number) => req<{ ok: boolean }>("POST", `/api/v2/lists/${id}/cancel`),
   deleteList: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/lists/${id}`),
   startList: (id: number, browser: boolean) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser }),
