@@ -3,10 +3,12 @@ import asyncio
 import os
 import time
 
-import pytest
+os.environ["QC6_ALLOW_PRIVATE_TARGETS"] = "true"      # set before qc6.settings is first imported, as the other test files do
 
-from qc6 import local_auth as A
-from qc6 import services
+import pytest  # noqa: E402
+
+from qc6 import local_auth as A  # noqa: E402
+from qc6 import services  # noqa: E402
 
 
 def test_password_hashing():

@@ -6,10 +6,12 @@ import socket
 import threading
 import time
 
-import pytest
+os.environ["QC6_ALLOW_PRIVATE_TARGETS"] = "true"      # set before qc6.settings is first imported, as the other test files do
 
-from qc6 import local_auth as A
-from qc6 import services
+import pytest  # noqa: E402
+
+from qc6 import local_auth as A  # noqa: E402
+from qc6 import services  # noqa: E402
 
 WEB_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist")
 AXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qc6", "assets", "axe.min.js")
