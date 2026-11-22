@@ -214,3 +214,44 @@ async def zip_file(pool, site: Dict[str, Any], run_id: int, csv_name: str) -> st
             async for chunk in csv_stream(pool, site, run_id):
                 f.write(chunk)
     return path
+
+
+async def workbook_file(pool, site: Dict[str, Any], run_id: int) -> str:
+    """The full multi-sheet workbook (qc6/workbook.py), laid out like the QC V5 audit workbook, plus QC's problems and
+    every page x problem row with its 'seen before' remark. Page rows go through a temporary file so the workbook is
+    written in a worker thread without holding a database cursor open across threads."""
+    import asyncio
+    import csv
+    from qc6 import workbook
+    run = dict(await pool.fetchrow("SELECT * FROM runs WHERE id = $1", run_id))
+    templates = {r["url"]: r["name"] for r in await pool.fetch(
+        "SELECT p.url, t.name FROM pages p JOIN templates t ON t.id = p.template_id WHERE p.run_id = $1", run_id)}
+    sev = {r["severity"]: (r["n"], r["pages"]) for r in await pool.fetch(
+        "SELECT f.severity, count(DISTINCT f.id) AS n, count(DISTINCT fd.page_url) AS pages FROM findings fd "
+        "JOIN fixes f ON f.id = fd.fix_id WHERE fd.run_id = $1 GROUP BY 1", run_id)}
+    fd, tmp = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    try:
+        n = 0
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    async for r in conn.cursor(DETAIL_SQL, run_id, prefetch=2000):
+                        w.writerow([cell(v) for v in _detail(r)])
+                        n += 1
+                        if n >= workbook.EXCEL_MAX_ROWS - 2:
+                            break
+
+        def page_rows():
+            with open(tmp, encoding="utf-8", newline="") as f:
+                for row in csv.reader(f):
+                    if len(row) > 3 and row[3].isdigit():
+                        row[3] = int(row[3])
+                    yield row
+        extra = {"problems": await problem_rows(pool, run_id), "problem_header": PROBLEM_HEADER, "templates": templates,
+                 "severity": sev, "score": (run.get("summary") or {}).get("score"),
+                 "page_rows": page_rows, "page_header": DETAIL_HEADER}
+        return await asyncio.to_thread(workbook.build, run, site, extra)
+    finally:
+        os.unlink(tmp)

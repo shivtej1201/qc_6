@@ -148,9 +148,41 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_cal
                 "(2) for the crawl itself, use Show the allow rule below and ask your "
                 "CDN team to add it, since the pages are usually behind the same protection.")
     from qc6.url_lists import dedupe                 # same page with tracking tags / reordered parameters: once
-    unique, opts["_repeats"] = dedupe(u["normalized_url"] for u in res.get("unique_urls", []))
+    entries = res.get("unique_urls", [])
+    unique, opts["_repeats"] = dedupe(u["normalized_url"] for u in entries)
     kept, opts["_scope_excluded"] = apply_scope(unique, scope)
-    return kept[:limit]
+    kept = kept[:limit]
+    # which sitemap each page came from (the report's Sitemap Progress) and the sitemap's hreflang alternates
+    by_url = {u["normalized_url"]: u for u in entries}
+    sitemaps: List[str] = []
+    index: Dict[str, int] = {}
+    idx: List[int] = []
+    alternates: List[List[str]] = []
+    for u in kept:
+        e = by_url.get(u) or {}
+        sm = e.get("source_sitemap_url") or ""
+        if sm not in index:
+            index[sm] = len(sitemaps)
+            sitemaps.append(sm)
+        idx.append(index[sm])
+        for a in e.get("alternates") or []:
+            alternates.append([u, a.get("hreflang", ""), a.get("href", "")])
+    opts["_sitemaps"], opts["_sm_idx"], opts["_alternates"] = sitemaps, idx, alternates
+    return kept
+
+
+def save_alternates(opts: Dict[str, Any], path: str) -> None:
+    """Sitemap hreflang pairs can be many (pages x languages): kept in a gzip file next to the check, not in its row."""
+    alt = opts.pop("_alternates", None) or []
+    opts["_alternates_count"] = len(alt)
+    if not alt:
+        return
+    import gzip
+    import json
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(alt, f)
+    opts["_alternates_file"] = path
 
 
 async def journey_stage(pool, browser, run_id: int, site: Dict[str, Any], fast: bool = False,
@@ -262,6 +294,7 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                 raise RuntimeError("No pages found: the sitemap is empty or could not be read.")
             if not opts.get("_urls"):                    # remember the page list so a resume crawls the same pages
                 opts["_urls"] = urls
+                save_alternates(opts, os.path.join(settings.data_dir, "runs", str(run_id), "sitemap_alternates.json.gz"))
                 await pool.execute("UPDATE runs SET options = $2 WHERE id = $1", run_id, opts)
             part = await run_coverage(pool, run_id, site, urls, {**opts, "with_visits": kind == "full"}, control)
             if part.get("paused") or control["pause"]:

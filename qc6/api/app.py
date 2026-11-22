@@ -1426,11 +1426,29 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
 
 
+@app.get("/api/v2/runs/{run_id}/package.zip")
+async def run_package(run_id: int, me=Depends(current_member)):
+    """Every data file of a check as CSV, in one ZIP (the V5 package: all link relationships, unique URLs, broken,
+    redirect and external URLs, images, SEO page audit, sitemap audit, issues, reconciliation)."""
+    pool = await get_pool()
+    r = await pool.fetchrow("SELECT r.id, r.summary, s.primary_host FROM runs r JOIN sites s ON s.id = r.site_id "
+                            "WHERE r.id = $1 AND s.workspace_id = $2", run_id, me["workspace_id"])
+    if r is None:
+        raise problem(404, "Check not found")
+    path = (r["summary"] or {}).get("zip")
+    base = os.path.realpath(os.path.join(settings.data_dir, "runs", str(run_id)))
+    if not path or not os.path.realpath(path).startswith(base + os.sep) or not os.path.exists(path):
+        raise problem(404, "No data package for this check", "It is made when a page check finishes.")
+    await services.log(pool, me["workspace_id"], me["id"], "report.package", f"run:{run_id}", {})
+    host = re.sub(r"[^a-z0-9.-]+", "-", r["primary_host"].lower())
+    return FileResponse(path, filename=f"qc-data-{host}-check-{run_id}.zip", media_type="application/zip")
+
+
 @app.get("/api/v2/sites/{site_id}/export.{fmt}")
 async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
     """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
     from qc6 import export as ex
-    if fmt not in ("csv", "xlsx", "zip"):
+    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx"):
         raise problem(404, "Not found")
     s = await site_for(site_id, me)
     pool = await get_pool()
@@ -1444,7 +1462,11 @@ async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=De
     if fmt == "zip":
         path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
         return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
-    path = await ex.xlsx_file(pool, s, rid)
+    if fmt == "workbook.xlsx":                  # the full workbook, V5 layout: many sheets
+        path = await ex.workbook_file(pool, s, rid)
+        name = name.replace("qc-report-", "qc-audit-workbook-").replace(".workbook.xlsx", ".xlsx")
+    else:
+        path = await ex.xlsx_file(pool, s, rid)
     return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 

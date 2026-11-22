@@ -273,3 +273,71 @@ def test_dedup_key_and_streaming_sitemap():
     assert len(r["urls"]) == 3000 and r["urls"][5]["alternates"] == [{"hreflang": "hi", "href": "https://s.ex/hi/5"}]
     with pytest.raises(ValueError, match="nesting"):
         SitemapExtractor()._stream_parse(b"<urlset>" + b"<a>" * 60 + b"</a>" * 60 + b"</urlset>", "")
+
+
+SAMPLE_SHEETS = ["Executive Summary", "Sitemap Progress", "Business Summary", "Language Summary", "Page Type Summary",
+                 "Destination Status", "Source Page Issues", "Destination Issues", "External URLs (Unique)", "Validation Cache Reuse"]
+
+
+def test_full_workbook_like_the_v5_sample(env):
+    """The full workbook has the V5 sample's sheets and columns, filled from the crawl; plus QC's problems and the CSV package."""
+    import openpyxl
+    c, site, dsn = env
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def go():
+        pool = await _pool(dsn)
+        await pool.execute("UPDATE sites SET settings = settings || '{\"rate_rps\": 40}'::jsonb")
+        await execute_run(pool, rid)
+        await pool.close()
+    asyncio.run(go())
+    r = c.get(f"/api/v2/sites/{j['site_id']}/export.workbook.xlsx?run={rid}")
+    assert r.status_code == 200, r.text
+    assert "qc-audit-workbook-" in r.headers["content-disposition"]
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), read_only=True)
+    names = wb.sheetnames
+    assert all(n in names for n in SAMPLE_SHEETS) and "QC Problems" in names and "QC Problem Pages" in names, names
+    rows = lambda n: [list(x) for x in wb[n].iter_rows(values_only=True)]                       # noqa: E731
+    ex = {x[0]: x[1] for x in rows("Executive Summary") if x and len(x) > 1}
+    assert ex["Source pages total (sitemap inventory)"] == 90 and ex["Source pages completed (HTTP fetched & parsed)"] == 90
+    assert ex["Crawl State"] == "COMPLETED" and ex["Check ID"] == f"#{rid}"
+    sm = rows("Sitemap Progress")
+    assert sm[0] == ["Sitemap #", "Sitemap URL", "Assigned Unique", "Processed", "Pending", "Completed", "Failed", "Blocked",
+                     "Timed Out", "Completion %", "Relationships Extracted"]
+    assert sm[1][1] == site.base + "/sitemap.xml" and sm[1][2] == 90 and sm[1][9] == 100.0      # each page knows its sitemap
+    assert rows("Business Summary")[0] == ["Business", "Source Pages Processed", "Completed", "Failed", "Blocked", "Timed Out",
+                                          "Relationships Extracted"]
+    assert sum(x[1] for x in rows("Page Type Summary")[1:]) == 90
+    dest = rows("Destination Status")
+    assert dest[0] == ["Status Bucket", "Unique HTTP Destinations", "Share %"] and dest[1][0] == "2xx"
+    assert rows("Destination Issues")[0][:3] == ["normalized_url", "url_scope", "validation_state"]
+    assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
+    assert len(rows("QC Problem Pages")) > 1 and rows("QC Problem Pages")[1][7] in ("New",) or "Seen before" in rows("QC Problem Pages")[1][7]
+    pkg = c.get(f"/api/v2/runs/{rid}/package.zip")
+    assert pkg.status_code == 200
+    import zipfile
+    names = zipfile.ZipFile(io.BytesIO(pkg.content)).namelist()
+    assert any(n.endswith("03_url_audit.csv") for n in names) and any(n.endswith("07_broken_urls.csv") for n in names)
+
+
+def test_sitemap_hreflang_sheet(tmp_path):
+    """Sitemap hreflang alternates that don't answer 200 are listed, with a plain remark."""
+    import gzip
+    import json
+    import sqlite3
+    from qc6 import workbook
+    db = tmp_path / "c.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE on_page_validation_cache (job_id, normalized_url, http_status, status_bucket)")
+    con.execute("CREATE TABLE on_page_source_pages (job_id, normalized_source_url, http_status)")
+    con.executemany("INSERT INTO on_page_validation_cache VALUES ('RUN1', ?, ?, ?)",
+                    [("https://s.ex/hi/1", 200, "2xx"), ("https://s.ex/hi/2", 404, "4xx"), ("https://s.ex/hi/3", 301, "3xx")])
+    con.commit()
+    f = tmp_path / "alt.json.gz"
+    with gzip.open(f, "wt") as g:
+        json.dump([["https://s.ex/en/1", "hi", "https://s.ex/hi/1"], ["https://s.ex/en/2", "hi", "https://s.ex/hi/2"],
+                   ["https://s.ex/en/3", "hi", "https://s.ex/hi/3"], ["https://s.ex/en/4", "hi", "https://s.ex/hi/4"]], g)
+    out = list(workbook._alternates({"options": {"_alternates_file": str(f)}}, con, "RUN1"))
+    assert [r[2] for r in out] == ["https://s.ex/hi/2", "https://s.ex/hi/3", "https://s.ex/hi/4"]
+    assert "broken" in out[0][5] and "redirects" in out[1][5] and "not checked" in out[2][5]

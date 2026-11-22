@@ -143,7 +143,11 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     eng.extra_headers = identity_headers(site)
     from qc6.site_access import httpx_hook
     eng.site_request_hook = httpx_hook(site)
-    entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
+    sms, idx = opts.get("_sitemaps") or [], opts.get("_sm_idx") or []
+    if len(idx) == len(urls) and sms:             # each page's own sitemap (number = its place in the list, from 1)
+        entries = [{"url": u, "source_sitemap": sms[i], "source_sitemap_number": i + 1} for u, i in zip(urls, idx)]
+    else:
+        entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
     eng.initialize_inventory(entries)                 # idempotent: on resume, finished pages stay finished
     fp_path = os.path.join(run_dir, "fingerprints.json")
     if os.path.exists(fp_path):                       # fingerprints of pages parsed before a pause or a crash

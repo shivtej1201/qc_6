@@ -79,10 +79,16 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str) -> No
             raise ListError("No page addresses came back from that sitemap. Open it in your browser: if it shows the addresses, "
                             "the site is probably showing QC a bot check instead. Save the sitemap from your browser (Ctrl+S) "
                             "and use Upload a file; for the crawl, give the site's CDN team QC's allow rule (Show the allow rule, below).")
+        from qc6.settings import settings
+        from qc6.workers.runner import save_alternates
+        save_alternates(opts, os.path.join(settings.data_dir, "lists", f"{lid}.alternates.json.gz"))
         await pool.execute("UPDATE url_lists SET status = 'ready', urls = $2, url_count = $3, updated_at = now(), "
-                           "note = note || $4::jsonb WHERE id = $1 AND status = 'extracting'", lid, urls, len(urls),
+                           "note = note || $4::jsonb, sitemaps = $5, sitemap_idx = $6, alternates_file = $7 "
+                           "WHERE id = $1 AND status = 'extracting'", lid, urls, len(urls),
                            {"outside_scope": int(opts.get("_scope_excluded") or 0), "capped": len(urls) >= MAX_URLS,
-                            "duplicates": int(opts.get("_repeats") or 0)})
+                            "duplicates": int(opts.get("_repeats") or 0),
+                            "sitemaps": len(opts.get("_sitemaps") or []), "hreflang_pairs": int(opts.get("_alternates_count") or 0)},
+                           opts.get("_sitemaps") or [], opts.get("_sm_idx") or [], opts.get("_alternates_file"))
     except asyncio.CancelledError:
         await pool.execute("UPDATE url_lists SET status = 'cancelled', updated_at = now() WHERE id = $1 AND status = 'extracting'", lid)
         raise
@@ -143,6 +149,10 @@ async def start_crawl(pool, me: Dict[str, Any], lid: int, browser: bool = False)
     if row["status"] != "ready":
         raise ListError("The URL list isn't ready yet." if row["status"] == "extracting" else "This URL list can't be crawled. Make a new one.")
     opts: Dict[str, Any] = {"urls": list(row["urls"]), "max_pages": MAX_URLS, "from_list": lid}
+    if row["sitemaps"]:                         # keep where each page came from, for the report's Sitemap Progress
+        opts["_sitemaps"], opts["_sm_idx"] = list(row["sitemaps"]), list(row["sitemap_idx"])
+    if row["alternates_file"]:
+        opts["_alternates_file"] = row["alternates_file"]
     if row["source"] != "sitemap":              # a few pages: its own results; the site's health score isn't changed
         n = row["url_count"]
         opts["spot"] = {"label": row["label"] if n == 1 else f"{n:,} pages from {row['label']}", "source": row["source"],

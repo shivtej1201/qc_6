@@ -768,7 +768,8 @@ class SitemapExtractor:
                         "robots_allowed": robots_ok,
                         "status": status_str,
                         "selected_for_crawl": robots_ok, # Default select only robots-allowed URLs
-                        "rejection_reason": "" if robots_ok else "Blocked by robots.txt policy"
+                        "rejection_reason": "" if robots_ok else "Blocked by robots.txt policy",
+                        "alternates": item.get("alternates") or [],
                     }
 
                     if len(extracted_urls_map) >= self.max_urls:
@@ -909,7 +910,8 @@ class SitemapExtractor:
                     "robots_allowed": robots_ok,
                     "status": status_str,
                     "selected_for_crawl": robots_ok,
-                    "rejection_reason": "" if robots_ok else "Blocked by robots.txt policy"
+                    "rejection_reason": "" if robots_ok else "Blocked by robots.txt policy",
+                    "alternates": item.get("alternates") or [],
                 }
 
             return {
