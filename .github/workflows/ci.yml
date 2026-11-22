@@ -53,6 +53,7 @@ jobs:
           brew install postgresql@16
           brew services start postgresql@16
           for i in $(seq 1 30); do "$(brew --prefix postgresql@16)/bin/pg_isready" -h 127.0.0.1 && break; sleep 2; done
+          "$(brew --prefix postgresql@16)/bin/createdb" -h 127.0.0.1 qc6_test
       - run: pip install -r requirements.txt && python -m playwright install chromium
       - name: start.sh finds the Mac's PostgreSQL by itself
         run: |
