@@ -141,8 +141,13 @@ def test_ui_end_to_end(app_url):
             await page.keyboard.press("Control+k")
             await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
             palette_bad = await _axe(page)
+            # type only once the search box has the focus (on a slow machine the dialog can paint first)
+            for _ in range(50):
+                if await page.evaluate("document.activeElement && document.activeElement.closest('[aria-label=\"Quick jump\"]') !== null && document.activeElement.tagName === 'INPUT'"):
+                    break
+                await page.wait_for_timeout(100)
             await page.keyboard.type("pages")
-            await page.wait_for_selector("[role=option]")
+            await page.wait_for_selector("[role=option]:has-text('All pages')")
             await page.keyboard.press("Enter")
             await _until_hash(page, "#/pages")
             jumped = await page.evaluate("location.hash")

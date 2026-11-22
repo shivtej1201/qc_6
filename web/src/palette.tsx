@@ -23,10 +23,13 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
     ...(remote.q === text ? remote.hits : []),
   ], [text, remote, screens]);
 
+  const picked = useRef(false);
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     input.current?.focus();
-    return () => prev?.focus?.();
+    // closed without choosing: focus goes back where it was. After choosing, the new screen takes the focus; giving it
+    // back to the old element (often a menu link) would let the rest of the Enter keypress follow that link instead.
+    return () => { if (!picked.current) prev?.focus?.(); };
   }, []);
 
   useEffect(() => { setActive(0); }, [text]);
@@ -53,7 +56,7 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
     list.current?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
-  const pick = (h?: Hit) => { if (h) { onClose(); h.run(); } };
+  const pick = (h?: Hit) => { if (h) { picked.current = true; h.run(); onClose(); } };
   const key = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(hits.length - 1, a + 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); }
@@ -69,7 +72,7 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
       <div className="palette" role="dialog" aria-modal="true" aria-label="Quick jump">
         <div className="palette-input">
           <Icon name="search" />
-          <input ref={input} role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list"
+          <input autoFocus ref={input} role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list"
             aria-activedescendant={hits[active] ? `pal-${active}` : undefined} aria-label="Jump to a screen, fix or page"
             placeholder="Jump to a screen, fix or page…" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={key} />
           <kbd>Esc</kbd>
