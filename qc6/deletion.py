@@ -55,7 +55,7 @@ async def delete_check(pool, run_id: int) -> Dict[str, Any]:
             run = await conn.fetchrow("SELECT id, site_id, status FROM runs WHERE id = $1 FOR UPDATE", run_id)
             if run is None:
                 raise KeyError(run_id)
-            if run["status"] in ("running", "pausing"):
+            if run["status"] in ("running", "pausing", "cancelling"):
                 raise Refused("This check is running. Pause or stop it first, then delete it.")
             fix_ids = [r["fix_id"] for r in await conn.fetch("SELECT DISTINCT fix_id FROM findings WHERE run_id = $1", run_id)]
             shots = [r["k"] for r in await conn.fetch(
@@ -104,7 +104,7 @@ async def delete_site(pool, site_id: int) -> Dict[str, Any]:
             s = await conn.fetchrow("SELECT id, name FROM sites WHERE id = $1 FOR UPDATE", site_id)
             if s is None:
                 raise KeyError(site_id)
-            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM runs WHERE site_id = $1 AND status IN ('running', 'pausing'))", site_id):
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM runs WHERE site_id = $1 AND status IN ('running', 'pausing', 'cancelling'))", site_id):
                 raise Refused("A check of this site is running. Stop it first, then delete the site.")
             run_ids = [r["id"] for r in await conn.fetch("SELECT id FROM runs WHERE site_id = $1", site_id)]
             shots = [r["k"] for r in await conn.fetch(

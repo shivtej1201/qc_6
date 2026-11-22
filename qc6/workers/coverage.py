@@ -151,6 +151,24 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     if control is not None:
         control["engine"] = eng
 
+    last = {"done": None, "errors": 0, "ms": 0.0}
+
+    async def record_minute(c_done: int, c_err: int, c_ms: float) -> None:
+        """Per-minute figures (CrawlPulse job orchestration §4.5): pages, errors and response time in each minute."""
+        if last["done"] is None:                      # first tick (or a resume): start counting from here
+            last.update(done=c_done, errors=c_err, ms=c_ms)
+            return
+        dp, de, dm = c_done - last["done"], c_err - last["errors"], c_ms - last["ms"]
+        last.update(done=c_done, errors=c_err, ms=c_ms)
+        if dp <= 0:
+            return
+        await pool.execute("""INSERT INTO run_minutes (run_id, minute, pages, errors, latency_ms_sum)
+                              VALUES ($1, date_trunc('minute', now()), $2, $3, $4)
+                              ON CONFLICT (run_id, minute) DO UPDATE SET pages = run_minutes.pages + EXCLUDED.pages,
+                                errors = run_minutes.errors + EXCLUDED.errors,
+                                latency_ms_sum = run_minutes.latency_ms_sum + EXCLUDED.latency_ms_sum""",
+                           run_id, dp, max(0, de), max(0.0, dm))
+
     async def progress_loop():
         tick = 0
         while True:
@@ -163,11 +181,17 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
                     log.warning("could not checkpoint fingerprints for run %s", run_id)
             try:
                 c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
-                done = c.execute("SELECT COUNT(*) FROM on_page_source_pages WHERE job_id = ? AND crawl_state != 'PENDING'",
-                                 (job,)).fetchone()[0]
+                done, errs, ms = c.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(CASE WHEN COALESCE(error_type, '') != '' OR COALESCE(http_status, 0) >= 400 "
+                    "THEN 1 ELSE 0 END), 0), COALESCE(SUM(response_time_ms), 0) FROM on_page_source_pages "
+                    "WHERE job_id = ? AND crawl_state != 'PENDING'", (job,)).fetchone()
                 c.close()
             except sqlite3.Error:
                 continue
+            try:
+                await record_minute(int(done), int(errs), float(ms))
+            except Exception:
+                log.warning("per-minute figures for run %s not saved", run_id)
             prog = {"stage": "coverage", "pages_done": done, "pages_total": len(urls)}
             async with pool.acquire() as conn:
                 await conn.execute("UPDATE runs SET progress = progress || $2::jsonb WHERE id = $1", run_id, prog)

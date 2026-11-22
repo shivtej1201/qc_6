@@ -24,7 +24,7 @@ UPDATE runs SET status = 'running', started_at = COALESCE(started_at, now()), wo
                 attempts = attempts + 1
 WHERE id = (
   SELECT r.id FROM runs r WHERE r.status = 'queued'
-    AND NOT EXISTS (SELECT 1 FROM runs x WHERE x.site_id = r.site_id AND x.status IN ('running', 'pausing'))
+    AND NOT EXISTS (SELECT 1 FROM runs x WHERE x.site_id = r.site_id AND x.status IN ('running', 'pausing', 'cancelling'))
   ORDER BY r.id FOR UPDATE SKIP LOCKED LIMIT 1)
 RETURNING id"""
 
@@ -36,31 +36,59 @@ MAX_ATTEMPTS = 3
 # after MAX_ATTEMPTS starts it is failed with a plain reason instead of looping. A check that was pausing becomes paused.
 RECOVER_SQL = """
 UPDATE runs SET
-  status = CASE WHEN status = 'pausing' THEN 'paused' WHEN attempts >= $2 THEN 'failed' ELSE 'queued' END,
+  status = CASE WHEN status = 'pausing' THEN 'paused' WHEN status = 'cancelling' THEN 'cancelled'
+                WHEN attempts >= $2 THEN 'failed' ELSE 'queued' END,
   error = CASE WHEN status = 'running' AND attempts >= $2
                THEN 'The worker running this check stopped ' || attempts || ' times, so QC stopped retrying. Look at the worker log, then start a new check.'
                ELSE error END,
-  finished_at = CASE WHEN status = 'running' AND attempts >= $2 THEN now() ELSE finished_at END,
+  finished_at = CASE WHEN (status = 'running' AND attempts >= $2) OR status = 'cancelling' THEN now() ELSE finished_at END,
   worker_id = NULL
-WHERE status IN ('running', 'pausing') AND (
+WHERE status IN ('running', 'pausing', 'cancelling') AND (
   -- no heartbeat for a while (a run claimed before heartbeats existed counts from when it started)
   (heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1))
   OR (worker_id IS NOT NULL AND COALESCE(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $1))
   -- or its worker is known and has gone quiet: closed window, crash, reboot. Faster than waiting for the heartbeat
   OR (worker_id IS NOT NULL AND EXISTS (SELECT 1 FROM workers w WHERE w.id = runs.worker_id AND w.last_seen < now() - make_interval(secs => $3)))
   -- or nobody claimed it and it was left 'pausing' with nothing running it (paused straight away is right)
-  OR (worker_id IS NULL AND status = 'pausing' AND COALESCE(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $1)))
+  OR (worker_id IS NULL AND status IN ('pausing', 'cancelling') AND COALESCE(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $1)))
 RETURNING id, status"""
 WORKER_QUIET_S = 45      # a worker writes workers.last_seen at least every HEARTBEAT_S; three missed means it's gone
 
 
 async def recover_stale(pool, stale_s: float = STALE_S, max_attempts: int = MAX_ATTEMPTS) -> List[Dict[str, Any]]:
-    return [dict(r) for r in await pool.fetch(RECOVER_SQL, float(stale_s), max_attempts, float(WORKER_QUIET_S))]
+    out = [dict(r) for r in await pool.fetch(RECOVER_SQL, float(stale_s), max_attempts, float(WORKER_QUIET_S))]
+    if out:
+        from qc6 import events
+        for r in out:
+            await events.record(pool, r["id"], "worker_lost", {
+                "queued": "Its worker stopped answering; the check went back in the queue and resumes where it stopped.",
+                "paused": "Its worker stopped answering while pausing; the check is paused.",
+                "cancelled": "Its worker stopped answering while cancelling; the check is cancelled.",
+                "failed": "Its worker stopped answering again; QC stopped retrying."}.get(r["status"], "Its worker stopped answering."),
+                status=r["status"])
+    return out
 
 
-async def worker_seen(pool, run_id: Optional[int] = None) -> None:
-    await pool.execute("INSERT INTO workers (id, last_seen, run_id) VALUES ($1, now(), $2) "
-                       "ON CONFLICT (id) DO UPDATE SET last_seen = now(), run_id = EXCLUDED.run_id", settings.worker_id, run_id)
+async def worker_seen(pool, run_id: Optional[int] = None, status: Optional[str] = None) -> None:
+    import socket
+    await pool.execute("INSERT INTO workers (id, last_seen, run_id, hostname, pid, status) VALUES ($1, now(), $2, $3, $4, $5) "
+                       "ON CONFLICT (id) DO UPDATE SET last_seen = now(), run_id = EXCLUDED.run_id, hostname = EXCLUDED.hostname, "
+                       "pid = EXCLUDED.pid, status = EXCLUDED.status", settings.worker_id, run_id, socket.gethostname()[:120],
+                       os.getpid(), status or ("busy" if run_id else "idle"))
+
+
+KEEP_DAYS = int(os.environ.get("QC6_KEEP_METRICS_DAYS", "90"))
+
+
+async def prune(pool, days: int = 0) -> Dict[str, int]:
+    """Retention (CrawlPulse system architecture §4.3): per-minute figures and timeline lines of finished checks older
+    than QC6_KEEP_METRICS_DAYS (default 90) are removed; checks, pages, problems and reports are never touched here."""
+    d = float(days or KEEP_DAYS)
+    m = await pool.execute("DELETE FROM run_minutes WHERE minute < now() - make_interval(days => $1::int)", int(d))
+    e = await pool.execute("DELETE FROM run_events e USING runs r WHERE r.id = e.run_id AND e.created_at < now() - make_interval(days => $1::int) "
+                           "AND r.status IN ('completed', 'failed', 'cancelled')", int(d))
+    await pool.execute("DELETE FROM workers WHERE last_seen < now() - interval '7 days'")
+    return {"minutes": int(m.split()[-1]), "events": int(e.split()[-1])}
 
 
 async def worker_alive(pool) -> bool:
@@ -119,7 +147,9 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_cal
                 "block. Two ways forward: (1) open the sitemap in your own browser, save it (Ctrl+S) and use Upload a file; "
                 "(2) for the crawl itself, use Show the allow rule below and ask your "
                 "CDN team to add it, since the pages are usually behind the same protection.")
-    kept, opts["_scope_excluded"] = apply_scope((u["normalized_url"] for u in res.get("unique_urls", [])), scope)
+    from qc6.url_lists import dedupe                 # same page with tracking tags / reordered parameters: once
+    unique, opts["_repeats"] = dedupe(u["normalized_url"] for u in res.get("unique_urls", []))
+    kept, opts["_scope_excluded"] = apply_scope(unique, scope)
     return kept[:limit]
 
 
@@ -177,7 +207,7 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
         while True:
             await asyncio.sleep(1.0)
             st = await pool.fetchval("SELECT status FROM runs WHERE id = $1", run_id)
-            if st in ("pausing", "cancelled", None):      # pause, cancel, or the check was deleted
+            if st in ("pausing", "cancelling", "cancelled", None):      # pause, cancel, or the check was deleted
                 control["pause"] = True
                 control["cancel"] = st != "pausing"
                 control["stop"].set()
@@ -185,19 +215,27 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                     control["engine"].request_stop()
                 return
 
+    from qc6 import events
+    STAGE_TEXT = {"coverage": "Every page read and checked", "visits": "Sample pages opened in a real browser",
+                  "extras": "Extra checks done", "journeys": "Journeys run", "render": "JavaScript pages rendered and compared"}
+
     async def stage_done(name: str, part: Dict[str, Any]):
+        await events.record(pool, run_id, "stage", STAGE_TEXT.get(name, f"{name} finished"), stage=name)
         summary.update(part)
         done_stages.append(name)
         await pool.execute("UPDATE runs SET summary = $2, progress = progress || $3::jsonb WHERE id = $1",
                            run_id, summary, {"stages_done": done_stages})
 
     async def paused() -> Dict[str, Any]:
-        if control["cancel"]:                    # cancelled while running: the status is already 'cancelled'; leave it
-            await pool.execute("UPDATE runs SET summary = $2, finished_at = COALESCE(finished_at, now()) WHERE id = $1", run_id, summary)
+        if control["cancel"]:                    # cancelled while running: 'cancelling' becomes 'cancelled' once stopped
+            await pool.execute("UPDATE runs SET status = CASE WHEN status = 'cancelling' THEN 'cancelled' ELSE status END, "
+                               "summary = $2, finished_at = COALESCE(finished_at, now()) WHERE id = $1", run_id, summary)
+            await events.record(pool, run_id, "cancelled", "Stopped and cancelled. Pages already checked are kept.")
             async with pool.acquire() as conn:
                 await notify(conn, run_id, "cancelled")
             return {**summary, "cancelled": True}
         await pool.execute("UPDATE runs SET status = 'paused', summary = $2 WHERE id = $1 AND status = 'pausing'", run_id, summary)
+        await events.record(pool, run_id, "paused", "Paused at a checkpoint. Resume carries on from here.")
         async with pool.acquire() as conn:
             await notify(conn, run_id, "paused", stages_done=done_stages)
         return {**summary, "paused": True}
@@ -205,9 +243,11 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
     watcher = asyncio.create_task(watch())
     try:
         if await pool.fetchval("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, now()) "
-                               "WHERE id = $1 AND status NOT IN ('cancelled', 'pausing', 'paused') RETURNING id", run_id) is None:
+                               "WHERE id = $1 AND status NOT IN ('cancelled', 'cancelling', 'pausing', 'paused') RETURNING id", run_id) is None:
             control["cancel"] = control["pause"] = True       # cancelled (or paused) before it got going
             return await paused()
+        await events.record(pool, run_id, "started", "Resumed where it stopped" if done_stages or run["started_at"] else "Started",
+                            kind=kind, stages_done=done_stages)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "started", kind=kind, resumed=bool(done_stages))
         need_browser = kind in ("visit", "journey", "full")
@@ -263,13 +303,15 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
             return await paused()
         await pool.execute("UPDATE runs SET status = 'completed', finished_at = now(), summary = $2 WHERE id = $1 AND status = 'running'",
                            run_id, summary)
+        await events.record(pool, run_id, "completed", f"Finished: {summary.get('pages', 0)} pages checked", score=sc.get("score"))
         async with pool.acquire() as conn:
             await notify(conn, run_id, "completed", score=sc.get("score"))
         await after_run_hooks(pool, run_id, site, summary)
     except Exception as e:
         log.error("run %s failed: %s", run_id, traceback.format_exc())
         await pool.execute("UPDATE runs SET status = 'failed', finished_at = now(), error = $2, summary = $3 "
-                           "WHERE id = $1 AND status IN ('running', 'pausing', 'queued')", run_id, f"{type(e).__name__}: {e}"[:500], summary)
+                           "WHERE id = $1 AND status IN ('running', 'pausing', 'queued', 'cancelling')", run_id, f"{type(e).__name__}: {e}"[:500], summary)
+        await events.record(pool, run_id, "failed", f"Stopped with an error: {type(e).__name__}: {e}"[:400])
         async with pool.acquire() as conn:
             await notify(conn, run_id, "failed", error=str(e)[:300])
     finally:
@@ -311,6 +353,7 @@ async def worker_loop(poll_s: float = 2.0) -> None:
         if state["draining"]:
             raise SystemExit(1)                    # asked twice: stop now; the heartbeat timeout hands the check on
         state["draining"] = True
+        asyncio.get_running_loop().create_task(worker_seen(pool, state["run"], "draining"))
         log.warning("stopping: finishing the page in hand, then handing check %s back to the queue", state["run"])
         if state["run"] is not None:
             async def pause_for_shutdown(rid: int) -> None:
@@ -326,6 +369,10 @@ async def worker_loop(poll_s: float = 2.0) -> None:
     while not state["draining"]:
         if time.monotonic() - last_tick >= 60:
             last_tick = time.monotonic()
+            try:
+                await prune(pool)
+            except Exception:
+                log.warning("pruning failed: %s", traceback.format_exc())
             try:
                 for st in await scheduler.tick(pool):
                     log.info("schedule %s started run %s", st["key"], st["run_id"])
@@ -343,6 +390,11 @@ async def worker_loop(poll_s: float = 2.0) -> None:
             continue
         log.info("claimed run %s", run_id)
         state["run"] = run_id
+        import socket
+        from qc6 import events
+        await worker_seen(pool, run_id)
+        await events.record(pool, run_id, "worker", f"Picked up by worker {settings.worker_id} on {socket.gethostname()}",
+                            worker=settings.worker_id)
         beat = asyncio.create_task(_heartbeat(pool, run_id))
         try:
             await execute_run(pool, run_id)

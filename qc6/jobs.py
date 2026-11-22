@@ -81,7 +81,8 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str) -> No
                             "and use Upload a file; for the crawl, give the site's CDN team QC's allow rule (Show the allow rule, below).")
         await pool.execute("UPDATE url_lists SET status = 'ready', urls = $2, url_count = $3, updated_at = now(), "
                            "note = note || $4::jsonb WHERE id = $1 AND status = 'extracting'", lid, urls, len(urls),
-                           {"outside_scope": int(opts.get("_scope_excluded") or 0), "capped": len(urls) >= MAX_URLS})
+                           {"outside_scope": int(opts.get("_scope_excluded") or 0), "capped": len(urls) >= MAX_URLS,
+                            "duplicates": int(opts.get("_repeats") or 0)})
     except asyncio.CancelledError:
         await pool.execute("UPDATE url_lists SET status = 'cancelled', updated_at = now() WHERE id = $1 AND status = 'extracting'", lid)
         raise
@@ -171,7 +172,7 @@ async def get(pool, workspace_id: int, lid: int) -> Optional[Dict[str, Any]]:
         FROM url_lists l JOIN sites s ON s.id = l.site_id LEFT JOIN runs r ON r.id = l.run_id
         WHERE l.workspace_id = $1 AND l.id = $2""", workspace_id, lid):
         out = dict(j)
-        if out["run_id"] and out["run_status"] in ("completed", "cancelled", "paused", "running", "pausing"):
+        if out["run_id"] and out["run_status"] in ("completed", "cancelled", "paused", "running", "pausing", "cancelling"):
             sev = await pool.fetch("""SELECT f.severity, COUNT(DISTINCT f.id) AS problems, COUNT(DISTINCT fd.page_url) AS pages
                                       FROM findings fd JOIN fixes f ON f.id = fd.fix_id WHERE fd.run_id = $1 GROUP BY 1""", out["run_id"])
             out["results"] = {r["severity"]: {"problems": r["problems"], "pages": r["pages"]} for r in sev}

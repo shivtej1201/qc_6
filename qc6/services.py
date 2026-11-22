@@ -64,14 +64,17 @@ async def start_run(pool, site_id: int, kind: str, options: Optional[Dict[str, A
         raise NotAllowed("kind must be coverage, visit, journey or full")
     from qc6.workers.runner import recover_stale
     await recover_stale(pool)                 # a check whose worker went away must not block this one
-    busy = await pool.fetchrow("SELECT id, status FROM runs WHERE site_id = $1 AND status IN ('queued','running','pausing','paused')",
+    busy = await pool.fetchrow("SELECT id, status FROM runs WHERE site_id = $1 AND status IN ('queued','running','pausing','paused','cancelling')",
                                site_id)
     if busy:
-        what = {"paused": "is paused", "queued": "is waiting to start", "pausing": "is pausing", "running": "is running"}[busy["status"]]
+        what = {"paused": "is paused", "queued": "is waiting to start", "pausing": "is pausing", "running": "is running",
+                "cancelling": "is stopping"}[busy["status"]]
         raise Busy(f"Check {busy['id']} of this site {what}. Only one check per site runs at a time, to stay within the "
                    "site's speed limit. Let it finish, or cancel it to start this one.", busy["id"], busy["status"])
     rid = await pool.fetchval("INSERT INTO runs (site_id, kind, options, created_by) VALUES ($1,$2,$3,$4) RETURNING id",
                               site_id, kind, options or {}, actor_id)
+    from qc6 import events
+    await events.record(pool, rid, "created", "Scheduled" if (options or {}).get("scheduled") else "Created", kind=kind)
     ws = await pool.fetchval("SELECT workspace_id FROM sites WHERE id = $1", site_id)
     await log(pool, ws, actor_id, "run.start", f"run:{rid}", {"kind": kind})
     return rid

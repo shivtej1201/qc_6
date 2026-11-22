@@ -469,8 +469,10 @@ class SitemapExtractor:
         """
         decompressed = self._decompress_if_gzip(xml_bytes, sitemap_url_or_name, max_size=self.max_response_size)
         try:
-            root = self._safe_parse_xml(decompressed)
-        except Exception:
+            return self._stream_parse(decompressed, sitemap_url_or_name)
+        except ValueError as e:
+            if "Unrecognized XML sitemap root" in str(e) or "disallowed for security" in str(e) or "nesting depth" in str(e):
+                raise
             # Recover <loc> values from malformed / truncated XML rather than dropping the whole sitemap
             text_snippet = decompressed.decode("utf-8", errors="ignore")
             locs = re.findall(r"<loc>\s*([^<>\s]+)\s*</loc>", text_snippet, flags=re.IGNORECASE)
@@ -482,62 +484,80 @@ class SitemapExtractor:
                         "recovered_from_malformed_xml": True}
             return {"is_index": False, "child_sitemaps": [], "recovered_from_malformed_xml": True,
                     "urls": [{"loc": join(l), "lastmod": "", "changefreq": "", "priority": 0.5} for l in locs]}
-        
-        root_tag = _strip_tag_ns(root.tag).lower()
-        
-        child_sitemaps = []
-        urls = []
-        
+
+    def _stream_parse(self, data: bytes, base: str, chunk: int = 64 * 1024, max_depth: int = 50) -> Dict[str, Any]:
+        """Streaming parse (CrawlPulse crawling engine §4.1): the XML is fed in 64 KB chunks to a pull parser and each
+        <url> / <sitemap> element is dropped as soon as it is read, so no document tree is ever built; memory stays at
+        the (size-capped) file plus one entry. Also reads <xhtml:link rel="alternate" hreflang> per URL."""
+        if not data or not data.strip():
+            raise ValueError("Empty XML content")
+        head = data[:2048].lower()
+        if b"<!doctype" in head and b"<!entity" in head and (b"system" in head or b"public" in head):
+            raise ValueError("External entity declarations in XML DTD are disallowed for security.")
+        parser = ET.XMLPullParser(events=("start", "end"))
+        root_tag = ""
+        depth = 0
+        child_sitemaps: List[Dict[str, str]] = []
+        urls: List[Dict[str, Any]] = []
+        root = None
+
+        def absolute(loc: str) -> str:
+            return urllib.parse.urljoin(base, loc) if base and not loc.startswith(("http://", "https://")) else loc
+
+        def take(events) -> None:
+            nonlocal root_tag, depth, root
+            for ev, el in events:
+                if ev == "start":
+                    depth += 1
+                    if depth > max_depth:
+                        raise ValueError(f"Excessive XML nesting depth exceeded limit of {max_depth} levels.")
+                    if depth == 1:
+                        root, root_tag = el, _strip_tag_ns(el.tag).lower()
+                        if root_tag not in ("sitemapindex", "urlset"):
+                            raise ValueError(f"Unrecognized XML sitemap root element '<{el.tag}>'. Expected <urlset> or <sitemapindex>.")
+                    continue
+                depth -= 1
+                if depth != 1:
+                    continue
+                tag = _strip_tag_ns(el.tag).lower()
+                fields: Dict[str, str] = {}
+                alternates: List[Dict[str, str]] = []
+                for sub in el:
+                    st = _strip_tag_ns(sub.tag).lower()
+                    if st == "link" and (sub.get("rel") or "").lower() == "alternate" and sub.get("href"):
+                        alternates.append({"hreflang": (sub.get("hreflang") or "").strip(), "href": absolute(sub.get("href").strip())})
+                    elif sub.text:
+                        fields.setdefault(st, sub.text.strip())
+                loc = fields.get("loc", "")
+                if loc:
+                    if tag == "sitemap" and root_tag == "sitemapindex":
+                        child_sitemaps.append({"loc": absolute(loc), "lastmod": fields.get("lastmod", "")})
+                    elif tag == "url" and root_tag == "urlset":
+                        try:
+                            priority = float(fields.get("priority", "0.5"))
+                        except ValueError:
+                            priority = 0.5
+                        entry: Dict[str, Any] = {"loc": absolute(loc), "lastmod": fields.get("lastmod", ""),
+                                                 "changefreq": fields.get("changefreq", ""), "priority": priority}
+                        if alternates:
+                            entry["alternates"] = alternates
+                        urls.append(entry)
+                el.clear()
+                if root is not None:
+                    root.remove(el)                    # nothing accumulates under the root
+        try:
+            for i in range(0, len(data), chunk):
+                parser.feed(data[i:i + chunk])
+                take(parser.read_events())
+            parser.close()
+            take(parser.read_events())
+        except ET.ParseError as e:
+            raise ValueError(f"Malformed XML: {e}")
+        if not root_tag:
+            raise ValueError("Malformed XML: no root element")
         if root_tag == "sitemapindex":
-            for child in root:
-                if _strip_tag_ns(child.tag).lower() == "sitemap":
-                    loc = ""
-                    lastmod = ""
-                    for sub in child:
-                        sub_tag = _strip_tag_ns(sub.tag).lower()
-                        if sub_tag == "loc" and sub.text:
-                            loc = sub.text.strip()
-                        elif sub_tag == "lastmod" and sub.text:
-                            lastmod = sub.text.strip()
-                    if loc:
-                        if sitemap_url_or_name and not loc.startswith(("http://", "https://")):
-                            loc = urllib.parse.urljoin(sitemap_url_or_name, loc)
-                        child_sitemaps.append({"loc": loc, "lastmod": lastmod})
             return {"is_index": True, "child_sitemaps": child_sitemaps, "urls": []}
-            
-        elif root_tag == "urlset":
-            for child in root:
-                if _strip_tag_ns(child.tag).lower() == "url":
-                    loc = ""
-                    lastmod = ""
-                    changefreq = ""
-                    priority = 0.5
-                    for sub in child:
-                        sub_tag = _strip_tag_ns(sub.tag).lower()
-                        if sub_tag == "loc" and sub.text:
-                            loc = sub.text.strip()
-                        elif sub_tag == "lastmod" and sub.text:
-                            lastmod = sub.text.strip()
-                        elif sub_tag == "changefreq" and sub.text:
-                            changefreq = sub.text.strip()
-                        elif sub_tag == "priority" and sub.text:
-                            try:
-                                priority = float(sub.text.strip())
-                            except ValueError:
-                                priority = 0.5
-                    if loc:
-                        if sitemap_url_or_name and not loc.startswith(("http://", "https://")):
-                            loc = urllib.parse.urljoin(sitemap_url_or_name, loc)
-                        urls.append({
-                            "loc": loc,
-                            "lastmod": lastmod,
-                            "changefreq": changefreq,
-                            "priority": priority
-                        })
-            return {"is_index": False, "child_sitemaps": [], "urls": urls}
-            
-        else:
-            raise ValueError(f"Unrecognized XML sitemap root element '<{root.tag}>'. Expected <urlset> or <sitemapindex>.")
+        return {"is_index": False, "child_sitemaps": [], "urls": urls}
 
     async def extract_all(
         self,

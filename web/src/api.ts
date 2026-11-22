@@ -174,6 +174,9 @@ export const api = {
   worker: () => req<{ alive: boolean; waiting: number }>("GET", "/api/v2/worker"),
   pauseRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/pause`),
   resumeRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/resume`),
+  retryRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/retry`),
+  timeline: (id: number) => req<{ events: { kind: string; message: string; data: Record<string, any>; created_at: string }[];
+    minutes: { minute: string; pages: number; errors: number; avg_ms: number | null }[] }>("GET", `/api/v2/runs/${id}/timeline`),
   cancelRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/stop`),
   facts: (runId: number, dataset: string, params: Record<string, string | number>) =>
     req<{ total: number; rows: any[]; summary: { rows: number; unique_urls: number; broken: number; redirects: number } }>(

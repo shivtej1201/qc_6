@@ -10,7 +10,7 @@ import html
 import io
 import re
 import urllib.parse
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 from qc6.site_access import is_site_url
 
@@ -136,17 +136,49 @@ def from_text(text: str) -> List[str]:
     return parse([[t.rstrip(",;")] for t in (text or "").split()])      # URLs have no spaces; commas may be in queries
 
 
-def for_site(urls: List[str], site: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep the site's own addresses (deduplicated, in order); report the rest."""
-    seen, keep, other = set(), [], []
+TRACKING = re.compile(r"^(utm_[a-z0-9_]+|fbclid|gclid|gbraid|wbraid|dclid|msclkid|yclid|_ga|_gl|mc_cid|mc_eid|igshid|ttclid|li_fat_id)$", re.I)
+
+
+def dedup_key(url: str) -> str:
+    """Two addresses with the same key are the same page (CrawlPulse crawling engine §4.2): scheme and host lowercased,
+    default port and #fragment dropped, query parameters sorted, tracking parameters (utm_*, gclid, fbclid...) removed.
+    Used only to spot repeats: the address that is fetched is always the first one exactly as listed."""
+    try:
+        u = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return url
+    scheme, host = u.scheme.lower(), (u.hostname or "").lower()
+    port = u.port if u.port and not ((scheme == "http" and u.port == 80) or (scheme == "https" and u.port == 443)) else None
+    try:
+        q = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+    except ValueError:
+        q = []
+    q = sorted((k, v) for k, v in q if not TRACKING.match(k))
+    return urllib.parse.urlunsplit((scheme, host + (f":{port}" if port else ""), u.path or "/", urllib.parse.urlencode(q), ""))
+
+
+def dedupe(urls: Iterable[str]) -> Tuple[List[str], int]:
+    """First address of each page, in order, and how many repeats were dropped."""
+    seen, keep, dropped = set(), [], 0
     for u in urls:
-        if u in seen:
+        k = dedup_key(u)
+        if k in seen:
+            dropped += 1
             continue
-        seen.add(u)
+        seen.add(k)
+        keep.append(u)
+    return keep, dropped
+
+
+def for_site(urls: List[str], site: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the site's own addresses (deduplicated by dedup_key, in order); report the rest."""
+    unique, dropped = dedupe(urls)
+    keep, other = [], []
+    for u in unique:
         (keep if is_site_url(u, site["primary_host"]) else other).append(u)
     if not keep:
         raise ListError(f"None of the addresses are on {site['primary_host']}." + (f" For example: {other[0]}" if other else
                         " No address starting with http:// or https:// was found."))
     if len(keep) > MAX_URLS:
         raise ListError(f"{len(keep):,} addresses; the most in one check is {MAX_URLS:,}.")
-    return {"urls": keep, "other_hosts": len(other), "other_examples": other[:5], "duplicates": len(urls) - len(seen)}
+    return {"urls": keep, "other_hosts": len(other), "other_examples": other[:5], "duplicates": dropped}
