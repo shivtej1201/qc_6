@@ -31,6 +31,10 @@ EXPECTED_CTR = {1: 0.285, 2: 0.157, 3: 0.110, 4: 0.080, 5: 0.062, 6: 0.048, 7: 0
 _transport: Optional[httpx.AsyncBaseTransport] = None
 
 
+DAILY_DAYS = 150                # 60 days before + 60 after a fix, plus slack
+MAX_DAILY_ROWS = 2_000_000
+
+
 def set_transport(t) -> None:
     global _transport
     _transport = t
@@ -90,6 +94,21 @@ async def sync(pool, site: Dict[str, Any], days: int = 28) -> Dict[str, Any]:
             if len(rows) >= MAX_ROWS:
                 truncated = True
                 break
+        # day-by-day figures per page, for the before/after impact of fixes: 150 days the first time, then the newest days
+        last = await pool.fetchval("SELECT max(day) FROM search_page_days WHERE site_id = $1", site["id"])
+        dstart = max(end - timedelta(days=DAILY_DAYS - 1), (last - timedelta(days=3)) if last else end - timedelta(days=DAILY_DAYS - 1))
+        days_rows: List[tuple] = []
+        while True:
+            r = await c.post(url, headers=auth, json={"startDate": dstart.isoformat(), "endDate": end.isoformat(),
+                                                      "dimensions": ["page", "date"], "rowLimit": PAGE_SIZE,
+                                                      "startRow": len(days_rows), "dataState": "final"})
+            if r.status_code != 200:
+                break                                       # the 28-day snapshot is still good; impact waits for the next sync
+            batch = r.json().get("rows", [])
+            days_rows += [(x["keys"][0][:2000], date.fromisoformat(x["keys"][1]), int(x.get("clicks", 0)),
+                           int(x.get("impressions", 0)), float(x.get("position", 0))) for x in batch]
+            if len(batch) < PAGE_SIZE or len(days_rows) >= MAX_DAILY_ROWS:
+                break
     ga = None
     if cfg["ga4_property_id"]:
         from qc6 import ga4
@@ -99,6 +118,12 @@ async def sync(pool, site: Dict[str, Any], days: int = 28) -> Dict[str, Any]:
             ga = None
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if days_rows:
+                await conn.execute("DELETE FROM search_page_days WHERE site_id = $1 AND day >= $2", site["id"], dstart)
+                await conn.copy_records_to_table("search_page_days", records=[(site["id"], *r) for r in days_rows],
+                                                 columns=["site_id", "page", "day", "clicks", "impressions", "position"])
+                await conn.execute("DELETE FROM search_page_days WHERE site_id = $1 AND day < $2", site["id"],
+                                   end - timedelta(days=480))      # Search Console keeps 16 months; so do we
             await conn.execute("DELETE FROM search_rows WHERE site_id = $1", site["id"])
             await conn.copy_records_to_table("search_rows", records=[(site["id"], *r) for r in rows],
                                              columns=["site_id", "query", "page", "clicks", "impressions", "ctr", "position"])

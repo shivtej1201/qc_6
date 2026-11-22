@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BriefPanel, SavedHtml } from "./PageTools";
 import { api, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
@@ -109,6 +110,8 @@ export function PageView({ site, params }: { site: Site; params: URLSearchParams
           </div>
         </div>
       </div>
+      <BriefPanel site={site} url={p.url} />
+      <SavedHtml runId={p.run_id} url={p.url} />
     </div>
   );
 }

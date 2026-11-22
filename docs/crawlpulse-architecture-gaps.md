@@ -82,3 +82,25 @@ The **Full audit workbook** (Download report → "Full audit workbook (Excel)") 
 - plus Broken URLs, Redirect URLs, Sitemap Hreflang, QC Problems, and QC Problem Pages with the "seen before" remarks.
 
 Each sheet stops at Excel's row limit and says so. "All data as CSVs (ZIP)" has every link-level file. The one-sheet Excel / CSV / ZIP report is still there for a small file.
+
+
+## The CrawlPulse 3 code (second comparison)
+
+The CrawlPulse 3 code (42 page rules, every API endpoint and screen) was compared with QC as well.
+
+**Added from that comparison:**
+- **Crawl-delay**: respected for page fetches, same-host link checks, visitors and journeys.
+- **Seven page rules**: missing charset, JSON-LD without `@context` / `@type`, empty page, incomplete HTML structure, contradicting index signals, canonical to another domain.
+- **Check this fix now.**
+- **Fix impact**: 14, 28 and 60-day windows, with the Search Console data delay taken into account.
+- **Fix board.**
+- **Opportunity review** (accept, dismiss, done, with history) and a score breakdown.
+- **AI content briefs**: edit any section or write one again on its own.
+- **Anchor-text report.**
+- **HTML viewer.**
+
+**Not added, by choice:**
+- **PageSpeed Insights field data:** left out on request.
+- **Execution packages, approvals, versioning and hashing; generated server configs; report approval step:** heavy machinery beyond what QC's fixes, tickets and check-based verification need.
+- **Workspaces, projects, invitations, self sign-up, per-site rule settings:** QC stays simple, without setup screens.
+- **Google sign-in via OAuth:** QC uses a service-account key instead.

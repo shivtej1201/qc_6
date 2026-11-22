@@ -127,12 +127,13 @@ def clean(kind: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-async def generate(kind: str, ev: Dict[str, Any]) -> Dict[str, Any]:
+async def chat_json(system: str, user: str, temperature: float = 0.2) -> Dict[str, Any]:
+    """One JSON answer from the local model (Ollama /api/chat, format=json). AIUnavailable with a plain reason otherwise."""
     c = config()
-    body = {"model": c["model"], "stream": False, "format": "json", "options": {"temperature": 0.2},
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt(kind, ev)}]}
+    body = {"model": c["model"], "stream": False, "format": "json", "options": {"temperature": temperature},
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     try:
-        async with _client(180) as cl:
+        async with _client(300) as cl:
             r = await cl.post(c["url"] + "/api/chat", json=body)
     except httpx.HTTPError as e:
         raise AIUnavailable(f"Ollama didn't answer at {c['url']} ({type(e).__name__}). Is it running?")
@@ -151,4 +152,9 @@ async def generate(kind: str, ev: Dict[str, Any]) -> Dict[str, Any]:
             raw = json.loads(m.group(0))
         except ValueError:
             raise AIUnavailable("The model didn't answer in the expected format. Try again, or try a larger model.")
-    return {"model": c["model"], **clean(kind, raw if isinstance(raw, dict) else {})}
+    return raw if isinstance(raw, dict) else {}
+
+
+async def generate(kind: str, ev: Dict[str, Any]) -> Dict[str, Any]:
+    raw = await chat_json(SYSTEM, prompt(kind, ev))
+    return {"model": config()["model"], **clean(kind, raw)}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type AIDraft, type AIText, type Fix, type Member, type Site } from "../api";
+import { api, type AIDraft, type AIText, type Fix, type FixImpact, type FixStatus, type Member, type Site } from "../api";
 import { go } from "../main";
 import { flash, slideIn, useViewMotion } from "../motion";
 import { Avatar, ErrorBox, Sev, count, day, statusPill, useLoad, useToast } from "../ui";
@@ -8,9 +8,11 @@ const VIEWS: [string, string][] = [["needs", "Needs you"], ["verify", "Waiting f
 
 export function FixesView({ site, params }: { site: Site; params: URLSearchParams }) {
   const [view, setView] = useState(() => (VIEWS.some(([k]) => k === params.get("view")) ? params.get("view")! : "needs"));
+  const [layout, setLayout] = useState<"list" | "board">(() => (params.get("layout") === "board" ? "board" : "list"));
   const [q, setQ] = useState("");
   const [query, setQuery] = useState("");
-  const list = useLoad(() => api.fixes(site.id, view, query), [site.id, view, query]);
+  const list = useLoad(() => api.fixes(site.id, layout === "board" ? "all" : view, query, layout === "board" ? 500 : 100),
+    [site.id, view, query, layout]);
   const members = useLoad(() => api.members(), []);
   const openId = Number(params.get("fix")) || null;
   const ref = useViewMotion<HTMLDivElement>([]);
@@ -25,17 +27,22 @@ export function FixesView({ site, params }: { site: Site; params: URLSearchParam
         </div>
       </div>
       <div className="toolbar" data-reveal>
-        <div className="seg" role="group" aria-label="Show">
+        <div className="seg" role="group" aria-label="Layout">
+          <button aria-pressed={layout === "list"} onClick={() => setLayout("list")}>List</button>
+          <button aria-pressed={layout === "board"} onClick={() => setLayout("board")}>Board</button>
+        </div>
+        {layout === "list" && <div className="seg" role="group" aria-label="Show">
           {VIEWS.map(([k, label]) => (
             <button key={k} aria-pressed={view === k} onClick={() => setView(k)}>
               {label}{list.data ? ` · ${count(list.data.counts[k])}` : ""}
             </button>
           ))}
-        </div>
+        </div>}
         <label className="sr-only" htmlFor="fix-q">Find a fix</label>
         <input id="fix-q" className="search" type="search" placeholder="Find a fix or page type" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
-      {list.error ? <ErrorBox text={list.error} onRetry={list.reload} /> : (
+      {layout === "board" ? (list.error ? <ErrorBox text={list.error} onRetry={list.reload} />
+        : <Board fixes={list.data?.fixes || null} onMoved={list.reload} />) : list.error ? <ErrorBox text={list.error} onRetry={list.reload} /> : (
         <div className="table-wrap" data-reveal>
           <table>
             <thead><tr><th>Severity</th><th>What's wrong</th><th>Page type</th><th className="num">Pages</th><th>Owner</th><th>Status</th></tr></thead>
@@ -122,10 +129,16 @@ function FixDrawer({ id, members, onChanged, tickets }: { id: number; members: M
               <div><h3>How to fix</h3><p>{f.texts.fix}</p></div>
               <div><h3>How we'll know</h3><p>{f.texts.verify}</p></div>
             </div>
+            {f.status === "verified" && <ImpactSection fixId={id} />}
             <AISection fixId={id} onChanged={() => d.reload()} />
             <div className="row">
               {f.status !== "in_progress" && f.status !== "verified" && <button className="btn" disabled={busy} onClick={() => change({ status: "in_progress" }, "Marked as in progress.")}>Start working</button>}
               {["open", "in_progress"].includes(f.status) && <button className="btn primary" disabled={busy} onClick={() => change({ status: "fixed_pending_check" }, "Marked fixed. The next check will confirm it.")}>I've fixed it</button>}
+              {f.status !== "verified" && f.source !== "journey" && <button className="btn" disabled={busy} onClick={async () => {
+                setBusy(true);
+                try { const r = await api.recheckFix(id); toast(`Checking ${count(r.pages)} page${r.pages === 1 ? "" : "s"} now. It's confirmed when every one is clean.`); go("live", { run: r.run_id }); }
+                catch (e: any) { toast(e.detail || e.title || e.message); } finally { setBusy(false); }
+              }}>Check this fix now</button>}
               {f.status !== "wont_fix" && f.status !== "verified" && <button className="btn quiet" disabled={busy} onClick={() => change({ status: "wont_fix" }, "Marked as won't fix.")}>Won't fix</button>}
               {(f.status === "wont_fix" || f.status === "verified") && <button className="btn" disabled={busy} onClick={() => change({ status: "open" }, "Reopened.")}>Reopen</button>}
               {f.ticket_url ? <a className="btn quiet" href={f.ticket_url} target="_blank" rel="noopener noreferrer">Open ticket</a>
@@ -245,6 +258,79 @@ function AISection({ fixId, onChanged }: { fixId: number; onChanged: () => void 
           </div>
         );
       })}
+    </section>
+  );
+}
+
+
+/* Fix board: one column per status. Drag a card, or use its "Move to" menu (keyboard and screen readers). */
+const COLUMNS: [FixStatus, string][] = [["open", "Open"], ["in_progress", "In progress"], ["fixed_pending_check", "Fixed: waiting for a check"],
+  ["verified", "Verified"], ["wont_fix", "Won't fix"]];
+
+function Board({ fixes, onMoved }: { fixes: Fix[] | null; onMoved: () => void }) {
+  const toast = useToast();
+  const [over, setOver] = useState<string | null>(null);
+  const move = async (f: Fix, to: FixStatus) => {
+    if (f.status === to) return;
+    if (to === "verified") { toast("Only a check can verify a fix: use \"Check this fix now\" in the fix."); return; }
+    try { await api.patchFix(f.id, { status: to }); toast(`Moved to ${COLUMNS.find((c) => c[0] === to)![1]}.`); onMoved(); }
+    catch (e: any) { toast(e.detail || e.title || e.message); }
+  };
+  if (!fixes) return <p className="faint">Loading…</p>;
+  return (
+    <div className="board" data-reveal>
+      {COLUMNS.map(([st, label]) => {
+        const items = fixes.filter((f) => f.status === st);
+        return (
+          <section key={st} className={`board-col ${over === st ? "over" : ""}`} aria-labelledby={`col-${st}`}
+            onDragOver={(e) => { e.preventDefault(); setOver(st); }} onDragLeave={() => setOver(null)}
+            onDrop={(e) => { e.preventDefault(); setOver(null); const f = fixes.find((x) => x.id === Number(e.dataTransfer.getData("text/plain"))); if (f) move(f, st); }}>
+            <h2 id={`col-${st}`}><span>{label}</span><b>{count(items.length)}</b></h2>
+            <ul role="list">
+              {items.map((f) => (
+                <li key={f.id} className="board-card" draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", String(f.id))}>
+                  <Sev s={f.severity} />
+                  <a href={`#/fixes?fix=${f.id}&layout=board`} className="board-title">{f.title}</a>
+                  <span className="faint">{count(f.pages_affected)} page{f.pages_affected === 1 ? "" : "s"}{f.owner_name ? ` · ${f.owner_name}` : ""}</span>
+                  <label className="sr-only" htmlFor={`mv-${f.id}`}>Move fix {f.id} to</label>
+                  <select id={`mv-${f.id}`} className="board-move" value={f.status} onChange={(e) => move(f, e.target.value as FixStatus)}>
+                    {COLUMNS.map(([k, l]) => <option key={k} value={k} disabled={k === "verified" && f.status !== "verified"}>{l}</option>)}
+                  </select>
+                </li>
+              ))}
+              {items.length === 0 && <li className="empty board-empty">Nothing here</li>}
+            </ul>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Before / after Search Console figures for a verified fix (14, 28, 60 days). A signal, not proof. */
+function ImpactSection({ fixId }: { fixId: number }) {
+  const d = useLoad(() => api.fixImpact(fixId), [fixId]);
+  const x: FixImpact | null = d.data;
+  const signed = (n: number | null | undefined, suffix = "") => (n == null ? "–" : `${n > 0 ? "+" : ""}${n.toLocaleString("en-IN")}${suffix}`);
+  return (
+    <section className="impact" aria-labelledby="imp-h">
+      <h3 id="imp-h">Impact since the fix was confirmed</h3>
+      {!x ? <p className="faint">Loading…</p> : x.state !== "ok" ? <p className="faint">{x.text}</p> : (<>
+        <div className="stat-row">
+          {x.windows.map((w) => (
+            <div key={w.days} className="stat">
+              <span className="stat-label">{w.days} days</span>
+              {w.ready && w.change ? (<>
+                <b className={w.change.clicks >= 0 ? "up" : "down"}>{signed(w.change.clicks_pct, "%")}</b>
+                <span className="stat-sub">clicks {w.before.clicks.toLocaleString("en-IN")} → {w.after!.clicks.toLocaleString("en-IN")}</span>
+                <span className="stat-sub">impressions {signed(w.change.impressions_pct, "%")} · {w.change.position == null || w.change.position === 0 ? "same average rank"
+                  : w.change.position < 0 ? `up ${Math.abs(w.change.position)} places` : `down ${w.change.position} places`}</span>
+              </>) : (<><b className="muted">…</b><span className="stat-sub">{w.text}</span></>)}
+            </div>
+          ))}
+        </div>
+        <p className="faint" style={{ fontSize: 12.5, margin: "8px 0 0" }}>{x.pages} page{x.pages === 1 ? "" : "s"}. {x.text}</p>
+      </>)}
     </section>
   );
 }
