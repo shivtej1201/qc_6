@@ -136,12 +136,17 @@ QC opens on **New check**:
 1. Choose **Sitemap** and paste its address (a sitemap index is followed to every sitemap it lists), or **One page**,
    or **Upload a sheet** (CSV, TSV, TXT or Excel .xlsx, addresses in any column).
 2. QC lists the page addresses, live as it reads them. **Download URLs** as Excel or CSV.
-3. **Start crawling.** Every page is checked; the screen shows pages done, speed and time left, every second.
+3. Pick a **Speed** (each says how long this list will take) and **Start crawling.** Standard (12 requests a second)
+   is picked for lists under 50,000 pages: 10,000 pages in about 16 minutes. Large site (16, rising to 18 while the
+   site keeps up) is picked from 50,000: 3 lakh pages in about 5–6 hours instead of 7½. A limit set for the site
+   stays its limit. QC slows down by itself when the site answers slowly or says "too many requests".
+   Every page is checked; the screen shows pages done, speed and time left, every second.
    **Pause**, **Resume** and **Cancel** work at any point (pause and cancel take effect within seconds; nothing already
    checked is lost).
 4. When it finishes: problems by severity and **Download report** (Excel one sheet, CSV, ZIP, PDF summary).
 
-The site is created from the address the first time; there is nothing to configure. **Your checks** lists every
+The site is created from the address the first time; there is nothing to configure and no site to pick: the
+screens show the site of the check you opened last. **Your checks** lists every
 check with its status. If another check of the same site is still going, the screen says which and offers to
 pause or cancel it. If the worker isn't running (for example its window was closed), the screen says so, and a
 check left "pausing" by a closed worker becomes "paused" by itself instead of blocking new checks.
@@ -154,8 +159,16 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
 * **Full audit workbook** (Download report → Full audit workbook): the QC V5 layout, one sheet each for Executive
-  Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, Source Page Issues, Destination
-  Issues, Broken / Redirect / External URLs, Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
+  Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, **Status Codes**, Source Page Issues,
+  Destination Issues, Broken / Redirect / External URLs, **All URLs (Unique)**, **Images (Unique)**, **Image Issues**,
+  Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
+  * *Status Codes*: every exact code seen (200, 301, 302, 304, 404, 410, 500, 503, timeouts...) for the pages
+    checked, the links found on them and the images, with how many unique addresses answered it, how many times
+    they're used, and an example. A redirect shows both ends: "301 Moved Permanently -> 200 OK".
+  * *All URLs (Unique)* / *Images (Unique)*: each unique address found on the pages is checked once and listed once,
+    whatever it answered: first and final status, meaning, final URL, redirect hops and chain, on how many pages it
+    is found, the first page and three example pages (images also: pages missing alt text). Problems come first.
+  * *Image Issues*: every page -> image pair where the image is broken or redirects.
   "All data as CSVs (ZIP)" has every link-level file.
 * **Download report** (Insights, All pages, New check): one file, one sheet: the summary at the top, then one row per problem and
   page with severity, what to do, owner, status and the seen-before remark. CSV, Excel (`.xlsx`) or ZIP (the CSV,

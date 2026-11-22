@@ -122,14 +122,7 @@ function App({ local }: { local: boolean }) {
       <aside className="rail" id="rail" aria-label="Main">
         <div className="logo"><div className="logo-mark">QC</div><div><b>QC V6</b><span>Site quality</span></div>
           <button className="icon-btn rail-close" aria-label="Close the menu" onClick={() => setMenu(false)}><Icon name="close" /></button></div>
-        {sites.data && sites.data.sites.length > 0 && (
-          <div className="site-switch">
-            <label className="sr-only" htmlFor="site-select">Site</label>
-            <select id="site-select" value={site?.id} onChange={(e) => pickSite(Number(e.target.value))}>
-              {sites.data.sites.map((s) => <option key={s.id} value={s.id}>{s.primary_host}</option>)}
-            </select>
-          </div>
-        )}
+        {site && <p className="site-now" title="Shown for the check you opened last. Start a new check from a sitemap, a sheet or one URL.">Showing <b>{site.primary_host}</b></p>}
         <button className="jump" onClick={() => setPalette(true)}><Icon name="search" /><span>Jump to…</span><kbd>Ctrl K</kbd></button>
         <nav aria-label="Sections">
           {NAV_GROUPS.map((g) => (
