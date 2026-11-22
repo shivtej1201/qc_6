@@ -51,8 +51,13 @@ def _try_parse_numeric_ip(host: str) -> Optional[ipaddress.IPv4Address]:
             pass
     return None
 
+_SHARED = ipaddress.ip_network("100.64.0.0/10")    # carrier-grade NAT: not public, and Python's is_private says False
+
+
 def _is_prohibited_ip(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address], allow_local: bool = False) -> bool:
     if ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return True
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _SHARED and not allow_local:
         return True
     if ip.is_loopback or ip.is_private:
         if not allow_local:
@@ -62,7 +67,7 @@ def _is_prohibited_ip(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address], a
         mapped = ip.ipv4_mapped
         if mapped.is_link_local or mapped.is_multicast or mapped.is_reserved or mapped.is_unspecified:
             return True
-        if mapped.is_loopback or mapped.is_private:
+        if mapped.is_loopback or mapped.is_private or mapped in _SHARED:
             if not allow_local:
                 return True
     return False
