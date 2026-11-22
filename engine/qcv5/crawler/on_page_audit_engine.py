@@ -1151,7 +1151,8 @@ class OnPageAuditEngine:
             await self._cooldown_gate.wait()
             epoch = self._cooldown_epoch
             now = time.monotonic()
-            interval = 1.0 / max(0.5, self.target_rps)
+            # robots.txt Crawl-delay (set by the caller as crawl_delay seconds) is a floor on the spacing
+            interval = max(1.0 / max(0.5, self.target_rps), float(getattr(self, "crawl_delay", 0.0) or 0.0))
             slot = self._next_slot_ts if self._next_slot_ts > now else now
             self._next_slot_ts = slot + interval
             wait_s = slot - now
@@ -2673,7 +2674,8 @@ class OnPageAuditEngine:
             raw_img, img_rels = extract_on_page_images(parser, source_host)   # same Parser instance
         seo = None
         if seo_ctx is not None:
-            seo = seo_page_facts(self.job_id, src_url, final_url, parser, rels, seo_ctx[0], seo_ctx[1])
+            seo = seo_page_facts(self.job_id, src_url, final_url, parser, rels, seo_ctx[0], seo_ctx[1],
+                                 seo_ctx[2] if len(seo_ctx) > 2 else "")
         t1, t2, _ = self.classifier.extract_meta_tags(html[:32768], parser=None)
         title = " ".join((parser.title or "").split())[:300]
         if t1 and t2:
@@ -3103,7 +3105,7 @@ class OnPageAuditEngine:
                             seo_ctx = None
                             if (self.audit_seo and src_http is not None and 200 <= src_http <= 299
                                     and (not ctype or "html" in ctype)):
-                                seo_ctx = (fetch_res.get("x_robots_tag") or "", now_iso)
+                                seo_ctx = (fetch_res.get("x_robots_tag") or "", now_iso, str(fetch_res.get("content_type") or ""))
                             (raw_occ, extracted_rels, biz, pt, clf_method, tag_1, tag_2,
                              raw_img, extracted_imgs, page_title, seo_row) = await loop.run_in_executor(
                                 parse_pool, self._parse_and_classify, src_url, final_src_url, html, seo_ctx

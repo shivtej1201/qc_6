@@ -549,6 +549,7 @@ def build_on_page_csv_package(
                 "jsonld_invalid", "schema_types", "og_title", "og_description", "og_image", "twitter_card",
                 "word_count", "content_hash", "hreflang_count", "hreflang_x_default", "hreflang_json",
                 "insecure_resources", "insecure_examples", "internal_links", "external_links",
+                "has_html_tag", "has_body_tag", "jsonld_no_context", "jsonld_no_type", "canonical_href", "header_charset",
                 "internal_nofollow_links", "url_length", "checked_at", "script_count", "js_rendering_suspected"]
     files["15_seo_page_audit.csv"] = _stream(conn, out("15_seo_page_audit.csv"), seo_cols,
         "SELECT " + ", ".join("s.http_status" if c == "http_status" else "p." + c for c in seo_cols) +
