@@ -151,7 +151,9 @@ async def _compute(pool, site_id: int, run_id: int, min_impressions: int) -> Dic
             bucket = "consolidate"
         else:
             bucket = "monitor"
-        rows.append({"url": url, "template": p["template"], "score": score, "bucket": bucket,
+        # the score's arithmetic, part by part (CrawlPulse 3: explainable scoring)
+        parts = {k: round(m * WEIGHTS[k] * S[k] / wsum * 100, 1) for k in avail} if wsum else {}
+        rows.append({"url": url, "template": p["template"], "score": score, "bucket": bucket, "parts": parts, "multiplier": m,
                      "clicks": clicks if has_gsc else None, "impressions": impr if has_gsc else None,
                      "sessions": sess if has_ga4 else None, "depth": depth, "authority": p["authority"]})
         if S_T or st or (ctr is not None and ctr < 0.7 * exp) or S_Q or weak or bucket == "consolidate":

@@ -1517,7 +1517,7 @@ async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member
 
 
 @app.get("/api/v2/sites/{site_id}/growth/opportunities")
-async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+async def opportunities(site_id: int, bucket: str = "", review: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
                         min_impressions: int = Query(2500, ge=1), me=Depends(current_member)):
     """Pages ranked by QC's opportunity score, with the reasons in words and an action bucket (CrawlPulse FEAT-15)."""
     from qc6.opportunity import explain, page_opportunities
@@ -1525,9 +1525,83 @@ async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, g
     pool = await get_pool()
     rid = await _inventory_run(site_id, None, pool)
     d = await page_opportunities(pool, site_id, rid, min_impressions, with_reasons=0)
-    rows = [p for p in d["pages"] if not bucket or p["bucket"] == bucket]
-    return {**{k: v for k, v in d.items() if k not in ("pages", "_explain")}, "total": len(rows),
-            "pages": explain(d, rows[offset:offset + limit])}
+    reviews = {r["url"]: dict(r) for r in await pool.fetch(
+        """SELECT DISTINCT ON (o.url) o.url, o.status, o.note, o.created_at, m.name AS by FROM opportunity_reviews o
+           LEFT JOIN members m ON m.id = o.member_id WHERE o.site_id = $1 ORDER BY o.url, o.id DESC""", site_id)}
+    rows = [p for p in d["pages"] if (not bucket or p["bucket"] == bucket)
+            and (not review or (reviews.get(p["url"], {}).get("status") or "open") == review)]
+    page = explain(d, rows[offset:offset + limit])
+    for p in page:
+        p["review"] = reviews.get(p["url"])
+    counts: Dict[str, int] = {}
+    for p in d["pages"]:
+        k = (reviews.get(p["url"], {}).get("status") or "open")
+        counts[k] = counts.get(k, 0) + 1
+    return {**{k: v for k, v in d.items() if k not in ("pages", "_explain")}, "total": len(rows), "review_counts": counts,
+            "parts_labels": OPP_PARTS, "pages": page}
+
+
+OPP_PARTS = {"T": "Problems on the page", "P": "Search demand close to page 1", "C": "Clicks below what its position earns",
+             "R": "Visits (GA4)", "Q": "Content quality", "L": "Hard to reach by links"}
+
+
+class ReviewIn(BaseModel):
+    url: str = Field(max_length=2000)
+    status: str = Field(pattern="^(accepted|dismissed|done|open)$")
+    note: str = Field(default="", max_length=2000)
+    score: Optional[float] = None
+
+
+@app.post("/api/v2/sites/{site_id}/growth/opportunities/review", status_code=201)
+async def review_opportunity(site_id: int, body: ReviewIn, me=Depends(current_member)):
+    """Accept, dismiss or mark done an opportunity; every decision is kept (history), the latest one counts."""
+    can_edit(me)
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await pool.fetchval("INSERT INTO opportunity_reviews (site_id, url, status, note, score, member_id) "
+                              "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", site_id, body.url, body.status, body.note.strip(),
+                              body.score, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], f"opportunity.{body.status}", f"site:{site_id}", {"url": body.url})
+    return {"id": rid, "status": body.status}
+
+
+@app.get("/api/v2/sites/{site_id}/growth/opportunities/review")
+async def opportunity_history(site_id: int, url: str, me=Depends(current_member)):
+    await site_for(site_id, me)
+    rows = await (await get_pool()).fetch(
+        """SELECT o.status, o.note, o.score, o.created_at, m.name AS by FROM opportunity_reviews o
+           LEFT JOIN members m ON m.id = o.member_id WHERE o.site_id = $1 AND o.url = $2 ORDER BY o.id DESC LIMIT 100""", site_id, url)
+    return {"history": [dict(r) for r in rows]}
+
+
+# ------------------------------------------------------------------ fix tools: check now, impact
+@app.post("/api/v2/fixes/{fix_id}/recheck", status_code=201)
+async def recheck_fix(fix_id: int, me=Depends(current_member)):
+    """Check just this fix's pages now (a spot check). It confirms the fix when every page is clean."""
+    from qc6 import fix_tools
+    can_edit(me)
+    pool = await get_pool()
+    f = await pool.fetchrow("SELECT f.* FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
+                            fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    try:
+        return await fix_tools.recheck(pool, dict(f), me["id"])
+    except services.Busy as e:
+        raise _start_problem(e)
+    except services.NotAllowed as e:
+        raise problem(409, "This fix can't be checked on its own", str(e))
+
+
+@app.get("/api/v2/fixes/{fix_id}/impact")
+async def fix_impact(fix_id: int, me=Depends(current_member)):
+    from qc6 import fix_tools
+    pool = await get_pool()
+    f = await pool.fetchrow("SELECT f.* FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
+                            fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    return await fix_tools.impact(pool, dict(f))
 
 
 @app.get("/api/v2/sites/{site_id}/growth/search")

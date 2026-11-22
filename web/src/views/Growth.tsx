@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type Site } from "../api";
+import { api, type Opportunity, type ReviewStatus, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
 import { ErrorBox, ago, count, useLoad, useToast } from "../ui";
@@ -29,7 +29,16 @@ export function GrowthView({ site, params }: { site: Site; params: URLSearchPara
 function Opps({ site }: { site: Site }) {
   const [bucket, setBucket] = useState("");
   const [offset, setOffset] = useState(0);
-  const d = useLoad(() => api.opportunities(site.id, bucket, 50, offset), [site.id, bucket, offset]);
+  const [review, setReview] = useState<"" | ReviewStatus>("open");
+  const toast = useToast();
+  const d = useLoad(() => api.opportunities(site.id, bucket, 50, offset, review), [site.id, bucket, offset, review]);
+  const decide = async (p: Opportunity, st: ReviewStatus) => {
+    let note = "";
+    if (st === "dismissed") note = window.prompt("Why dismiss it? (optional, kept in the history)") ?? "";
+    try { await api.reviewOpportunity(site.id, p.url, st, note, p.score); toast({ accepted: "Accepted: on your list.", done: "Marked done.",
+      dismissed: "Dismissed. It stays in the history.", open: "Back to open." }[st]); d.reload(); }
+    catch (e: any) { toast(e.detail || e.title || e.message); }
+  };
   if (d.error) return <ErrorBox text={d.error} onRetry={d.reload} />;
   const x = d.data;
   if (!x) return <p className="faint">Loading…</p>;
@@ -43,6 +52,12 @@ function Opps({ site }: { site: Site }) {
           <GoogleIds site={site} onSaved={() => window.location.reload()} />
         </div>
       )}
+      <div className="seg" role="group" aria-label="Decision" style={{ marginBottom: 12 }} data-reveal>
+        {([["open", "To decide"], ["accepted", "Accepted"], ["done", "Done"], ["dismissed", "Dismissed"], ["", "All"]] as [ReviewStatus | "", string][]).map(([k, l]) => (
+          <button key={k || "all"} aria-pressed={review === k} onClick={() => { setReview(k); setOffset(0); }}>
+            {l}{k && x.review_counts ? ` · ${count(x.review_counts[k] || 0)}` : ""}</button>
+        ))}
+      </div>
       <div className="row" style={{ marginBottom: 14 }} data-reveal>
         <button className={`btn ${bucket === "" ? "primary" : ""}`} onClick={() => { setBucket(""); setOffset(0); }}>All</button>
         {x.buckets.filter((b) => b.pages > 0).map((b) => (
@@ -52,17 +67,29 @@ function Opps({ site }: { site: Site }) {
       </div>
       <div className="table-wrap" tabIndex={0} role="region" aria-label="Opportunities" data-reveal>
         <table>
-          <thead><tr><th className="num">Score</th><th>Page</th><th>What to do</th><th>Why</th>
+          <thead><tr><th className="num">Score</th><th>Page</th><th>What to do</th><th>Why</th><th>Decision</th>
             {x.data.search_console && <th className="num">Clicks</th>}{x.data.search_console && <th className="num">Impressions</th>}
             {x.data.ga4 && <th className="num">Visits</th>}</tr></thead>
           <tbody>
-            {x.pages.length === 0 && <tr><td colSpan={7} className="empty">No pages in this group.</td></tr>}
+            {x.pages.length === 0 && <tr><td colSpan={8} className="empty">No pages in this group.</td></tr>}
             {x.pages.map((p) => (
               <tr key={p.url} className="click" tabIndex={0} onClick={() => go("page", { url: p.url })} onKeyDown={(e) => e.key === "Enter" && go("page", { url: p.url })}>
-                <td className="num"><b className="score-cell">{p.score.toFixed(0)}</b></td>
+                <td className="num" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                  <details className="score-how"><summary><b className="score-cell">{p.score.toFixed(0)}</b><span className="sr-only"> How is this scored?</span></summary>
+                    <div className="score-pop">
+                      <b>How {p.score.toFixed(0)} is made</b>
+                      <ul>{Object.entries(p.parts || {}).filter(([, v]) => v > 0).map(([k, v]) => <li key={k}><span>{x.parts_labels?.[k] || k}</span><b>{v.toFixed(1)}</b></li>)}</ul>
+                      <p className="faint">{p.multiplier && p.multiplier !== 1 ? `Includes ×${p.multiplier} for this page type. ` : ""}Parts with no data aren't counted; the rest are scaled to 100.</p>
+                    </div></details></td>
                 <td className="title"><span className="mono">{path(p.url)}</span>{p.template && <span className="sub">{p.template}</span>}</td>
                 <td><span className="chip">{x.buckets.find((b) => b.id === p.bucket)?.label}</span></td>
                 <td className="reasons-cell">{p.reasons.length ? <ul>{p.reasons.map((r) => <li key={r}>{r}</li>)}</ul> : <span className="faint">Nothing stands out.</span>}</td>
+                <td onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                  <label className="sr-only" htmlFor={`rv-${p.url}`}>Decision for {path(p.url)}</label>
+                  <select id={`rv-${p.url}`} className="input small" value={p.review?.status || "open"} onChange={(e) => decide(p, e.target.value as ReviewStatus)}>
+                    <option value="open">To decide</option><option value="accepted">Accept</option><option value="done">Done</option><option value="dismissed">Dismiss</option>
+                  </select>
+                  {p.review && p.review.status !== "open" && <span className="sub">{p.review.by || "Someone"}, {ago(p.review.created_at)}</span>}</td>
                 {x.data.search_console && <td className="num">{count(p.clicks)}</td>}
                 {x.data.search_console && <td className="num">{count(p.impressions)}</td>}
                 {x.data.ga4 && <td className="num">{count(p.sessions)}</td>}

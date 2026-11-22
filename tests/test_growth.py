@@ -46,8 +46,14 @@ def world(migrated, tmp_path_factory):
             return httpx.Response(200, json={"access_token": "ya29.test", "expires_in": 3600})
         assert req.headers["authorization"] == "Bearer ya29.test"
         if req.url.host == "searchconsole.googleapis.com":
-            calls["gsc"] += 1
             body = json.loads(req.content)
+            if body["dimensions"] == ["page", "date"]:          # day-by-day figures per page (fix impact)
+                calls["daily"] = calls.get("daily", 0) + 1
+                assert body["startRow"] == 0
+                day = body["endDate"]
+                return httpx.Response(200, json={"rows": [{"keys": [p, day], "clicks": c, "impressions": i, "position": pos}
+                                                          for q, p, c, i, ctr, pos in rows[:2]]})
+            calls["gsc"] += 1
             assert body["dimensions"] == ["query", "page"]
             start = body["startRow"]
             page = rows[start:start + body["rowLimit"]]
@@ -107,6 +113,8 @@ def test_sync_pages_through_results_and_needs_setup(world, monkeypatch):
     monkeypatch.setattr(sc, "PAGE_SIZE", 3)                     # 4 rows -> two pages of results
     out = w["loop"].run_until_complete(sc.sync(w["pool"], _site(w)))
     assert out["rows"] == 4 and out["ga4_pages"] == 2 and out["truncated"] is False and w["calls"]["gsc"] == 2
+    daily = w["loop"].run_until_complete(w["pool"].fetch("SELECT page, clicks FROM search_page_days WHERE site_id = $1 ORDER BY page", w["site"]))
+    assert w["calls"]["daily"] == 1 and len(daily) == 2 and sum(r["clicks"] for r in daily) > 0        # day-by-day figures kept
 
 
 def test_striking_distance_and_cannibalisation(world):

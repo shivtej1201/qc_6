@@ -37,6 +37,11 @@ export interface Job { id: number; site_id: number; source: "sitemap" | "single"
   run_summary: { pages?: number; score?: number | null; visited?: number } | null; run_started: string | null; run_finished: string | null;
   results?: Partial<Record<Severity, { problems: number; pages: number }>> }
 
+export interface ImpactWindow { from: string; to: string; clicks: number; impressions: number; ctr: number | null; position: number | null }
+export interface FixImpact { state: "ok" | "not_verified" | "no_search_console"; text: string; verified_at?: string; pages?: number;
+  windows: { days: number; ready: boolean; days_so_far?: number; text?: string; before: ImpactWindow; after?: ImpactWindow;
+    change?: { clicks: number; clicks_pct: number | null; impressions: number; impressions_pct: number | null; position: number | null } }[] }
+
 export type Severity = "critical" | "high" | "medium" | "low";
 export type FixStatus = "open" | "in_progress" | "fixed_pending_check" | "verified" | "wont_fix";
 export interface Site { id: number; name: string; base_url: string; primary_host: string; settings: Record<string, any>;
@@ -90,9 +95,12 @@ export interface Compare { a: { id: number; finished_at: string }; b: { id: numb
   page_types: { name: string; before: number; after: number }[] }
 
 export interface Opportunity { url: string; template: string; score: number; bucket: string; reasons: string[];
-  clicks: number | null; impressions: number | null; sessions: number | null; depth: number | null; authority: number | null }
+  clicks: number | null; impressions: number | null; sessions: number | null; depth: number | null; authority: number | null;
+  parts?: Record<string, number>; multiplier?: number; review?: { status: ReviewStatus; note: string; created_at: string; by: string | null } | null }
 export interface Opportunities { run_id: number; total: number; pages: Opportunity[]; buckets: { id: string; label: string; pages: number }[];
-  data: { search_console: boolean; ga4: boolean; links: boolean }; confidence: number; basis: string }
+  data: { search_console: boolean; ga4: boolean; links: boolean }; confidence: number; basis: string;
+  review_counts: Record<string, number>; parts_labels: Record<string, string> }
+export type ReviewStatus = "open" | "accepted" | "dismissed" | "done";
 export interface SearchData {
   config: { service_account: boolean; service_account_error: string | null; gsc_property: string | null; ga4_property_id: string | null; ready: boolean };
   last_sync: { synced_at: string; start_date: string; end_date: string; gsc_rows: number; ga4_pages: number; truncated: boolean; error: string | null } | null;
@@ -112,8 +120,10 @@ export const api = {
   createSite: (b: { name: string; base_url: string }) => req<Site>("POST", "/api/v2/sites", b),
   today: (sid: number) => req<Today>("GET", `/api/v2/sites/${sid}/today`),
   insights: (sid: number, runs = 12) => req<Insights>("GET", `/api/v2/sites/${sid}/insights?runs=${runs}`),
-  fixes: (sid: number, view: string, q: string) =>
-    req<{ fixes: Fix[]; counts: Record<string, number> }>("GET", `/api/v2/sites/${sid}/fixes?${new URLSearchParams({ view, q })}`),
+  fixes: (sid: number, view: string, q: string, limit = 100) =>
+    req<{ fixes: Fix[]; counts: Record<string, number> }>("GET", `/api/v2/sites/${sid}/fixes?${new URLSearchParams({ view, q, limit: String(limit) })}`),
+  recheckFix: (id: number) => req<{ run_id: number; pages: number; kind: string }>("POST", `/api/v2/fixes/${id}/recheck`),
+  fixImpact: (id: number) => req<FixImpact>("GET", `/api/v2/fixes/${id}/impact`),
   fix: (id: number) => req<{ fix: Fix; pages: string[]; examples: { page_url: string; screenshot: string }[];
     events: { kind: string; detail: any; created_at: string; actor: string | null }[]; page_history?: Record<string, string> }>("GET", `/api/v2/fixes/${id}`),
   patchFix: (id: number, b: Record<string, unknown>) => req<Fix>("PATCH", `/api/v2/fixes/${id}`, b),
@@ -150,8 +160,12 @@ export const api = {
     req<Inventory>("GET", `/api/v2/sites/${sid}/inventory?${new URLSearchParams(params)}`),
   inventoryCsv: (sid: number, params: Record<string, string>) => `/api/v2/sites/${sid}/inventory.csv?${new URLSearchParams(params)}`,
   compare: (sid: number, a: number, b: number) => req<Compare>("GET", `/api/v2/sites/${sid}/compare?a=${a}&b=${b}`),
-  opportunities: (sid: number, bucket = "", limit = 50, offset = 0) =>
-    req<Opportunities>("GET", `/api/v2/sites/${sid}/growth/opportunities?${new URLSearchParams({ bucket, limit: String(limit), offset: String(offset) })}`),
+  opportunities: (sid: number, bucket = "", limit = 50, offset = 0, review = "") =>
+    req<Opportunities>("GET", `/api/v2/sites/${sid}/growth/opportunities?${new URLSearchParams({ bucket, review, limit: String(limit), offset: String(offset) })}`),
+  reviewOpportunity: (sid: number, url: string, status: ReviewStatus, note = "", score?: number) =>
+    req<{ id: number }>("POST", `/api/v2/sites/${sid}/growth/opportunities/review`, { url, status, note, score }),
+  opportunityHistory: (sid: number, url: string) => req<{ history: { status: string; note: string; score: number | null; created_at: string; by: string | null }[] }>(
+    "GET", `/api/v2/sites/${sid}/growth/opportunities/review?${new URLSearchParams({ url })}`),
   searchData: (sid: number) => req<SearchData>("GET", `/api/v2/sites/${sid}/growth/search`),
   searchSync: (sid: number) => req<{ rows: number; ga4_pages: number }>("POST", `/api/v2/sites/${sid}/growth/sync`),
   templates: (sid: number) => req<{ templates: { id: number; name: string; path_pattern: string; page_count: number; visits: number; open_fixes: number }[] }>("GET", `/api/v2/sites/${sid}/templates`),
