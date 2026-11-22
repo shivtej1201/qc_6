@@ -105,7 +105,10 @@ python -m pytest -q
 |---|---|
 | `QC6_DATABASE_URL` | Postgres connection |
 | `QC6_DATA_DIR` | screenshots, facts (Parquet), V5 report ZIPs |
-| `QC6_AUTH` | `proxy` (behind oauth2-proxy + Keycloak/Google; `QC6_TRUSTED_PROXIES`, `QC6_AUTH_HEADER`), `oidc` (Bearer JWT: `QC6_OIDC_JWKS_URL`, `QC6_OIDC_ISSUER`, `QC6_OIDC_AUDIENCE`) or `dev` (refused when `QC6_ENV=production`) |
+| `QC6_AUTH` | `proxy` (behind oauth2-proxy + Keycloak/Google; `QC6_TRUSTED_PROXIES`, `QC6_AUTH_HEADER`), `oidc` (Bearer JWT: `QC6_OIDC_JWKS_URL`, `QC6_OIDC_ISSUER`, `QC6_OIDC_AUDIENCE`) `local` (QC's own sign-in: e-mail + password, optional two-factor; needs `QC6_SECRET_KEY`) or `dev` (refused when `QC6_ENV=production`) |
+| `QC6_COOKIE_SECURE` | `local` sign-in only: set `false` when you open QC over plain `http://` (e.g. `http://localhost:8000`); keep the default (`true`) behind HTTPS |
+| `QC6_OLLAMA_URL`, `QC6_AI_MODEL` | AI drafts from a free local model: Ollama address (default `http://127.0.0.1:11434`) and model (default `qwen2.5:3b`) |
+| `QC6_MAX_PAGES_PER_FIX` | most affected pages kept per fix (default 20000) |
 | `QC6_VISITORS_PER_HOST`, `QC6_VISIT_SHARE` | real-visitor concurrency and their share of a site's speed limit |
 | `QC6_NU_URL`, `QC6_LANGUAGETOOL_URL`, `QC6_LIGHTHOUSE_CMD`, `QC6_CHROME_PATH` | optional extra checks (self-hosted Nu HTML checker, LanguageTool, local Lighthouse) |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | GA4-led sampling (site setting `ga4_property_id`) and the V5 Search Console integration |
@@ -119,6 +122,43 @@ Site settings (Settings page or `PATCH /api/v2/sites/{id}`): speed preset (Caref
 Large site 16→18 requests a second, from V5), speed limit, most pages per check, page timeout, retries, visitors, cookie answer, sitemap,
 `check_schedule` ("daily 06:30", "weekdays 07:15", "every 6 hours"), Slack/Teams webhooks and which events alert,
 GitHub/Jira. Journeys can carry their own `schedule:`.
+
+## Checking a few pages, reports, history, deleting
+
+* **Check pages** (Today and All pages): paste one or more URLs, or upload a sheet (CSV, TSV, TXT or
+  Excel .xlsx; the URLs can be in any column), or check the whole site. A spot check only judges the pages it looked at: it never closes a
+  fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
+* **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
+  21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
+* **Download report** (Insights, All pages): one file, one sheet: the summary at the top, then one row per problem and
+  page with severity, what to do, owner, status and the seen-before remark. CSV, Excel (`.xlsx`) or ZIP (the CSV,
+  compressed, about a fortieth of the size; best for big sites). Excel stops at its 1,048,576-row limit and says so.
+* **Delete**: a past check (Live, Past checks), a journey (Journeys), or a whole site (Settings, Delete this site;
+  owners only, type the site's name). Fixes that have comments or a ticket are kept. Cannot be undone.
+* **Product pages**: name, price, currency, availability, identifier (SKU/GTIN/MPN) and image in the page's
+  Product data (JSON-LD or microdata), and product pages with no Product data at all.
+
+## AI drafts (free, on your own machine)
+
+1. Install Ollama from https://ollama.com and start it.
+2. `ollama pull qwen2.5:3b` (about 2 GB; any model works, set `QC6_AI_MODEL`).
+3. Open a fix; under **Draft with local AI** choose **Write a draft**. You get specific steps, and for title / description problems a proposed
+   title and description with their lengths checked. Approve, edit or reject; nothing changes on your site.
+
+The model sees only QC's evidence for that fix and the page's own text, is told not to follow instructions in it,
+and nothing leaves your machine.
+
+## QC's own sign-in (no identity provider)
+
+```bash
+export QC6_AUTH=local QC6_SECRET_KEY='any long random text'
+python -m qc6.admin set-password lead@example.com        # asks for the password (10+ characters)
+```
+
+Members sign in with e-mail and password; under **Your account** they change their password, turn on two-factor
+(any authenticator app; 10 single-use recovery codes) and sign out. 5 wrong passwords lock an account for 15
+minutes. Lost phone: `python -m qc6.admin reset-2fa lead@example.com`. Opening QC over plain http? Also set
+`QC6_COOKIE_SECURE=false`.
 
 ## Moving from QC V5
 
@@ -150,9 +190,9 @@ lastmod checks, hreflang, thin content, soft 404, structured data. Added: worker
 crawl scope and staging access (FEAT-02-02/03), URL inventory and lifecycle (FEAT-03-02/03), check comparison
 (FEAT-17-02), internal PageRank and depth (FEAT-09-02), canonical target validation (FEAT-11-01), near-duplicate
 clustering (FEAT-10-02), Search Console / GA4 sync, striking distance and cannibalisation (FEAT-12/13/14), opportunity
-score and buckets (FEAT-15, FEAT-01-04), executive PDF (FEAT-18-02). Not added: AI-written recommendations (FEAT-16;
-needs a paid API or a local model), password login and TOTP (FEAT-20-03; use your identity provider through OIDC),
-PDP price / availability checks beyond the existing structured-data rules (FEAT-08-02).
+score and buckets (FEAT-15, FEAT-01-04), executive PDF (FEAT-18-02). Also added:
+AI recommendations with a free local model (FEAT-16), password sign-in with TOTP (FEAT-20-03) and product-page data
+checks (FEAT-08-02).
 
 ## Measured
 
