@@ -31,7 +31,12 @@ WEB_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await get_pool()
+    pool = await get_pool()
+    try:
+        from qc6 import jobs
+        await jobs.recover(pool)
+    except Exception:                         # before migration 010 has run, say
+        pass
     yield
     await close_pool()
 
@@ -96,6 +101,15 @@ async def etag(request: Request, call_next):
 
 def problem(status: int, title: str, detail: str = "") -> HTTPException:
     return HTTPException(status, {"title": title, "detail": detail})
+
+
+def _start_problem(e: Exception) -> HTTPException:
+    """409 for 'another check of this site isn't finished', naming it so the screen can offer Resume / Cancel."""
+    from qc6 import services as sv
+    if isinstance(e, sv.Busy):
+        return HTTPException(409, {"title": "Another check of this site isn't finished", "detail": str(e),
+                                   "busy_run": e.run_id, "busy_status": e.status})
+    return problem(409, "This check can't start", str(e))
 
 
 @app.exception_handler(HTTPException)
@@ -608,7 +622,7 @@ async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     try:
         rid = await services.start_run(pool, site_id, body.kind, opts, me["id"])
     except services.NotAllowed as e:
-        raise problem(409, "A check is already running", str(e))
+        raise _start_problem(e)
     return {"run_id": rid}
 
 
@@ -637,7 +651,7 @@ async def _start_list_check(site_id: int, me, urls: List[str], kind: str, whole_
     try:
         rid = await services.start_run(pool, site_id, kind, opts, me["id"])
     except services.NotAllowed as e:
-        raise problem(409, "A check is already running", str(e))
+        raise _start_problem(e)
     await services.log(pool, me["workspace_id"], me["id"], "run.start_list", f"run:{rid}", {"source": source, "file": name, "urls": n})
     return {"run_id": rid, "urls": n, "other_hosts": got["other_hosts"], "other_examples": got["other_examples"],
             "duplicates": got["duplicates"], "spot": not whole_site, "label": label}
@@ -694,18 +708,32 @@ async def run(run_id: int, me=Depends(current_member)):
 async def _run_transition(run_id: int, me, src: tuple, dst: str, title: str, detail: str):
     can_edit(me)
     pool = await get_pool()
+    from qc6.workers.runner import recover_stale
+    await recover_stale(pool)                 # a check left 'pausing' by a closed worker becomes 'paused' first
     row = await pool.fetchrow("UPDATE runs r SET status = $3, finished_at = CASE WHEN $3 = 'cancelled' THEN now() ELSE r.finished_at END "
                               "FROM sites s WHERE r.id = $1 AND s.id = r.site_id AND s.workspace_id = $2 AND r.status = ANY($4::text[]) "
                               "RETURNING r.id, r.site_id", run_id, me["workspace_id"], dst, list(src))
     if row is None:
-        raise problem(409, title, detail)
+        cur = await pool.fetchval("SELECT r.status FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                                  run_id, me["workspace_id"])
+        if cur is None:
+            raise problem(404, "Check not found")
+        raise problem(409, title, detail or f"It is {cur} now.")
     await services.log(pool, me["workspace_id"], me["id"], f"run.{dst}", f"run:{run_id}", {})
+    if dst in ("cancelled", "paused"):
+        async with pool.acquire() as conn:
+            from qc6.workers.analysis import notify
+            await notify(conn, run_id, dst)
     return {"status": dst}
 
 
 @app.post("/api/v2/runs/{run_id}/pause")
 async def pause_run(run_id: int, me=Depends(current_member)):
-    return await _run_transition(run_id, me, ("running",), "pausing", "Only a running check can be paused", "")
+    """Running: finish what's in hand, then stop ('pausing' -> 'paused'). Waiting to start: paused at once."""
+    try:
+        return await _run_transition(run_id, me, ("queued",), "paused", "", "")
+    except HTTPException:
+        return await _run_transition(run_id, me, ("running",), "pausing", "Only a running or waiting check can be paused", "")
 
 
 @app.post("/api/v2/runs/{run_id}/resume")
@@ -715,8 +743,163 @@ async def resume_run(run_id: int, me=Depends(current_member)):
 
 @app.post("/api/v2/runs/{run_id}/stop")
 async def stop_run(run_id: int, me=Depends(current_member)):
-    return await _run_transition(run_id, me, ("queued", "paused"), "cancelled", "This check can't be cancelled now",
-                                 "Pause it first; a paused or queued check can be cancelled.")
+    """Cancel at any point before it finishes. A running check stops within a few seconds; pages already checked stay."""
+    return await _run_transition(run_id, me, ("queued", "running", "pausing", "paused"), "cancelled",
+                                 "This check has already finished", "")
+
+
+# ------------------------------------------------------------------ the simple flow: URL list -> Start crawling -> report
+class ListIn(BaseModel):
+    source: str = Field(pattern="^(sitemap|single|list)$")
+    url: str = Field(default="", max_length=4000)
+    text: str = Field(default="", max_length=20_000_000)
+
+
+def _list_out(j: Dict[str, Any]) -> Dict[str, Any]:
+    j = dict(j)
+    for k in ("created_at", "updated_at", "run_started", "run_finished"):
+        if j.get(k) is not None:
+            j[k] = j[k].isoformat()
+    return j
+
+
+@app.post("/api/v2/lists", status_code=201)
+async def make_list(body: ListIn, me=Depends(current_member)):
+    """A URL list from a sitemap (read in the background, with live progress), one address, or a pasted list."""
+    from qc6 import jobs
+    from qc6.url_lists import ListError, from_text
+    can_edit(me)
+    pool = await get_pool()
+    try:
+        if body.source == "sitemap":
+            url = body.url.strip()
+            if url and "://" not in url:
+                url = "https://" + url
+            lid = await jobs.from_sitemap(pool, me, url)
+        elif body.source == "single":
+            lid = await jobs.from_urls(pool, me, jobs.single_url(body.url), "single", body.url.strip())
+        else:
+            urls = from_text(body.text)
+            lid = await jobs.from_urls(pool, me, urls, "list", f"{len(urls):,} pasted addresses")
+    except ListError as e:
+        raise problem(400, "Check the address", str(e))
+    except services.NotAllowed as e:
+        raise problem(400, "Check the address", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}", {"source": body.source})
+    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+
+
+@app.post("/api/v2/lists/upload", status_code=201)
+async def upload_list(request: Request, me=Depends(current_member)):
+    """A URL list from a sheet (.csv, .tsv, .txt or .xlsx; the URL column, or any cell starting with http)."""
+    from qc6 import jobs
+    from qc6.url_lists import ListError, MAX_BYTES, from_upload
+    can_edit(me)
+    form = await request.form()
+    f = form.get("file")
+    if f is None or not hasattr(f, "read"):
+        raise problem(400, "Choose a file to upload")
+    data = await f.read(MAX_BYTES + 1)
+    name = os.path.basename(getattr(f, "filename", "") or "sheet")[:120]
+    pool = await get_pool()
+    try:
+        lid = await jobs.from_urls(pool, me, from_upload(data, name), "sheet", name)
+    except (ListError, services.NotAllowed) as e:
+        raise problem(400, "That file can't be used", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}", {"source": "sheet", "file": name})
+    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+
+
+@app.get("/api/v2/lists")
+async def list_jobs(me=Depends(current_member)):
+    from qc6 import jobs
+    from qc6.workers.runner import recover_stale
+    pool = await get_pool()
+    await recover_stale(pool)
+    return {"jobs": [_list_out(j) for j in await jobs.jobs(pool, me["workspace_id"])]}
+
+
+@app.get("/api/v2/lists/{lid}")
+async def get_list(lid: int, me=Depends(current_member)):
+    from qc6 import jobs
+    j = await jobs.get(await get_pool(), me["workspace_id"], lid)
+    if j is None:
+        raise problem(404, "URL list not found")
+    return _list_out(j)
+
+
+@app.post("/api/v2/lists/{lid}/cancel")
+async def cancel_list(lid: int, me=Depends(current_member)):
+    from qc6 import jobs
+    can_edit(me)
+    pool = await get_pool()
+    if await jobs.get(pool, me["workspace_id"], lid) is None:
+        raise problem(404, "URL list not found")
+    await jobs.cancel(pool, lid)
+    return {"ok": True}
+
+
+@app.delete("/api/v2/lists/{lid}")
+async def delete_list(lid: int, me=Depends(current_member)):
+    """Remove the URL list from the Start screen. Its check (if any) stays; delete that from Live."""
+    from qc6 import jobs
+    can_edit(me)
+    if not await jobs.delete(await get_pool(), me["workspace_id"], lid):
+        raise problem(404, "URL list not found")
+    return {"ok": True}
+
+
+class CrawlIn(BaseModel):
+    browser: bool = False
+
+
+@app.post("/api/v2/lists/{lid}/start", status_code=201)
+async def start_list(lid: int, body: CrawlIn, me=Depends(current_member)):
+    """Start crawling every URL in the list: the full page QC, then the report."""
+    from qc6 import jobs
+    from qc6.url_lists import ListError
+    can_edit(me)
+    pool = await get_pool()
+    try:
+        rid = await jobs.start_crawl(pool, me, lid, body.browser)
+    except LookupError:
+        raise problem(404, "URL list not found")
+    except ListError as e:
+        raise problem(409, "Not ready", str(e))
+    except services.NotAllowed as e:
+        raise _start_problem(e)
+    return {"run_id": rid}
+
+
+@app.get("/api/v2/lists/{lid}/urls.{fmt}")
+async def list_sheet(lid: int, fmt: str, me=Depends(current_member)):
+    """The URL list as a sheet: CSV or Excel, one column of addresses."""
+    from qc6 import jobs
+    if fmt not in ("csv", "xlsx"):
+        raise problem(404, "Not found")
+    pool = await get_pool()
+    r = await jobs.urls_of(pool, me["workspace_id"], lid)
+    if r is None:
+        raise problem(404, "URL list not found or not ready")
+    name = f"urls-{re.sub(r'[^a-z0-9.-]+', '-', r['primary_host'].lower())}-{lid}.{fmt}"
+    if fmt == "csv":
+        return StreamingResponse(jobs.urls_csv(r["urls"]), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    from starlette.background import BackgroundTask
+    path = await asyncio.to_thread(jobs.urls_xlsx, r["urls"], r["label"])
+    return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.get("/api/v2/worker")
+async def worker_status(me=Depends(current_member)):
+    """Is a QC worker running? Checks wait in the queue until one is."""
+    from qc6.workers.runner import recover_stale, worker_alive
+    pool = await get_pool()
+    await recover_stale(pool)
+    return {"alive": await worker_alive(pool),
+            "waiting": await pool.fetchval("SELECT count(*) FROM runs r JOIN sites s ON s.id = r.site_id "
+                                           "WHERE s.workspace_id = $1 AND r.status = 'queued'", me["workspace_id"])}
 
 
 # ------------------------------------------------------------------ built-in sign-in (QC6_AUTH=local)

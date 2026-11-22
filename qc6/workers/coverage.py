@@ -184,6 +184,10 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     if eng._stop_requested:                           # paused: keep the checkpoint, build nothing yet
         eng.save_fingerprints(fp_path)
         return {"paused": True, "pages_done": int(stats.get("source_pages_processed") or 0)}
+    async with pool.acquire() as conn:                # every page is read; grouping problems and building the report next
+        prog = {"stage": "analysing", "pages_done": len(urls), "pages_total": len(urls)}
+        await conn.execute("UPDATE runs SET progress = progress || $2::jsonb WHERE id = $1", run_id, prog)
+        await notify(conn, run_id, "progress", **prog)
     pkg = await asyncio.to_thread(build_on_page_csv_package, db_path, job, os.path.join(run_dir, "reports"),
                                   package_name="QC_V6_COVERAGE", project_id=host)
     from qc6 import facts
