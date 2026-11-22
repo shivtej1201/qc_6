@@ -44,6 +44,19 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' https://fonts.go
        "base-uri 'none'; object-src 'none'; form-action 'self'")
 
 
+UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@app.middleware("http")
+async def csrf_guard(request: Request, call_next):
+    """With cookie sign-in, a change must carry X-QC-Requested-With (other websites can't send custom headers)."""
+    if (request.method in UNSAFE and request.url.path.startswith("/api/") and os.environ.get("QC6_AUTH", "dev").lower() == "local"
+            and request.headers.get("x-qc-requested-with") != "qc6"):
+        return JSONResponse({"title": "Refused", "detail": "Requests that change something must come from the QC app."},
+                            status_code=403, media_type="application/problem+json")
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
@@ -94,12 +107,18 @@ async def _http_exc(request: Request, exc: HTTPException):
 # ------------------------------------------------------------------ identity
 async def current_member(request: Request) -> Dict[str, Any]:
     from qc6 import auth
+    pool = await get_pool()
     try:
-        mode, email = await auth.caller_email(dict(request.headers), request.client.host if request.client else None,
-                                              dict(request.query_params))
+        if auth.mode() == "local":
+            from qc6 import local_auth
+            mode, email = "local", await local_auth.member_for(pool, request.cookies.get(local_auth.COOKIE))
+            if not email:
+                raise problem(401, "Sign in first", "auth=local")
+        else:
+            mode, email = await auth.caller_email(dict(request.headers), request.client.host if request.client else None,
+                                                  dict(request.query_params))
     except auth.AuthError as e:
         raise problem(e.status, e.title, e.detail)
-    pool = await get_pool()
     if email:
         m = await pool.fetchrow("SELECT * FROM members WHERE lower(email) = lower($1) ORDER BY id LIMIT 1", email)
         if m is None:
@@ -698,6 +717,152 @@ async def resume_run(run_id: int, me=Depends(current_member)):
 async def stop_run(run_id: int, me=Depends(current_member)):
     return await _run_transition(run_id, me, ("queued", "paused"), "cancelled", "This check can't be cancelled now",
                                  "Pause it first; a paused or queued check can be cancelled.")
+
+
+# ------------------------------------------------------------------ built-in sign-in (QC6_AUTH=local)
+class LoginIn(BaseModel):
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=500)
+
+
+class CodeIn(BaseModel):
+    code: str = Field(max_length=40)
+
+
+class PasswordIn(BaseModel):
+    current: str = Field(max_length=500)
+    new: str = Field(max_length=500)
+
+
+class TwoFactorEnable(BaseModel):
+    secret: str = Field(max_length=64)
+    code: str = Field(max_length=10)
+
+
+def _local_only():
+    from qc6 import auth
+    if auth.mode() != "local":
+        raise problem(404, "Not found", "QC's own sign-in is off (QC6_AUTH is not 'local').")
+
+
+def _set_cookie(resp, token: str, max_age: int) -> None:
+    from qc6 import local_auth
+    resp.set_cookie(local_auth.COOKIE, token, max_age=max_age, httponly=True, samesite="strict", path="/",
+                    secure=os.environ.get("QC6_COOKIE_SECURE", "true").lower() != "false")
+
+
+@app.get("/api/v2/auth/mode")
+async def auth_mode(request: Request):
+    from qc6 import auth, local_auth
+    try:
+        m = auth.mode()
+    except auth.AuthError as e:
+        raise problem(e.status, e.title, e.detail)
+    signed = None
+    if m == "local":
+        signed = bool(await local_auth.member_for(await get_pool(), request.cookies.get(local_auth.COOKIE)))
+    return {"mode": m, "signed_in": signed}
+
+
+@app.post("/api/v2/auth/login")
+async def auth_login(body: LoginIn, request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    try:
+        out = await local_auth.login(pool, body.email, body.password, request.client.host if request.client else "",
+                                     request.headers.get("user-agent", ""))
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    resp = J({"two_factor": out["two_factor"]})
+    _set_cookie(resp, out["token"], int((local_auth.PENDING if out["two_factor"] else local_auth.MAX_AGE).total_seconds()))
+    if not out["two_factor"]:
+        await services.log(pool, None, out["member_id"], "auth.login", f"member:{out['member_id']}", {})
+    return resp
+
+
+@app.post("/api/v2/auth/2fa")
+async def auth_second_factor(body: CodeIn, request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    token = request.cookies.get(local_auth.COOKIE)
+    try:
+        out = await local_auth.second_factor(await get_pool(), token, body.code)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    resp = J(out)
+    _set_cookie(resp, token, int(local_auth.MAX_AGE.total_seconds()))
+    return resp
+
+
+@app.post("/api/v2/auth/logout")
+async def auth_logout(request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    await local_auth.logout(await get_pool(), request.cookies.get(local_auth.COOKIE))
+    resp = J({"ok": True})
+    resp.delete_cookie(local_auth.COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/v2/auth/account")
+async def auth_account(me=Depends(current_member)):
+    _local_only()
+    m = await (await get_pool()).fetchrow("SELECT totp_secret IS NOT NULL AS two_factor, recovery_codes FROM members WHERE id = $1", me["id"])
+    return {"email": me["email"], "two_factor": m["two_factor"], "recovery_codes_left": len(m["recovery_codes"] or [])}
+
+
+@app.post("/api/v2/auth/password")
+async def auth_password(body: PasswordIn, request: Request, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    stored = await pool.fetchval("SELECT password_hash FROM members WHERE id = $1", me["id"])
+    if not local_auth.check_password(body.current, stored):
+        raise problem(400, "Your current password isn't right")
+    try:
+        await local_auth.set_password(pool, me["id"], body.new, end_other_sessions_except=request.cookies.get(local_auth.COOKIE))
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    await services.log(pool, me["workspace_id"], me["id"], "auth.password", f"member:{me['id']}", {})
+    return {"ok": True, "other_sessions_ended": True}
+
+
+@app.post("/api/v2/auth/2fa/setup")
+async def auth_2fa_setup(me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    if not os.environ.get("QC6_SECRET_KEY"):
+        raise problem(400, "Two-factor needs QC6_SECRET_KEY", "Set QC6_SECRET_KEY on the server first; QC encrypts the two-factor key with it.")
+    return await local_auth.start_two_factor(await get_pool(), me["id"], me["email"])
+
+
+@app.post("/api/v2/auth/2fa/enable")
+async def auth_2fa_enable(body: TwoFactorEnable, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    try:
+        codes = await local_auth.enable_two_factor(pool, me["id"], body.secret, body.code)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    await services.log(pool, me["workspace_id"], me["id"], "auth.2fa_on", f"member:{me['id']}", {})
+    return {"recovery_codes": codes}
+
+
+@app.post("/api/v2/auth/2fa/disable")
+async def auth_2fa_disable(body: PasswordIn, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    if not local_auth.check_password(body.current, await pool.fetchval("SELECT password_hash FROM members WHERE id = $1", me["id"])):
+        raise problem(400, "Your password isn't right")
+    await local_auth.disable_two_factor(pool, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "auth.2fa_off", f"member:{me['id']}", {})
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ AI drafts (local model)

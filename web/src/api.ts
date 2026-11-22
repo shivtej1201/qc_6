@@ -4,7 +4,7 @@ export class ApiError extends Error {
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "X-QC-Requested-With": "qc6" };      // QC's own sign-in: proves the request is the app's
   const user = localStorageGet("qc6-user");
   if (user) headers["X-QC-User"] = user;
   const form = typeof FormData !== "undefined" && body instanceof FormData;
@@ -14,6 +14,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const data = ct.includes("json") ? await r.json() : await r.text();
   if (!r.ok) {
     const d = (typeof data === "object" && data) || {};
+    if (r.status === 401 && (d as any).detail === "auth=local" && !path.startsWith("/api/v2/auth/")) window.location.reload();  // session ended: back to sign-in
     throw new ApiError(r.status, (d as any).title || `Request failed (${r.status})`, (d as any).detail || "");
   }
   return data as T;
@@ -115,6 +116,15 @@ export const api = {
   deleteJourney: (id: number) => req<{ runs: number }>("DELETE", `/api/v2/journeys/${id}`),
   deleteSite: (sid: number, confirm: string) => req<{ checks: number }>("DELETE", `/api/v2/sites/${sid}`, { confirm }),
   run: (id: number) => req<{ run: Run; recent_visits: any[]; found: { id: number; title: string; severity: Severity; pages: number }[] }>("GET", `/api/v2/runs/${id}`),
+  authMode: () => req<{ mode: string; signed_in: boolean | null }>("GET", "/api/v2/auth/mode"),
+  login: (email: string, password: string) => req<{ two_factor: boolean }>("POST", "/api/v2/auth/login", { email, password }),
+  secondFactor: (code: string) => req<{ ok: boolean; recovery_codes_left: number | null }>("POST", "/api/v2/auth/2fa", { code }),
+  logout: () => req<{ ok: boolean }>("POST", "/api/v2/auth/logout"),
+  account: () => req<{ email: string; two_factor: boolean; recovery_codes_left: number }>("GET", "/api/v2/auth/account"),
+  changePassword: (current: string, next: string) => req<{ ok: boolean }>("POST", "/api/v2/auth/password", { current, new: next }),
+  twoFactorSetup: () => req<{ secret: string; uri: string }>("POST", "/api/v2/auth/2fa/setup"),
+  twoFactorEnable: (secret: string, code: string) => req<{ recovery_codes: string[] }>("POST", "/api/v2/auth/2fa/enable", { secret, code }),
+  twoFactorDisable: (current: string) => req<{ ok: boolean }>("POST", "/api/v2/auth/2fa/disable", { current, new: "" }),
   checkUrls: (sid: number, text: string, kind: string) =>
     req<SpotStarted>("POST", `/api/v2/sites/${sid}/checks/urls`, { text, kind }),
   checkUpload: (sid: number, file: File, kind: string, wholeSite: boolean) => {
