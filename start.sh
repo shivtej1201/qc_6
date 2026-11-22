@@ -10,6 +10,12 @@ if [ ! -d .venv ]; then
   python3 -m venv .venv
   .venv/bin/pip install -q --upgrade pip
   .venv/bin/pip install -q -r requirements.txt
+  cp requirements.txt .venv/requirements.installed
+fi
+if ! cmp -s requirements.txt .venv/requirements.installed; then     # an update added or changed packages
+  echo "Updating QC V6 packages..."
+  .venv/bin/pip install -q -r requirements.txt
+  cp requirements.txt .venv/requirements.installed
 fi
 if [ ! -f .venv/.chromium-ok ]; then
   if .venv/bin/python -m playwright install chromium; then touch .venv/.chromium-ok

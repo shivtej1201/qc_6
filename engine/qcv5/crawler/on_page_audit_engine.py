@@ -639,7 +639,7 @@ class OnPageAuditEngine:
         job_id: Optional[str] = None,
         job_name: str = "QC V5 On-Page URL Extraction + Status Audit",
         allow_local: bool = False,
-        primary_domain: str = "bajajfinserv.in",
+        primary_domain: str = "",                 # the site being checked; always passed by the caller
         target_rps: float = 8.0,
         min_rps: float = 3.0,
         max_rps: float = 10.0,
@@ -712,7 +712,7 @@ class OnPageAuditEngine:
         self.image_concurrency = max(1, int(image_concurrency))
         self.image_discard_body_limit = image_discard_body_limit
         self.max_connections = max_connections
-        # Per-host budgets: {"cms-assets.bajajfinserv.in": 10} or {".cdn.example": {"rps": 8, "max_rps": 12}}
+        # Per-host budgets: {"assets.example.com": 10} or {".cdn.example": {"rps": 8, "max_rps": 12}}
         # (a leading '.' matches the domain and all its subdomains). Primary hosts always use the primary budget.
         self.host_budgets: Dict[str, HostRateBudget] = {}
         for key, cfg in (host_budgets or {}).items():

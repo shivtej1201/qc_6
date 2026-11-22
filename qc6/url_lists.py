@@ -6,7 +6,9 @@ Only the site's own hosts are kept; everything else is reported back, never fetc
 from __future__ import annotations
 
 import csv
+import html
 import io
+import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
@@ -85,9 +87,48 @@ def parse(rows: Iterable[List[Any]]) -> List[str]:
     return out
 
 
+_LOC = re.compile(rb"<(?:[A-Za-z0-9_]+:)?loc>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*</(?:[A-Za-z0-9_]+:)?loc>", re.S | re.I)
+MAX_XML = 200 * 1024 * 1024              # a gzipped sitemap is unpacked up to this size, never more
+
+
+def _unpack(data: bytes) -> bytes:
+    if data[:2] != b"\x1f\x8b":
+        return data
+    import zlib
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = d.decompress(data, MAX_XML + 1)
+    if len(out) > MAX_XML:
+        raise ListError("That sitemap unpacks to more than 200 MB. Upload its parts one by one.")
+    return out
+
+
+def is_sitemap(data: bytes, filename: str) -> bool:
+    head = _unpack(data[:400_000] if data[:2] != b"\x1f\x8b" else data)[:2000].lstrip().lower()
+    return (filename or "").lower().endswith((".xml", ".xml.gz", ".gz")) or head.startswith(b"<?xml") or \
+        b"<urlset" in head or b"<sitemapindex" in head
+
+
+def from_sitemap_file(data: bytes, filename: str) -> Dict[str, Any]:
+    """<loc> addresses from a sitemap file saved from a browser. Read as text with a pattern, never as an XML tree
+    (no entities, no external references). A sitemap index lists other sitemaps: those come back separately."""
+    xml = _unpack(data)
+    locs = [html.unescape(m.group(1).decode("utf-8", "replace")) for m in _LOC.finditer(xml)]
+    index = b"<sitemapindex" in xml[:5000].lower()
+    urls = [c for c in (_clean(u) for u in locs) if c]
+    return {"urls": [] if index else urls, "sitemaps": urls if index else []}
+
+
 def from_upload(data: bytes, filename: str) -> List[str]:
     if len(data) > MAX_BYTES:
         raise ListError("The file is bigger than 20 MB. Split it, or send only the URL column.")
+    if is_sitemap(data, filename):
+        got = from_sitemap_file(data, filename)
+        if got["sitemaps"]:
+            more = "\n".join(got["sitemaps"][:10]) + (f"\n… and {len(got['sitemaps']) - 10} more" if len(got["sitemaps"]) > 10 else "")
+            raise ListError(f"{filename} is a sitemap index: it lists {len(got['sitemaps'])} other sitemap"
+                            f"{'s' if len(got['sitemaps']) != 1 else ''}, not pages. Open each in your browser, save it, and upload "
+                            f"them together (you can pick several files at once):\n{more}")
+        return got["urls"]
     return parse(_rows_from(data, filename))
 
 

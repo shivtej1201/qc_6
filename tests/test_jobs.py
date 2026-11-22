@@ -169,3 +169,32 @@ def test_stuck_pausing_check_no_longer_blocks(env):
     assert c.post(f"/api/v2/runs/{rid2}/stop", headers=H).json()["status"] == "cancelled"
     w = c.get("/api/v2/worker").json()
     assert w["alive"] is False
+
+
+def test_sitemap_files_saved_from_a_browser(env):
+    """A sitemap behind a bot check: the person saves it from their browser and uploads it (several files at once)."""
+    import gzip
+    c, site, dsn = env
+    a = "".join(f"<url><loc>{site.base}/product/{i}</loc></url>" for i in range(3)).encode()
+    b = f"<url><loc>{site.base}/city/1?a=1&amp;b=2</loc></url>".encode()
+    files = [("file", ("sitemap-1.xml", b'<?xml version="1.0"?><urlset>' + a + b + b"</urlset>", "application/xml")),
+             ("file", ("sitemap-2.xml.gz", gzip.compress(b"<urlset>" + b + b"</urlset>"), "application/gzip")),
+             ("file", ("index.xml", f"<sitemapindex><sitemap><loc>{site.base}/s1.xml</loc></sitemap></sitemapindex>".encode(), "text/xml"))]
+    r = c.post("/api/v2/lists/upload", files=files, headers=H)
+    assert r.status_code == 201, r.text
+    j = r.json()
+    assert j["url_count"] == 4 and j["note"]["duplicates"] == 1 and site.base + "/city/1?a=1&b=2" in j["sample"]
+    assert j["label"] == "sitemap-1.xml and 1 more file" and "sitemap index" in j["skipped_files"][0]
+    only_index = c.post("/api/v2/lists/upload", files=[files[2]], headers=H)
+    assert only_index.status_code == 400 and f"{site.base}/s1.xml" in only_index.json()["detail"]
+
+
+def test_missing_package_message(env, monkeypatch):
+    c, site, dsn = env
+    import qc6.workers.runner as R
+
+    async def boom(*a, **k):
+        raise ModuleNotFoundError("No module named 'numpy'", name="numpy")
+    monkeypatch.setattr(R, "discover_urls", boom)
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    assert j["status"] == "failed" and "isn't installed (numpy)" in j["error"] and "start.bat" in j["error"]
