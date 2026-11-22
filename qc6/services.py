@@ -13,6 +13,13 @@ class NotAllowed(ValueError):
     pass
 
 
+class Busy(NotAllowed):
+    """Another check of this site hasn't finished; carries it so the screen can offer Resume / Cancel."""
+    def __init__(self, message: str, run_id: int, status: str):
+        super().__init__(message)
+        self.run_id, self.status = run_id, status
+
+
 async def create_workspace(pool, name: str, owner_email: str, owner_name: str) -> Dict[str, int]:
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -55,13 +62,14 @@ async def start_run(pool, site_id: int, kind: str, options: Optional[Dict[str, A
                     actor_id: Optional[int] = None) -> int:
     if kind not in ("coverage", "visit", "journey", "full"):
         raise NotAllowed("kind must be coverage, visit, journey or full")
+    from qc6.workers.runner import recover_stale
+    await recover_stale(pool)                 # a check whose worker went away must not block this one
     busy = await pool.fetchrow("SELECT id, status FROM runs WHERE site_id = $1 AND status IN ('queued','running','pausing','paused')",
                                site_id)
     if busy:
-        if busy["status"] == "paused":
-            raise NotAllowed(f"Check {busy['id']} of this site is paused. Resume it or cancel it first.")
-        raise NotAllowed(f"A check of this site is already {busy['status']} (run {busy['id']}). "
-                         "Only one check per site runs at a time, to stay within the site's speed limit.")
+        what = {"paused": "is paused", "queued": "is waiting to start", "pausing": "is pausing", "running": "is running"}[busy["status"]]
+        raise Busy(f"Check {busy['id']} of this site {what}. Only one check per site runs at a time, to stay within the "
+                   "site's speed limit. Let it finish, or cancel it to start this one.", busy["id"], busy["status"])
     rid = await pool.fetchval("INSERT INTO runs (site_id, kind, options, created_by) VALUES ($1,$2,$3,$4) RETURNING id",
                               site_id, kind, options or {}, actor_id)
     ws = await pool.fetchval("SELECT workspace_id FROM sites WHERE id = $1", site_id)

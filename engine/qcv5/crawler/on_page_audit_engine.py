@@ -3046,6 +3046,9 @@ class OnPageAuditEngine:
                     if item is None:
                         break
                     handed_off = False
+                    if self._stop_requested:          # pause / cancel: queued pages aren't fetched; they stay PENDING for resume
+                        finish_source_item()
+                        continue
                     try:
                         norm_src = item["normalized_source_url"]
                         res = await self.fetch_url_manual_redirects(client, norm_src, need_body=True, kind="source")

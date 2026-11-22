@@ -123,6 +123,23 @@ Large site 16→18 requests a second, from V5), speed limit, most pages per chec
 `check_schedule` ("daily 06:30", "weekdays 07:15", "every 6 hours"), Slack/Teams webhooks and which events alert,
 GitHub/Jira. Journeys can carry their own `schedule:`.
 
+## New check (the simple way, no setup)
+
+QC opens on **New check**:
+
+1. Choose **Sitemap** and paste its address (a sitemap index is followed to every sitemap it lists), or **One page**,
+   or **Upload a sheet** (CSV, TSV, TXT or Excel .xlsx, addresses in any column).
+2. QC lists the page addresses, live as it reads them. **Download URLs** as Excel or CSV.
+3. **Start crawling.** Every page is checked; the screen shows pages done, speed and time left, every second.
+   **Pause**, **Resume** and **Cancel** work at any point (pause and cancel take effect within seconds; nothing already
+   checked is lost).
+4. When it finishes: problems by severity and **Download report** (Excel one sheet, CSV, ZIP, PDF summary).
+
+The site is created from the address the first time; there is nothing to configure. **Your checks** lists every
+check with its status. If another check of the same site is still going, the screen says which and offers to
+pause or cancel it. If the worker isn't running (for example its window was closed), the screen says so, and a
+check left "pausing" by a closed worker becomes "paused" by itself instead of blocking new checks.
+
 ## Checking a few pages, reports, history, deleting
 
 * **Check pages** (Today and All pages): paste one or more URLs, or upload a sheet (CSV, TSV, TXT or

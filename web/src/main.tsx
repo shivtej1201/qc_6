@@ -18,12 +18,13 @@ import { SetupView } from "./views/Setup";
 import { LinksView } from "./views/Links";
 import { SettingsView } from "./views/Settings";
 import { AccountView, SignIn } from "./views/Account";
+import { StartView } from "./views/Start";
 
 export type Route = { view: string; params: URLSearchParams };
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
   const [view, q] = h.split("?");
-  return { view: view || "today", params: new URLSearchParams(q || "") };
+  return { view: view || "start", params: new URLSearchParams(q || "") };
 }
 export function go(view: string, params: Record<string, string | number> = {}) {
   const q = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
@@ -31,7 +32,7 @@ export function go(view: string, params: Record<string, string | number> = {}) {
 }
 
 const NAV_GROUPS: { label: string; items: [string, string, string, string][] }[] = [
-  { label: "Overview", items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
+  { label: "Overview", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs"], ["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
     ["growth", "growth", "Growth", "opportunities search console queries"]] },
   { label: "Work", items: [["fixes", "fix", "Fixes", "issues problems inbox"], ["journeys", "journey", "Journeys", "flows paths"],
     ["live", "live", "Live run", "check running progress"]] },
@@ -41,8 +42,8 @@ const NAV_GROUPS: { label: string; items: [string, string, string, string][] }[]
 ];
 const NAV = NAV_GROUPS.flatMap((g) => g.items);
 const SCREENS: Screen[] = [...NAV.map(([view, icon, label, words]) => ({ view, icon, label, words })),
-  { view: "setup", icon: "page", label: "Add a site", words: "new site create" }];
-const TABS: [string, string, string][] = [["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"], ["pages", "layers", "Pages"]];
+  { view: "setup", icon: "page", label: "Add a site by hand", words: "new site create settings" }];
+const TABS: [string, string, string][] = [["start", "play", "Check"], ["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"]];
 const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", setup: "Add a site", account: "Your account" };
 
 function App({ local }: { local: boolean }) {
@@ -63,7 +64,7 @@ function App({ local }: { local: boolean }) {
     if (theme) document.documentElement.dataset.theme = theme;
     else delete document.documentElement.dataset.theme;
   }, [theme]);
-  useEffect(() => { document.title = `QC V6 · ${TITLES[route.view] || "Today"}`; }, [route.view]);
+  useEffect(() => { document.title = `QC V6 · ${TITLES[route.view] || "New check"}`; }, [route.view]);
   const [palette, setPalette] = useState(false);
   const [menu, setMenu] = useState(false);
   useEffect(() => { setMenu(false); }, [route.view, route.params.toString()]);
@@ -98,10 +99,13 @@ function App({ local }: { local: boolean }) {
     localStorageSet("qc6-theme", next);
   };
 
+  const pickSite = (v: number) => { setSiteId(v); localStorageSet("qc6-site", String(v)); };
   let body;
   if (sites.error) body = <ErrorBox text={sites.error} onRetry={sites.reload} />;
   else if (!sites.data) body = <p className="faint">Loading…</p>;
   else if (route.view === "account" && local) body = <AccountView />;
+  else if (route.view === "start" || (!site && route.view !== "setup"))
+    body = <StartView params={route.params} onSite={(id) => { if (id !== site?.id) { sites.reload(); pickSite(id); } }} />;
   else if (!site || route.view === "setup") body = <SetupView onCreated={(s) => { sites.reload(); setSiteId(s.id); localStorageSet("qc6-site", String(s.id)); go("today"); }} />;
   else {
     const p = { site, params: route.params };
@@ -112,14 +116,13 @@ function App({ local }: { local: boolean }) {
     }[route.view] || <TodayView {...p} />;
   }
 
-  const pickSite = (v: number) => { setSiteId(v); localStorageSet("qc6-site", String(v)); };
   const current = route.view === "page" ? "pages" : route.view;
   return (
     <div className={`app ${menu ? "menu-open" : ""}`}>
       <a className="skip" href="#main">Skip to content</a>
       <header className="topbar">
         <button className="icon-btn" aria-label="Open the menu" aria-expanded={menu} aria-controls="rail" onClick={() => setMenu(true)}><Icon name="menu" /></button>
-        <div className="topbar-title"><b>{TITLES[route.view] || "Today"}</b>{site && <span>{site.primary_host}</span>}</div>
+        <div className="topbar-title"><b>{TITLES[route.view] || "New check"}</b>{site && <span>{site.primary_host}</span>}</div>
         <button className="icon-btn" aria-label="Quick jump" onClick={() => setPalette(true)}><Icon name="search" /></button>
       </header>
       {menu && <div className="rail-back" onClick={() => setMenu(false)} />}
@@ -149,7 +152,6 @@ function App({ local }: { local: boolean }) {
           ))}
         </nav>
         <div className="foot">
-          <a className="nav" href="#/setup" style={{ padding: "4px 0" }}>Add a site</a>
           {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}
           <button className="btn quiet" onClick={toggleTheme} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>Switch light / dark</button>
         </div>

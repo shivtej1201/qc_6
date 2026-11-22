@@ -42,12 +42,30 @@ UPDATE runs SET
                ELSE error END,
   finished_at = CASE WHEN status = 'running' AND attempts >= $2 THEN now() ELSE finished_at END,
   worker_id = NULL
-WHERE status IN ('running', 'pausing') AND heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1)
+WHERE status IN ('running', 'pausing') AND (
+  -- no heartbeat for a while (a run claimed before heartbeats existed counts from when it started)
+  (heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => $1))
+  OR (worker_id IS NOT NULL AND COALESCE(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $1))
+  -- or its worker is known and has gone quiet: closed window, crash, reboot. Faster than waiting for the heartbeat
+  OR (worker_id IS NOT NULL AND EXISTS (SELECT 1 FROM workers w WHERE w.id = runs.worker_id AND w.last_seen < now() - make_interval(secs => $3)))
+  -- or nobody claimed it and it was left 'pausing' with nothing running it (paused straight away is right)
+  OR (worker_id IS NULL AND status = 'pausing' AND COALESCE(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $1)))
 RETURNING id, status"""
+WORKER_QUIET_S = 45      # a worker writes workers.last_seen at least every HEARTBEAT_S; three missed means it's gone
 
 
 async def recover_stale(pool, stale_s: float = STALE_S, max_attempts: int = MAX_ATTEMPTS) -> List[Dict[str, Any]]:
-    return [dict(r) for r in await pool.fetch(RECOVER_SQL, float(stale_s), max_attempts)]
+    return [dict(r) for r in await pool.fetch(RECOVER_SQL, float(stale_s), max_attempts, float(WORKER_QUIET_S))]
+
+
+async def worker_seen(pool, run_id: Optional[int] = None) -> None:
+    await pool.execute("INSERT INTO workers (id, last_seen, run_id) VALUES ($1, now(), $2) "
+                       "ON CONFLICT (id) DO UPDATE SET last_seen = now(), run_id = EXCLUDED.run_id", settings.worker_id, run_id)
+
+
+async def worker_alive(pool) -> bool:
+    return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM workers WHERE last_seen > now() - make_interval(secs => $1))",
+                                    float(WORKER_QUIET_S)))
 
 
 async def _heartbeat(pool, run_id: int) -> None:
@@ -55,11 +73,12 @@ async def _heartbeat(pool, run_id: int) -> None:
         await asyncio.sleep(HEARTBEAT_S)
         try:
             await pool.execute("UPDATE runs SET heartbeat_at = now() WHERE id = $1 AND worker_id = $2", run_id, settings.worker_id)
+            await worker_seen(pool, run_id)
         except Exception:                       # a missed beat is fine; three in a row and another worker takes over
             log.warning("heartbeat for run %s failed", run_id)
 
 
-async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]:
+async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_callback=None) -> List[str]:
     from qc6.presets import max_pages
     from qc6.site_access import apply_scope, httpx_hook
     limit = max_pages(site.get("settings") or {}, opts)
@@ -88,7 +107,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any]) -> List[str]
     ex.client.event_hooks["request"].append(httpx_hook(site))     # token / staging login: the site's hosts only
     ex.robots_manager.user_agent = headers["User-Agent"]
     try:
-        res = await ex.extract_all(sitemaps)
+        res = await ex.extract_all(sitemaps, progress_callback=progress_callback)
     finally:
         await ex.close()
     if not res.get("unique_urls"):
@@ -147,15 +166,16 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
     kind = run["kind"]
     summary: Dict[str, Any] = dict(run["summary"] or {})
     done_stages = list((run["progress"] or {}).get("stages_done", []))
-    control: Dict[str, Any] = {"pause": False, "engine": None, "stop": asyncio.Event()}
+    control: Dict[str, Any] = {"pause": False, "cancel": False, "engine": None, "stop": asyncio.Event()}
     own_pw = None
 
     async def watch():
         while True:
             await asyncio.sleep(1.0)
             st = await pool.fetchval("SELECT status FROM runs WHERE id = $1", run_id)
-            if st == "pausing":
+            if st in ("pausing", "cancelled", None):      # pause, cancel, or the check was deleted
                 control["pause"] = True
+                control["cancel"] = st != "pausing"
                 control["stop"].set()
                 if control["engine"] is not None:
                     control["engine"].request_stop()
@@ -168,14 +188,22 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                            run_id, summary, {"stages_done": done_stages})
 
     async def paused() -> Dict[str, Any]:
-        await pool.execute("UPDATE runs SET status = 'paused', summary = $2 WHERE id = $1", run_id, summary)
+        if control["cancel"]:                    # cancelled while running: the status is already 'cancelled'; leave it
+            await pool.execute("UPDATE runs SET summary = $2, finished_at = COALESCE(finished_at, now()) WHERE id = $1", run_id, summary)
+            async with pool.acquire() as conn:
+                await notify(conn, run_id, "cancelled")
+            return {**summary, "cancelled": True}
+        await pool.execute("UPDATE runs SET status = 'paused', summary = $2 WHERE id = $1 AND status = 'pausing'", run_id, summary)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "paused", stages_done=done_stages)
         return {**summary, "paused": True}
 
     watcher = asyncio.create_task(watch())
     try:
-        await pool.execute("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, now()) WHERE id = $1", run_id)
+        if await pool.fetchval("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, now()) "
+                               "WHERE id = $1 AND status NOT IN ('cancelled', 'pausing', 'paused') RETURNING id", run_id) is None:
+            control["cancel"] = control["pause"] = True       # cancelled (or paused) before it got going
+            return await paused()
         async with pool.acquire() as conn:
             await notify(conn, run_id, "started", kind=kind, resumed=bool(done_stages))
         need_browser = kind in ("visit", "journey", "full")
@@ -227,14 +255,17 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
         if not opts.get("spot"):                     # a spot check doesn't speak for the whole site's health
             sc = await snapshot_score(pool, run_id, site["id"], pages_total)
             summary["score"] = sc.get("score")
-        await pool.execute("UPDATE runs SET status = 'completed', finished_at = now(), summary = $2 WHERE id = $1", run_id, summary)
+        if control["pause"]:
+            return await paused()
+        await pool.execute("UPDATE runs SET status = 'completed', finished_at = now(), summary = $2 WHERE id = $1 AND status = 'running'",
+                           run_id, summary)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "completed", score=sc.get("score"))
         await after_run_hooks(pool, run_id, site, summary)
     except Exception as e:
         log.error("run %s failed: %s", run_id, traceback.format_exc())
-        await pool.execute("UPDATE runs SET status = 'failed', finished_at = now(), error = $2, summary = $3 WHERE id = $1",
-                           run_id, f"{type(e).__name__}: {e}"[:500], summary)
+        await pool.execute("UPDATE runs SET status = 'failed', finished_at = now(), error = $2, summary = $3 "
+                           "WHERE id = $1 AND status IN ('running', 'pausing', 'queued')", run_id, f"{type(e).__name__}: {e}"[:500], summary)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "failed", error=str(e)[:300])
     finally:
@@ -277,6 +308,7 @@ async def worker_loop(poll_s: float = 2.0) -> None:
             except Exception:
                 log.warning("scheduler tick failed: %s", traceback.format_exc())
         try:
+            await worker_seen(pool)
             for r in await recover_stale(pool):
                 log.warning("run %s lost its worker; now %s", r["id"], r["status"])
         except Exception:

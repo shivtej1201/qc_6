@@ -1,6 +1,6 @@
 // Typed client for /api/v2. Errors carry the server's plain-language title/detail.
 export class ApiError extends Error {
-  constructor(public status: number, public title: string, public detail: string) { super(detail || title); }
+  constructor(public status: number, public title: string, public detail: string, public data: Record<string, any> = {}) { super(detail || title); }
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -15,7 +15,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   if (!r.ok) {
     const d = (typeof data === "object" && data) || {};
     if (r.status === 401 && (d as any).detail === "auth=local" && !path.startsWith("/api/v2/auth/")) window.location.reload();  // session ended: back to sign-in
-    throw new ApiError(r.status, (d as any).title || `Request failed (${r.status})`, (d as any).detail || "");
+    throw new ApiError(r.status, (d as any).title || `Request failed (${r.status})`, (d as any).detail || "", d as Record<string, any>);
   }
   return data as T;
 }
@@ -26,6 +26,16 @@ export function localStorageGet(k: string): string | null {
 export function localStorageSet(k: string, v: string): void {
   try { window.localStorage.setItem(k, v); } catch { /* storage blocked */ }
 }
+
+export interface Job { id: number; site_id: number; source: "sitemap" | "single" | "sheet" | "list"; label: string;
+  status: "extracting" | "ready" | "failed" | "cancelled"; url_count: number; error: string | null; primary_host: string;
+  progress: { sitemaps?: number; urls?: number; duplicates?: number; rejected?: number; errors?: number };
+  note: { duplicates?: number; other_hosts?: number; outside_scope?: number; capped?: boolean };
+  created_at: string; updated_at: string; sample?: string[];
+  run_id: number | null; run_status: string | null; run_kind: string | null; run_error: string | null;
+  run_progress: { stage?: string; pages_done?: number; pages_total?: number; visits_done?: number; visits_total?: number; stages_done?: string[] } | null;
+  run_summary: { pages?: number; score?: number | null; visited?: number } | null; run_started: string | null; run_finished: string | null;
+  results?: Partial<Record<Severity, { problems: number; pages: number }>> }
 
 export type Severity = "critical" | "high" | "medium" | "low";
 export type FixStatus = "open" | "in_progress" | "fixed_pending_check" | "verified" | "wont_fix";
@@ -153,6 +163,15 @@ export const api = {
   integrations: () => req<{ integrations: any[]; not_included: { name: string; reason: string }[]; attribution: string }>("GET", "/api/v2/integrations"),
   runIntegration: (id: string, url: string, params: Record<string, unknown> = {}) => req<any>("POST", `/api/v2/integrations/${id}/run`, { url, params }),
   objectUrl: (name: string) => `/api/v2/objects/${encodeURIComponent(name)}`,
+  jobs: () => req<{ jobs: Job[] }>("GET", "/api/v2/lists"),
+  job: (id: number) => req<Job>("GET", `/api/v2/lists/${id}`),
+  newList: (source: "sitemap" | "single" | "list", value: string) =>
+    req<Job>("POST", "/api/v2/lists", source === "list" ? { source, text: value } : { source, url: value }),
+  uploadList: (file: File) => { const f = new FormData(); f.append("file", file); return req<Job>("POST", "/api/v2/lists/upload", f); },
+  cancelList: (id: number) => req<{ ok: boolean }>("POST", `/api/v2/lists/${id}/cancel`),
+  deleteList: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/lists/${id}`),
+  startList: (id: number, browser: boolean) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser }),
+  worker: () => req<{ alive: boolean; waiting: number }>("GET", "/api/v2/worker"),
   pauseRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/pause`),
   resumeRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/resume`),
   cancelRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/stop`),
