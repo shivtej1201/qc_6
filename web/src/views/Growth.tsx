@@ -39,7 +39,8 @@ function Opps({ site }: { site: Site }) {
       {missing.length > 0 && (
         <div className="panel" data-reveal style={{ marginBottom: 16 }}>
           <p style={{ margin: 0 }}>Ranked on {Math.round(x.confidence * 100)}% of the model: {missing.join(" and ")} {missing.length > 1 ? "aren't" : "isn't"} connected,
-            so search demand{x.data.ga4 ? "" : " and visits"} aren't counted yet. <button className="btn quiet" onClick={() => go("settings")}>Connect in Settings</button></p>
+            so search demand{x.data.ga4 ? "" : " and visits"} aren't counted yet. </p>
+          <GoogleIds site={site} onSaved={() => window.location.reload()} />
         </div>
       )}
       <div className="row" style={{ marginBottom: 14 }} data-reveal>
@@ -101,8 +102,9 @@ function Search({ site }: { site: Site }) {
         <li>In Search Console, add the service account's e-mail as a user of your property (and in GA4 as a viewer).</li>
         <li>On the QC server, set <span className="mono">GOOGLE_SERVICE_ACCOUNT_FILE</span> to the key file. {x.config.service_account
           ? <b>Done.</b> : x.config.service_account_error ? <b>That file can't be used: {x.config.service_account_error}</b> : <b>Not set yet.</b>}</li>
-        <li>In <a href="#/settings">Settings</a>, enter the property, for example <span className="mono">sc-domain:{site.primary_host.replace(/^www\./, "")}</span>. {x.config.gsc_property ? <b>Done.</b> : <b>Not set yet.</b>}</li>
+        <li>Enter the property below, for example <span className="mono">sc-domain:{site.primary_host.replace(/^www\./, "")}</span>. {x.config.gsc_property ? <b>Done.</b> : <b>Not set yet.</b>}</li>
       </ol>
+      <GoogleIds site={site} onSaved={() => window.location.reload()} />
     </div>
   );
   const s = x.last_sync;
@@ -144,4 +146,28 @@ function Search({ site }: { site: Site }) {
 
 function path(u: string) {
   try { const x = new URL(u); return x.pathname + x.search; } catch { return u; }
+}
+
+
+/* The two Google ids Growth needs, right where they're used (there is no settings screen). */
+function GoogleIds({ site, onSaved }: { site: Site; onSaved: () => void }) {
+  const st: any = site.settings || {};
+  const [gsc, setGsc] = useState<string>(st.gsc_property || "");
+  const [ga4, setGa4] = useState<string>(st.ga4_property_id || "");
+  const [msg, setMsg] = useState<string | null>(null);
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try { await api.patchSite(site.id, { gsc_property: gsc.trim(), ga4_property_id: ga4.trim() }); setMsg("Saved."); onSaved(); }
+    catch (x: any) { setMsg(x.detail || x.title || x.message); }
+  };
+  return (
+    <form className="row google-ids" onSubmit={save} style={{ flexWrap: "wrap", marginTop: 10 }}>
+      <label className="grid" style={{ gap: 4 }}>Search Console property
+        <input className="input" value={gsc} onChange={(e) => setGsc(e.target.value)} placeholder={`sc-domain:${site.primary_host.replace(/^www\./, "")}`} /></label>
+      <label className="grid" style={{ gap: 4 }}>GA4 property id (optional)
+        <input className="input" inputMode="numeric" value={ga4} onChange={(e) => setGa4(e.target.value)} placeholder="123456789" /></label>
+      <button className="btn" type="submit" style={{ alignSelf: "end" }}>Save</button>
+      {msg && <span className="faint" role="status" style={{ alignSelf: "end" }}>{msg}</span>}
+    </form>
+  );
 }

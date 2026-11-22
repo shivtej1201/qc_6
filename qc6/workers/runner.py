@@ -115,7 +115,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_cal
             raise RuntimeError(
                 f"{site['primary_host']} refused to show QC its sitemap (HTTP 403 from the CDN). QC doesn't try to get round a "
                 "block. Two ways forward: (1) open the sitemap in your own browser, save it (Ctrl+S) and use Upload a file; "
-                "(2) for the crawl itself, open Crawler access, copy the allow rule for the X-QC-Audit header, and ask your "
+                "(2) for the crawl itself, use Show the allow rule below and ask your "
                 "CDN team to add it, since the pages are usually behind the same protection.")
     kept, opts["_scope_excluded"] = apply_scope((u["normalized_url"] for u in res.get("unique_urls", [])), scope)
     return kept[:limit]
@@ -297,11 +297,31 @@ async def after_run_hooks(pool, run_id: int, site: Dict[str, Any], summary: Dict
 
 
 async def worker_loop(poll_s: float = 2.0) -> None:
+    """Claims queued checks one at a time. Ctrl+C / SIGTERM (docker stop, service stop): the check in hand stops at its
+    checkpoint and goes back in the queue, so the next worker carries on where it stopped; then the worker exits."""
     from qc6 import scheduler
     pool = await get_pool()
     log.info("worker %s ready", settings.worker_id)
     last_tick = 0.0
-    while True:
+    state: Dict[str, Any] = {"draining": False, "run": None}
+
+    def drain() -> None:
+        if state["draining"]:
+            raise SystemExit(1)                    # asked twice: stop now; the heartbeat timeout hands the check on
+        state["draining"] = True
+        log.warning("stopping: finishing the page in hand, then handing check %s back to the queue", state["run"])
+        if state["run"] is not None:
+            async def pause_for_shutdown(rid: int) -> None:
+                done = await pool.execute("UPDATE runs SET status = 'pausing' WHERE id = $1 AND status = 'running'", rid)
+                state["handed_back"] = rid if done != "UPDATE 0" else None
+            asyncio.get_running_loop().create_task(pause_for_shutdown(state["run"]))
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            asyncio.get_running_loop().add_signal_handler(sig, drain)
+        except (NotImplementedError, RuntimeError, ValueError):   # Windows: Ctrl+C still stops it; recovery hands the check on
+            pass
+    while not state["draining"]:
         if time.monotonic() - last_tick >= 60:
             last_tick = time.monotonic()
             try:
@@ -320,11 +340,17 @@ async def worker_loop(poll_s: float = 2.0) -> None:
             await asyncio.sleep(poll_s)
             continue
         log.info("claimed run %s", run_id)
+        state["run"] = run_id
         beat = asyncio.create_task(_heartbeat(pool, run_id))
         try:
             await execute_run(pool, run_id)
         finally:
             beat.cancel()
+            state["run"] = None
+            if state.get("handed_back") == run_id:   # paused by the shutdown, not by a person: queue it for the next worker
+                await pool.execute("UPDATE runs SET status = 'queued', worker_id = NULL WHERE id = $1 AND status IN ('paused', 'pausing')", run_id)
+    await pool.execute("DELETE FROM workers WHERE id = $1", settings.worker_id)
+    log.info("worker %s stopped", settings.worker_id)
 
 
 if __name__ == "__main__":

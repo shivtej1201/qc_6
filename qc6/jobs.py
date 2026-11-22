@@ -78,7 +78,7 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str) -> No
         if not urls:
             raise ListError("No page addresses came back from that sitemap. Open it in your browser: if it shows the addresses, "
                             "the site is probably showing QC a bot check instead. Save the sitemap from your browser (Ctrl+S) "
-                            "and use Upload a file; for the crawl, give the site's CDN team the allow rule from Crawler access.")
+                            "and use Upload a file; for the crawl, give the site's CDN team QC's allow rule (Show the allow rule, below).")
         await pool.execute("UPDATE url_lists SET status = 'ready', urls = $2, url_count = $3, updated_at = now(), "
                            "note = note || $4::jsonb WHERE id = $1 AND status = 'extracting'", lid, urls, len(urls),
                            {"outside_scope": int(opts.get("_scope_excluded") or 0), "capped": len(urls) >= MAX_URLS})

@@ -74,3 +74,39 @@ def test_check_that_keeps_dying_is_stopped_and_pausing_becomes_paused(pg_pool):
     got, err, r1, r2 = asyncio.run(go())
     assert got == sorted([(r1, "failed"), (r2, "paused")])
     assert err.startswith("The worker running this check stopped 3 times")
+
+
+def test_worker_stops_cleanly_and_hands_the_check_back(migrated, tmp_path, monkeypatch):
+    """SIGTERM while crawling: the check stops at its checkpoint and goes back in the queue for the next worker."""
+    import os
+    import signal
+    from fixture_site import FixtureSite
+    from qc6.settings import settings
+    from qc6.workers import runner as R
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "allow_private_targets", True)
+    site = FixtureSite()
+
+    async def go():
+        import asyncpg
+        from qc6.db import pool as P
+        from qc6.db.pool import _init
+        pool = await asyncpg.create_pool(migrated, min_size=1, max_size=4, init=_init)
+        monkeypatch.setattr(R, "get_pool", lambda: asyncio.sleep(0, pool))
+        ws = await services.create_workspace(pool, "Stop Co", "s@stop.test", "Sid")
+        sid = await services.create_site(pool, ws["workspace_id"], "S", site.base, {"rate_rps": 2})
+        rid = await services.start_run(pool, sid, "coverage", {"urls": site.urls(20), "images": False})
+        loop_task = asyncio.create_task(R.worker_loop(poll_s=0.2))
+        for _ in range(100):
+            if (await pool.fetchval("SELECT (progress->>'pages_done')::int FROM runs WHERE id = $1", rid) or 0) > 0:
+                break
+            await asyncio.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(loop_task, 60)
+        row = await pool.fetchrow("SELECT status, worker_id, (progress->>'pages_done')::int AS done FROM runs WHERE id = $1", rid)
+        gone = await pool.fetchval("SELECT count(*) FROM workers WHERE id = $1", settings.worker_id)
+        await pool.close()
+        return row, gone
+    row, gone = asyncio.run(go())
+    site.srv.shutdown()
+    assert row["status"] == "queued" and row["worker_id"] is None and row["done"] > 0 and gone == 0

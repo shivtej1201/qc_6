@@ -12,11 +12,7 @@ import { LiveView } from "./views/Live";
 import { FixesView } from "./views/Fixes";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
-import { IntegrationsView } from "./views/Integrations";
-import { AccessView } from "./views/Access";
-import { SetupView } from "./views/Setup";
 import { LinksView } from "./views/Links";
-import { SettingsView } from "./views/Settings";
 import { AccountView, SignIn } from "./views/Account";
 import { StartView } from "./views/Start";
 
@@ -37,14 +33,12 @@ const NAV_GROUPS: { label: string; items: [string, string, string, string][] }[]
   { label: "Work", items: [["fixes", "fix", "Fixes", "issues problems inbox"], ["journeys", "journey", "Journeys", "flows paths"],
     ["live", "live", "Live run", "check running progress"]] },
   { label: "Explore", items: [["pages", "layers", "All pages", "inventory urls compare"], ["links", "link", "Links & images", "broken redirects"]] },
-  { label: "Setup", items: [["integrations", "plug", "Integrations", "tools"], ["access", "shield", "Crawler access", "cdn waf allow rule"],
-    ["settings", "settings", "Settings", "speed schedule alerts tickets staging"]] },
 ];
 const NAV = NAV_GROUPS.flatMap((g) => g.items);
-const SCREENS: Screen[] = [...NAV.map(([view, icon, label, words]) => ({ view, icon, label, words })),
-  { view: "setup", icon: "page", label: "Add a site by hand", words: "new site create settings" }];
+const SCREEN_VIEWS: Record<string, true> = Object.fromEntries([...NAV.map((n) => n[0]), "page"].map((v) => [v, true]));
+const SCREENS: Screen[] = NAV.map(([view, icon, label, words]) => ({ view, icon, label, words }));
 const TABS: [string, string, string][] = [["start", "play", "Check"], ["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"]];
-const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", setup: "Add a site", account: "Your account" };
+const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", account: "Your account" };
 
 function App({ local }: { local: boolean }) {
   const [route, setRoute] = useState<Route>(parseHash);
@@ -104,15 +98,14 @@ function App({ local }: { local: boolean }) {
   if (sites.error) body = <ErrorBox text={sites.error} onRetry={sites.reload} />;
   else if (!sites.data) body = <p className="faint">Loading…</p>;
   else if (route.view === "account" && local) body = <AccountView />;
-  else if (route.view === "start" || (!site && route.view !== "setup"))
-    body = <StartView params={route.params} onSite={(id) => { if (id !== site?.id) { sites.reload(); pickSite(id); } }} />;
-  else if (!site || route.view === "setup") body = <SetupView onCreated={(s) => { sites.reload(); setSiteId(s.id); localStorageSet("qc6-site", String(s.id)); go("today"); }} />;
+  else if (route.view === "start" || !site || !(route.view in SCREEN_VIEWS))   // no setup screens: anything else lands on New check
+    body = <StartView params={route.params} onSite={(id) => { if (id !== site?.id) { sites.reload(); pickSite(id); } }}
+      onSitesChanged={() => sites.reload()} />;
   else {
     const p = { site, params: route.params };
     body = {
       today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, page: <PageView {...p} />,
-      journeys: <JourneysView {...p} />, integrations: <IntegrationsView {...p} />, access: <AccessView {...p} />,
-      links: <LinksView {...p} />, settings: <SettingsView {...p} />,
+      journeys: <JourneysView {...p} />, links: <LinksView {...p} />,
     }[route.view] || <TodayView {...p} />;
   }
 

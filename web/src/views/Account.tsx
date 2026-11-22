@@ -50,7 +50,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         )}
         {err && <div className="error-box" role="alert">{err}</div>}
         <button className="btn primary" type="submit" disabled={busy}>{busy ? "Checking…" : step === "password" ? "Sign in" : "Continue"}</button>
-        <p className="faint" style={{ fontSize: 13, margin: 0 }}>Forgot your password, or lost your phone? A workspace owner can reset it with
+        <p className="faint" style={{ fontSize: 13, margin: 0 }}>Forgot your password, or lost your phone? Whoever runs QC can reset it with
           <span className="mono"> python -m qc6.admin set-password</span> or <span className="mono">reset-2fa</span>.</p>
       </form>
     </main>

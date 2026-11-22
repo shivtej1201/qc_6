@@ -1,5 +1,5 @@
 """End to end through the real web app in Chromium (blueprint §14): Today -> Fixes -> assign -> "I've fixed it" ->
-Insights -> Settings, a keyboard-only path, and axe on every screen (0 serious/critical on our own UI)."""
+Insights, no setup screens left, a keyboard-only path, and axe on every screen (0 serious/critical on our own UI)."""
 import asyncio
 import os
 import socket
@@ -17,7 +17,7 @@ from qc6.settings import settings  # noqa: E402
 WEB_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist")
 AXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qc6", "assets", "axe.min.js")
 pytestmark = pytest.mark.skipif(not os.path.isdir(WEB_DIST), reason="web app not built (cd web && npm run build)")
-SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "pages", "links", "journeys", "integrations", "access", "settings"]
+SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "pages", "links", "journeys"]
 
 
 @pytest.fixture(scope="module")
@@ -111,16 +111,15 @@ def test_ui_end_to_end(app_url):
             await page.keyboard.press("Escape")
             await page.wait_for_selector("#fix-title", state="detached")
 
-            # Insights shows the check; Settings saves a V5 preset
+            # Insights shows the check; the old setup screens are gone (they land on New check)
             await page.goto(f"{app_url}/#/insights")
             await page.wait_for_selector("text=Health over time")
             await page.get_by_role("button", name="Show as table").first.click()
             assert await page.locator("table").count() >= 2
-            await page.goto(f"{app_url}/#/settings")
-            await page.get_by_text("Careful", exact=True).click()
-            assert await page.input_value("#s-rate") == "8"
-            await page.get_by_role("button", name="Save settings").click()
-            await page.wait_for_selector("text=Settings saved.")
+            for gone in ("settings", "access", "integrations", "setup"):
+                await page.goto(f"{app_url}/#/{gone}")
+                await page.wait_for_selector("h1:text('Check a website')")
+            assert await page.locator(".rail a[href='#/settings'], .rail a[href='#/access'], .rail a[href='#/integrations']").count() == 0
 
             # keyboard only: tab to the Fixes link in the rail, open it, open a fix with Enter
             await page.goto(f"{app_url}/#/today")
@@ -156,8 +155,8 @@ def test_ui_end_to_end(app_url):
             await page.wait_for_timeout(350)
             menu_focus = await page.evaluate("document.activeElement && document.activeElement.getAttribute('aria-label')")
             menu_bad = await _axe(page)
-            await page.click(".rail a[href='#/settings']")
-            await _until_hash(page, "#/settings")
+            await page.click(".rail a[href='#/links']")
+            await _until_hash(page, "#/links")
             menu_closed = False
             for _ in range(30):                                   # the menu closes right after the route changes
                 menu_closed = await page.evaluate("!document.querySelector('.app').classList.contains('menu-open')")

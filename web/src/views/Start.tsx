@@ -38,7 +38,7 @@ function duration(s: number | null): string {
   return m < 60 ? `about ${m} min` : `about ${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
-export function StartView({ params, onSite }: { params: URLSearchParams; onSite: (siteId: number) => void }) {
+export function StartView({ params, onSite, onSitesChanged }: { params: URLSearchParams; onSite: (siteId: number) => void; onSitesChanged: () => void }) {
   const [source, setSource] = useState<Source>("sitemap");
   const [value, setValue] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -132,7 +132,8 @@ export function StartView({ params, onSite }: { params: URLSearchParams; onSite:
           {busy ? "Working…" : source === "sitemap" ? "Get the URLs" : source === "single" ? "Add this page" : files.length > 1 ? "Read the files" : "Read the file"}</button></div>
       </form>
 
-      {jobId > 0 && (job ? <JobCard job={job} onChange={() => { setNonce((n) => n + 1); jobs.reload(); worker.reload(); }} toast={toast} />
+      {jobId > 0 && (job ? <JobCard job={job} onChange={() => { setNonce((n) => n + 1); jobs.reload(); worker.reload(); }} toast={toast}
+        onSiteDeleted={() => { onSitesChanged(); jobs.reload(); go("start"); }} />
         : err ? <ErrorBox text={err} /> : <p className="faint" style={{ marginTop: 16 }}>Loading…</p>)}
 
       <section className="panel" data-reveal style={{ marginTop: 16 }} aria-labelledby="jobs-h">
@@ -184,7 +185,8 @@ function Steps({ ph }: { ph: string }) {
   );
 }
 
-function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; toast: (m: string) => void }) {
+function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChange: () => void; toast: (m: string) => void; onSiteDeleted: () => void }) {
+  const [delSite, setDelSite] = useState(false);
   const ph = phase(j);
   const [browser, setBrowser] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -223,6 +225,7 @@ function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; 
       </>)}
 
       {j.status === "failed" && <div className="error-box" role="alert" style={{ whiteSpace: "pre-line" }}>{j.error}</div>}
+      {j.status === "failed" && /403|bot check|refused|CDN/i.test(j.error || "") && <AllowRule siteId={j.site_id} toast={toast} />}
       {j.status === "cancelled" && <p>Reading the sitemap was cancelled. Paste it again above to start over.</p>}
 
       {j.status === "ready" && ph === "ready" && (<>
@@ -296,6 +299,7 @@ function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; 
 
       {ph === "failed" && j.run_id && (<>
         <div className="error-box" role="alert">The crawl stopped: {j.run_error}</div>
+        {/403|challenge|bot|CDN|blocked/i.test(j.run_error || "") && <AllowRule siteId={j.site_id} toast={toast} />}
         <div className="row" style={{ marginTop: 12 }}><button className="btn primary" onClick={start} disabled={busy}>Try again</button></div>
       </>)}
       {ph === "cancelled" && j.run_id && (<>
@@ -306,7 +310,20 @@ function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; 
       {!LIVE.includes(ph) && (
         <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}>
           <button className="btn quiet small" onClick={() => setDel(true)}>Remove from this list</button>
+          <button className="btn quiet small" onClick={() => setDelSite(true)}>Delete {j.primary_host} and all its checks…</button>
         </div>
+      )}
+      {delSite && (
+        <Confirm title={`Delete ${j.primary_host}?`} confirmText="Delete the site" typeToConfirm={j.primary_host} onClose={() => setDelSite(false)}
+          onConfirm={async () => {
+            const site = await api.site(j.site_id);
+            const out = await api.deleteSite(j.site_id, site.name);
+            toast(`${j.primary_host} deleted, with ${out.checks} check${out.checks === 1 ? "" : "s"}.`);
+            setDelSite(false); onSiteDeleted();
+          }}>
+          <p style={{ margin: 0 }}>Removes everything QC stored about {j.primary_host}: every check, page, problem, journey, screenshot and report.
+            This can't be undone.</p>
+        </Confirm>
       )}
       {del && (
         <Confirm title="Remove this from your checks?" confirmText="Remove" onClose={() => setDel(false)}
@@ -315,5 +332,32 @@ function JobCard({ job: j, onChange, toast }: { job: Job; onChange: () => void; 
         </Confirm>
       )}
     </section>
+  );
+}
+
+
+/* A CDN or bot check said no. QC doesn't get round it; it asks to be let in, openly. */
+function AllowRule({ siteId, toast }: { siteId: number; toast: (m: string) => void }) {
+  const [rule, setRule] = useState<{ header: string; token: string; rules: Record<string, string> } | null>(null);
+  const show = async () => {
+    try { setRule(await api.access(siteId)); } catch (e: any) { toast(e.title || e.message); }
+  };
+  const copy = async (t: string) => {
+    try { await navigator.clipboard.writeText(t); toast("Copied. Send it to the site's CDN or security team."); }
+    catch { toast("Select the text and copy it."); }
+  };
+  return (
+    <div className="panel allow-rule" style={{ marginTop: 12 }}>
+      <p style={{ margin: 0 }}><b>Let QC in, openly.</b> QC identifies itself on every request and never pretends to be a person.
+        Ask the site's CDN or security team to allow requests that carry QC's header.</p>
+      {!rule ? <div className="row"><button className="btn" onClick={show}>Show the allow rule</button></div> : (<>
+        <p className="faint" style={{ margin: "8px 0 4px", fontSize: 13 }}>Header <span className="mono">{rule.header}: {rule.token}</span></p>
+        {Object.entries(rule.rules).map(([cdn, text]) => (
+          <details key={cdn} className="sample"><summary>{cdn === "akamai" ? "Akamai" : cdn === "cloudflare" ? "Cloudflare" : cdn}</summary>
+            <pre className="ai-ev" style={{ whiteSpace: "pre-wrap" }}>{text}</pre>
+            <button className="btn small" onClick={() => copy(text)}>Copy</button></details>
+        ))}
+      </>)}
+    </div>
   );
 }

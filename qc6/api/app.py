@@ -136,7 +136,7 @@ async def current_member(request: Request) -> Dict[str, Any]:
     if email:
         m = await pool.fetchrow("SELECT * FROM members WHERE lower(email) = lower($1) ORDER BY id LIMIT 1", email)
         if m is None:
-            raise problem(403, "You're signed in but not a member here", f"Ask a workspace owner to add {email}.")
+            raise problem(403, "You're signed in but not a member here", f"Ask whoever runs QC to add {email}.")
     elif mode == "dev":
         m = await pool.fetchrow("SELECT * FROM members WHERE role = 'owner' ORDER BY id LIMIT 1")
         if m is None and not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM members)"):

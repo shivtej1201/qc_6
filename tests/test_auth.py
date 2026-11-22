@@ -95,7 +95,7 @@ def test_oidc_mode(client, monkeypatch):
         r = client.get("/api/v2/me", headers=H(t))
         assert r.status_code == 401, (name, r.status_code, r.text)
     r = client.get("/api/v2/me", headers=H(token({**good, "email": "stranger@auth.test"})))
-    assert r.status_code == 403 and "Ask a workspace owner" in r.json()["detail"]
+    assert r.status_code == 403 and "Ask whoever runs QC" in r.json()["detail"]
     assert client.get("/api/v2/me").status_code == 401
 
 
