@@ -141,6 +141,11 @@ def test_ui_end_to_end(app_url):
             await page.goto(f"{app_url}/#/today")
             await _until_hash(page, "#/today")
             await page.wait_for_selector(".kpi")                     # Today's own content, not the previous screen's heading
+            await page.evaluate("""() => { window.__qc = []; const t = (m) => window.__qc.push(Math.round(performance.now()) + ' ' + m);
+                window.addEventListener('hashchange', () => t('hash ' + location.hash));
+                document.addEventListener('focusin', (e) => t('focus ' + e.target.tagName + '.' + (e.target.className || '') + ' ' + (e.target.getAttribute('href') || '')), true);
+                document.addEventListener('keydown', (e) => t('keydown ' + e.key + ' on ' + document.activeElement.tagName), true);
+                document.addEventListener('keypress', (e) => t('keypress ' + e.key + ' on ' + document.activeElement.tagName), true); }""")
             await page.keyboard.press("Control+k")
             await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
             palette_bad = await _axe(page)
@@ -151,8 +156,12 @@ def test_ui_end_to_end(app_url):
                 await page.wait_for_timeout(100)
             await page.keyboard.type("pages")
             await page.wait_for_selector("[role=option]:has-text('All pages')")
+            opts = await page.locator("[role=option]").all_inner_texts()
             await page.keyboard.press("Enter")
-            await _until_hash(page, "#/pages")
+            try:
+                await _until_hash(page, "#/pages")
+            except AssertionError:
+                raise AssertionError(f"quick jump didn't open All pages. options={opts} trace={await page.evaluate('window.__qc')}")
             jumped = await page.evaluate("location.hash")
 
             # phone: menu button opens the slide-in menu with focus inside; every screen fits the width
