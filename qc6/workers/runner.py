@@ -278,7 +278,8 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                                "WHERE id = $1 AND status NOT IN ('cancelled', 'cancelling', 'pausing', 'paused') RETURNING id", run_id) is None:
             control["cancel"] = control["pause"] = True       # cancelled (or paused) before it got going
             return await paused()
-        await events.record(pool, run_id, "started", "Resumed where it stopped" if done_stages or run["started_at"] else "Started",
+        resumed = bool(done_stages) or (run["attempts"] or 0) > 1 or bool((run["progress"] or {}).get("pages_done"))
+        await events.record(pool, run_id, "started", "Resumed where it stopped" if resumed else "Started",
                             kind=kind, stages_done=done_stages)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "started", kind=kind, resumed=bool(done_stages))

@@ -90,7 +90,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
   const sentence = live
     ? (p.stage === "visits" ? `Visitors have checked ${count(visitsDone)} of ${count(visitsTotal)} sample pages in a real browser.`
       : `${count(pagesDone)} of ${count(pagesTotal)} pages checked.`)
-    : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked, ${count(run.summary?.visited)} visited in a real browser.`
+    : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked${run.summary?.visited ? `, ${count(run.summary.visited)} visited in a real browser` : ""}.`
       : run.status === "failed" ? `This check stopped: ${run.error}` : `This check was ${run.status}.`;
   const imported = run.options?.imported_from === "QC V5";
   const spot = run.spot || run.options?.spot;

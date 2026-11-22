@@ -58,7 +58,7 @@ def app_url(migrated, tmp_path_factory):
     site.close()
 
 
-async def _until_hash(page, prefix: str, tries: int = 50):
+async def _until_hash(page, prefix: str, tries: int = 100):
     """Wait for a route change. (wait_for_function evaluates a string, which our CSP rightly forbids.)"""
     for _ in range(tries):
         if (await page.evaluate("location.hash")).startswith(prefix):

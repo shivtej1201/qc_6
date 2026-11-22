@@ -420,8 +420,8 @@ table.jobs tr[aria-current="true"] td { background: var(--measure-soft); }
 
 /* Live: timeline and pages per minute */
 .run-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 320px; overflow: auto; font-size: 13.5px; }
-.run-timeline li { display: grid; grid-template-columns: 78px 1fr; gap: 8px; padding-left: 10px; border-left: 3px solid var(--line); }
-.run-timeline time { font: 12px var(--mono); color: var(--ink-3); padding-top: 1px; }
+.run-timeline li { display: grid; grid-template-columns: 104px 1fr; gap: 8px; padding-left: 10px; border-left: 3px solid var(--line); }
+.run-timeline time { font: 12px var(--mono); color: var(--ink-3); padding-top: 1px; white-space: nowrap; }
 .run-timeline li.ev-completed { border-left-color: var(--good); }
 .run-timeline li.ev-failed, .run-timeline li.ev-worker_lost { border-left-color: var(--critical); }
 .run-timeline li[class*="ev-asked"], .run-timeline li.ev-paused, .run-timeline li.ev-cancelled { border-left-color: var(--marker); }
