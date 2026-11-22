@@ -28,8 +28,7 @@ export function TodayView({ site }: { site: Site; params: URLSearchParams }) {
     else if (c.kind === "access") {
       const a = await api.access(site.id).catch(() => null);
       const ok = a && (await copyText(a.rules.akamai));
-      toast(ok ? "Rule copied. Send it to your CDN team." : "Open Crawler access to copy the rule.");
-      if (!ok) go("access");
+      toast(ok ? "Rule copied. Send it to your CDN team." : a ? `Ask your CDN team to allow requests with the header ${a.header}: ${a.token}` : "Couldn't load the allow rule.");
     } else if (c.fix_id) go("fixes", { fix: c.fix_id });
   };
   const start = async () => {

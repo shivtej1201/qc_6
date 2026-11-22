@@ -115,7 +115,7 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_cal
             raise RuntimeError(
                 f"{site['primary_host']} refused to show QC its sitemap (HTTP 403 from the CDN). QC doesn't try to get round a "
                 "block. Two ways forward: (1) open the sitemap in your own browser, save it (Ctrl+S) and use Upload a file; "
-                "(2) for the crawl itself, open Crawler access, copy the allow rule for the X-QC-Audit header, and ask your "
+                "(2) for the crawl itself, use Show the allow rule below and ask your "
                 "CDN team to add it, since the pages are usually behind the same protection.")
     kept, opts["_scope_excluded"] = apply_scope((u["normalized_url"] for u in res.get("unique_urls", [])), scope)
     return kept[:limit]

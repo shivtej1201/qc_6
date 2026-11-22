@@ -55,7 +55,7 @@ export QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6     # 
 
 `docker compose up --build`, then open http://127.0.0.1:8003.
 
-In the app: **Add a site**, enter the site's address, press **Check the site now**.
+In the app: **New check**, paste the sitemap address (or one page, or a file), then **Start crawling**. There are no setup screens.
 
 Try it on a built-in demo site (local testing only; never set this for a real site):
 
@@ -112,13 +112,13 @@ python -m pytest -q
 | `QC6_VISITORS_PER_HOST`, `QC6_VISIT_SHARE` | real-visitor concurrency and their share of a site's speed limit |
 | `QC6_NU_URL`, `QC6_LANGUAGETOOL_URL`, `QC6_LIGHTHOUSE_CMD`, `QC6_CHROME_PATH` | optional extra checks (self-hosted Nu HTML checker, LanguageTool, local Lighthouse) |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | GA4-led sampling (site setting `ga4_property_id`) and the V5 Search Console integration |
-| `QC6_GITHUB_TOKEN`, `QC6_JIRA_TOKEN` | ticket creation (repository / Jira site set per site in Settings) |
+| `QC6_GITHUB_TOKEN`, `QC6_JIRA_TOKEN` | ticket creation (repository / Jira project set per site with `PATCH /api/v2/sites/{id}`; the Create ticket button appears once set) |
 | `QC6_METRICS_TOKEN` | lets a remote Prometheus scrape `/metrics` with `Authorization: Bearer …` (without it, only this machine can) |
-| `QC6_SECRET_KEY` | any long random text; encrypts staging logins (Settings, What to check and how to get in). Keep it: changing it makes saved logins unreadable |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | Search Console + GA4 for Growth (property set per site in Settings). Free; see Growth, Search queries for the steps |
+| `QC6_SECRET_KEY` | any long random text; encrypts staging logins (set with `PATCH /api/v2/sites/{id}`). Keep it: changing it makes saved logins unreadable |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | Search Console + GA4 for Growth (property entered on the Growth screen). Free; see Growth, Search queries for the steps |
 | `QC6_DB_PASSWORD` | database password on its own, so symbols like `@` need no escaping in `QC6_DATABASE_URL` |
 
-Site settings (Settings page or `PATCH /api/v2/sites/{id}`): speed preset (Careful 8 / Standard 12 / Fast 14 /
+Every site runs on standard settings (12 requests a second, 6 visitors, up to 300,000 pages), so there is nothing to set up. To change them, use `PATCH /api/v2/sites/{id}`: speed preset (Careful 8 / Standard 12 / Fast 14 /
 Large site 16→18 requests a second, from V5), speed limit, most pages per check, page timeout, retries, visitors, cookie answer, sitemap,
 `check_schedule` ("daily 06:30", "weekdays 07:15", "every 6 hours"), Slack/Teams webhooks and which events alert,
 GitHub/Jira. Journeys can carry their own `schedule:`.
@@ -150,8 +150,8 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Download report** (Insights, All pages): one file, one sheet: the summary at the top, then one row per problem and
   page with severity, what to do, owner, status and the seen-before remark. CSV, Excel (`.xlsx`) or ZIP (the CSV,
   compressed, about a fortieth of the size; best for big sites). Excel stops at its 1,048,576-row limit and says so.
-* **Delete**: a past check (Live, Past checks), a journey (Journeys), or a whole site (Settings, Delete this site;
-  owners only, type the site's name). Fixes that have comments or a ticket are kept. Cannot be undone.
+* **Delete**: a past check (Live, Past checks), a journey (Journeys), or a whole site (New check, open one of its
+  checks, Delete … and all its checks; type the site's name). Fixes that have comments or a ticket are kept. Cannot be undone.
 * **Product pages**: name, price, currency, availability, identifier (SKU/GTIN/MPN) and image in the page's
   Product data (JSON-LD or microdata), and product pages with no Product data at all.
 

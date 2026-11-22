@@ -58,7 +58,7 @@ async def sync(pool, site: Dict[str, Any], days: int = 28) -> Dict[str, Any]:
     from qcv5.integrations.google_search_console import load_service_account, make_jwt
     cfg = configured(site)
     if not cfg["ready"]:
-        raise RuntimeError("Search Console isn't set up: add the property in Settings and GOOGLE_SERVICE_ACCOUNT_FILE on the server.")
+        raise RuntimeError("Search Console isn't set up: enter the property on the Growth screen and set GOOGLE_SERVICE_ACCOUNT_FILE on the server.")
     sa = load_service_account()
     end = date.today() - timedelta(days=2)
     start = end - timedelta(days=max(1, min(days, 480)) - 1)

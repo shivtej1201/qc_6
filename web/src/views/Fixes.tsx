@@ -59,12 +59,12 @@ export function FixesView({ site, params }: { site: Site; params: URLSearchParam
           </table>
         </div>
       )}
-      {openId && <FixDrawer id={openId} members={members.data?.members || []} onChanged={list.reload} />}
+      {openId && <FixDrawer tickets={!!site.settings?.tickets?.provider} id={openId} members={members.data?.members || []} onChanged={list.reload} />}
     </div>
   );
 }
 
-function FixDrawer({ id, members, onChanged }: { id: number; members: Member[]; onChanged: () => void }) {
+function FixDrawer({ id, members, onChanged, tickets }: { id: number; members: Member[]; onChanged: () => void; tickets: boolean }) {
   const d = useLoad(() => api.fix(id), [id]);
   const panel = useRef<HTMLElement>(null);
   const back = useRef<HTMLDivElement>(null);
@@ -129,7 +129,7 @@ function FixDrawer({ id, members, onChanged }: { id: number; members: Member[]; 
               {f.status !== "wont_fix" && f.status !== "verified" && <button className="btn quiet" disabled={busy} onClick={() => change({ status: "wont_fix" }, "Marked as won't fix.")}>Won't fix</button>}
               {(f.status === "wont_fix" || f.status === "verified") && <button className="btn" disabled={busy} onClick={() => change({ status: "open" }, "Reopened.")}>Reopen</button>}
               {f.ticket_url ? <a className="btn quiet" href={f.ticket_url} target="_blank" rel="noopener noreferrer">Open ticket</a>
-                : <button className="btn quiet" disabled={busy} onClick={async () => {
+                : tickets && <button className="btn quiet" disabled={busy} onClick={async () => {
                     setBusy(true);
                     try { const t = await api.createTicket(id); toast(`Ticket ${t.key} created.`); d.reload(); onChanged(); }
                     catch (e: any) { toast(e.detail || e.message); } finally { setBusy(false); }

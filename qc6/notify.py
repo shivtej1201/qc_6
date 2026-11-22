@@ -73,7 +73,7 @@ async def messages(pool, run_id: int, site: Dict[str, Any], summary: Dict[str, A
                     "lines": [f"\"{f['name']}\" at step {f['failed_step']}: {(f['failure_text'] or '')[:180]}" for f in failed]})
     if summary.get("challenged"):
         out.append({"kind": "access", "text": f"{name}: the CDN stopped our visitors as bots",
-                    "lines": ["Real-visitor checks stopped. Send the allow rule in Settings → Crawler access to your CDN team."]})
+                    "lines": ["Real-visitor checks stopped. Send QC's allow rule (New check, Show the allow rule) to your CDN team."]})
     parts = []
     if summary.get("pages"):
         parts.append(f"{format_count(int(summary['pages']))} pages checked")

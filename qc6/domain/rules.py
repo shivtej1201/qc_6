@@ -232,8 +232,8 @@ _r("LINK_CHECK", "subject", "medium", "links",
 _r("ACCESS_CHALLENGED", "subject", "high", "technical",
    "{subject} challenged our visitors as bots",
    "Real-visitor checks on this host stopped, so experience results are missing.",
-   "Ask your CDN team to allow QC with the rule in Settings → Crawler access.",
-   "Test access in Settings shows no challenge.")
+   "Ask your CDN team to allow QC with its allow rule (New check, Show the allow rule).",
+   "The next check gets through with no challenge.")
 
 
 _CODEY = re.compile(r"\b[A-Z]{2,}_[A-Z_]{2,}\b")

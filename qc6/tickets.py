@@ -67,7 +67,7 @@ async def _client() -> httpx.AsyncClient:
 async def create(cfg: Dict[str, Any], fix: Dict[str, Any], site: Dict[str, Any], pages: list, link: str) -> Dict[str, str]:
     cfg = clean_config(cfg)
     if not cfg:
-        raise ValueError("Set up GitHub or Jira for this site first (Settings → Tickets).")
+        raise ValueError("Tickets aren't set up for this site (a GitHub repository or Jira project and its token on the server).")
     title = f"[QC] {fix['title']}"[:240]
     body = body_text(fix, site, pages, link)
     async with await _client() as c:
