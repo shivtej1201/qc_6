@@ -199,7 +199,7 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
             from qc6.workers.visit_stage import run_visit_stage
             if kind == "visit":       # visit the pages of the site's latest coverage run
                 pages_run = await pool.fetchval("SELECT id FROM runs WHERE site_id = $1 AND kind IN ('coverage','full') "
-                                                "AND status = 'completed' ORDER BY id DESC LIMIT 1", site["id"])
+                                                "AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT 1", site["id"])
                 if pages_run is None:
                     raise RuntimeError("Run a coverage check first; real visits sample its pages.")
                 await pool.execute("INSERT INTO pages (run_id, url, path, template_id, http_status, final_url, title, facts, fetched_at) "
@@ -215,16 +215,18 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                 if control["pause"]:
                     return await paused()
                 await stage_done("extras", await extras.run_extras(pool, run_id, site))
-        if kind in ("journey", "full") and "journeys" not in done_stages:
+        if kind in ("journey", "full") and "journeys" not in done_stages and not opts.get("spot"):
             if control["pause"]:
                 return await paused()
             part = await journey_stage(pool, browser, run_id, site, fast=fast_journeys or opts.get("fast_journeys", False), opts=opts)
             await stage_done("journeys", part)
         pages_total = await pool.fetchval("SELECT COUNT(*) FROM pages WHERE run_id = $1", run_id) or \
             await pool.fetchval("SELECT COUNT(*) FROM pages WHERE run_id = (SELECT MAX(id) FROM runs WHERE site_id = $1 "
-                                "AND kind IN ('coverage','full') AND status = 'completed')", site["id"]) or 0
-        sc = await snapshot_score(pool, run_id, site["id"], pages_total)
-        summary["score"] = sc.get("score")
+                                "AND kind IN ('coverage','full') AND status = 'completed' AND NOT (options ? 'spot'))", site["id"]) or 0
+        sc: Dict[str, Any] = {"score": None}
+        if not opts.get("spot"):                     # a spot check doesn't speak for the whole site's health
+            sc = await snapshot_score(pool, run_id, site["id"], pages_total)
+            summary["score"] = sc.get("score")
         await pool.execute("UPDATE runs SET status = 'completed', finished_at = now(), summary = $2 WHERE id = $1", run_id, summary)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "completed", score=sc.get("score"))

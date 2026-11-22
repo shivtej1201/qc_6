@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
-import { ErrorBox, Sev, count, useLoad } from "../ui";
+import { ErrorBox, Sev, count, day, useLoad } from "../ui";
 
 const BANDS: Record<string, [number, number, (v: number) => string]> = {
   LCP: [2500, 4000, (v) => `${(v / 1000).toFixed(1)} s`], CLS: [0.1, 0.25, (v) => v.toFixed(2)], INP: [200, 500, (v) => `${Math.round(v)} ms`],
@@ -94,7 +94,8 @@ export function PageView({ site, params }: { site: Site; params: URLSearchParams
           <div className="panel" data-reveal>
             <p className="section-label">Fixes on this page</p>
             {fixes.length === 0 ? <p className="empty">Nothing to fix here.</p> : (
-              <ul className="found">{fixes.map((f) => <li key={f.id}><Sev s={f.severity} /><a href={`#/fixes?fix=${f.id}`} style={{ color: "inherit" }}>{f.title}</a></li>)}</ul>
+              <ul className="found">{fixes.map((f: any) => <li key={f.id}><Sev s={f.severity} /><span><a href={`#/fixes?fix=${f.id}`} style={{ color: "inherit" }}>{f.title}</a>
+                {f.first_seen && <span className="seen-before">{f.checks > 1 ? `Found on this page in ${f.checks} checks since ${day(f.first_seen)}` : `First found ${day(f.first_seen)}`}</span>}</span></li>)}</ul>
             )}
             {v && v.a11y?.length > 0 && (
               <>

@@ -95,6 +95,37 @@ _r("CONTENT_ONLY_AFTER_JS", "template", "medium", "experience",
    "{template} show their main heading only after JavaScript runs",
    "Search engines that don't run JavaScript, and visitors on slow phones, see an empty page first.",
    "Render the heading and main text in the server HTML of the {template} template.")
+# ---- product pages (structured data for shopping results) -------------------------------------------------------
+_r("PRODUCT_DATA_MISSING", "template", "medium", "content",
+   "{n_pages} {template} have no product data",
+   "Most pages of this type describe their product to search engines; these don't, so they can't show price or stock in results.",
+   "Add Product structured data (JSON-LD) with name, image, offers (price, priceCurrency, availability) and sku or gtin.",
+   "The next check finds Product data on these pages.")
+_r("PRODUCT_NAME_MISSING", "template", "medium", "content",
+   "{n_pages} {template} have product data without a name",
+   "Search engines need the product's name to show it as a product.",
+   "Add \"name\" to the Product data, matching the product's heading.")
+_r("PRODUCT_PRICE_MISSING", "template", "high", "content",
+   "{n_pages} {template} have product data without a usable price",
+   "Without a price above zero, search engines won't show the price and may not show the product in shopping results.",
+   "Put the selling price in offers.price as a plain number (for example 74999.00, no currency sign or commas).")
+_r("PRODUCT_CURRENCY_MISSING", "template", "medium", "content",
+   "{n_pages} {template} have a price without a currency",
+   "A price means nothing to search engines without its currency.",
+   "Add offers.priceCurrency as a 3-letter code, for example INR.")
+_r("PRODUCT_AVAILABILITY_MISSING", "template", "medium", "content",
+   "{n_pages} {template} don't say whether the product is in stock",
+   "Search engines show stock status in results, and may drop offers whose availability is unclear.",
+   "Add offers.availability with a schema.org value, for example https://schema.org/InStock or https://schema.org/OutOfStock.")
+_r("PRODUCT_IDENTIFIER_MISSING", "template", "low", "content",
+   "{n_pages} {template} have no product identifier (SKU, GTIN or MPN)",
+   "Identifiers let search engines match the product across sellers and reviews.",
+   "Add sku, and gtin13 (or mpn) when the product has one.")
+_r("PRODUCT_IMAGE_MISSING", "template", "low", "content",
+   "{n_pages} {template} have product data without an image",
+   "Product results with a picture get noticed; without one the product may not show as a rich result.",
+   "Add \"image\" to the Product data with the main product photo's full address.")
+
 # ---- link graph, canonical targets, near-duplicates (computed after the crawl) --------------------------------
 _r("DEEP_PAGE", "template", "low", "links",
    "{n_pages} {template} are more than 3 clicks from the home page",

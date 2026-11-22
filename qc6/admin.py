@@ -4,6 +4,8 @@
     python -m qc6.admin add-member 1 rahul@acme.com "Rahul Mehta" editor
     python -m qc6.admin list
     python -m qc6.admin list-sites
+    python -m qc6.admin set-password priya@acme.com          # QC6_AUTH=local: asks for the new password
+    python -m qc6.admin reset-2fa priya@acme.com             # turns two-factor off when someone lost their phone
     python -m qc6.admin import-v5-config 1 path/to/qc_v5/.env      # V5 settings (page limit, timeouts, retries) -> site 1
 """
 from __future__ import annotations
@@ -44,6 +46,30 @@ async def main(argv) -> int:
                 print(f"  {k} = {v}")
             if got["ignored"]:
                 print("Not used by V6 (left as they were): " + ", ".join(got["ignored"]))
+        elif argv[:1] == ["set-password"] and len(argv) == 2:
+            import getpass
+            from qc6 import local_auth
+            mid = await pool.fetchval("SELECT id FROM members WHERE lower(email) = lower($1)", argv[1])
+            if mid is None:
+                print(f"No member with e-mail {argv[1]}. Add them first with add-member.")
+                return 2
+            pw = sys.stdin.readline().rstrip("\n") if not sys.stdin.isatty() else getpass.getpass("New password: ")
+            try:
+                await local_auth.set_password(pool, mid, pw)
+            except local_auth.AuthFailed as e:
+                print(f"{e.title}. {e.detail}")
+                return 2
+            await services.log(pool, None, None, "auth.password_set_by_admin", f"member:{mid}", {})
+            print(f"Password set for {argv[1]}. Their other sessions were signed out.")
+        elif argv[:1] == ["reset-2fa"] and len(argv) == 2:
+            from qc6 import local_auth
+            mid = await pool.fetchval("SELECT id FROM members WHERE lower(email) = lower($1)", argv[1])
+            if mid is None:
+                print(f"No member with e-mail {argv[1]}.")
+                return 2
+            await local_auth.disable_two_factor(pool, mid)
+            await services.log(pool, None, None, "auth.2fa_reset_by_admin", f"member:{mid}", {})
+            print(f"Two-factor is off for {argv[1]}; they can turn it on again under Your account.")
         elif argv[:1] == ["list-sites"]:
             for r in await pool.fetch("SELECT id, name, base_url FROM sites ORDER BY id"):
                 print(f"{r['id']:>4}  {r['name']:<30}  {r['base_url']}")

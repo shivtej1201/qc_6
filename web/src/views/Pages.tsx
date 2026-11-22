@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { api, type Compare, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
-import { ErrorBox, Sev, count, day, useLoad } from "../ui";
+import { DownloadMenu, ErrorBox, Sev, count, day, useLoad } from "../ui";
+import { SpotCheckButton } from "./SpotCheck";
 
 /* All pages of a check, filterable, with what changed since the check before; and two checks side by side. */
 
@@ -25,9 +26,11 @@ export function PagesView({ site, params }: { site: Site; params: URLSearchParam
           <h1>All pages</h1>
           <p className="lede">Every page QC checked, what changed since the check before, and any two checks side by side.</p>
         </div>
+        <div className="row"><SpotCheckButton site={site} />
         <div className="seg" role="group" aria-label="Show">
           <button aria-pressed={tab === "pages"} onClick={() => setTab("pages")}>Pages</button>
           <button aria-pressed={tab === "compare"} onClick={() => setTab("compare")}>Compare checks</button>
+        </div>
         </div>
       </div>
       {tab === "pages" ? <Explorer site={site} /> : <CompareChecks site={site} />}
@@ -83,14 +86,15 @@ function Explorer({ site }: { site: Site }) {
         <label><span>Check</span>
           <select className="input" value={f.run || ""} onChange={(e) => set("run", e.target.value)}>
             <option value="">Latest</option>
-            {(x?.checks || []).map((c) => <option key={c.id} value={c.id}>#{c.id} · {day(c.finished_at)}{c.imported ? " · from V5" : ""}</option>)}</select></label>
+            {(x?.checks || []).map((c) => <option key={c.id} value={c.id}>#{c.id} · {day(c.finished_at)}{c.imported ? " · from V5" : ""}{c.spot ? ` · spot check: ${c.spot}` : ""}</option>)}</select></label>
         <label className="grow"><span>Find</span>
           <input className="search" type="search" placeholder="Address or title" value={q} onChange={(e) => setQ(e.target.value)} /></label>
       </div>
       <div className="row" style={{ justifyContent: "space-between", margin: "4px 0 10px" }}>
         <span className="dim">{!x ? "Loading…" : f.change === "gone" ? `${count(x.total)} page${x.total === 1 ? "" : "s"} in check #${x.previous_run_id} but not in check #${x.run_id}`
           : `${count(x.total)} page${x.total === 1 ? "" : "s"} in check #${x.run_id}`}</span>
-        <a className="btn quiet" href={api.inventoryCsv(site.id, csvParams)} download>Download as CSV</a>
+        <span className="row"><a className="btn quiet" href={api.inventoryCsv(site.id, csvParams)} download>This list as CSV</a>
+          {x && <DownloadMenu siteId={site.id} run={x.run_id} />}</span>
       </div>
       <div className="table-wrap" tabIndex={0} role="region" aria-label="Pages">
         <table>

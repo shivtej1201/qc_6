@@ -17,6 +17,7 @@ import { AccessView } from "./views/Access";
 import { SetupView } from "./views/Setup";
 import { LinksView } from "./views/Links";
 import { SettingsView } from "./views/Settings";
+import { AccountView, SignIn } from "./views/Account";
 
 export type Route = { view: string; params: URLSearchParams };
 function parseHash(): Route {
@@ -42,9 +43,9 @@ const NAV = NAV_GROUPS.flatMap((g) => g.items);
 const SCREENS: Screen[] = [...NAV.map(([view, icon, label, words]) => ({ view, icon, label, words })),
   { view: "setup", icon: "page", label: "Add a site", words: "new site create" }];
 const TABS: [string, string, string][] = [["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"], ["pages", "layers", "Pages"]];
-const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", setup: "Add a site" };
+const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", setup: "Add a site", account: "Your account" };
 
-function App() {
+function App({ local }: { local: boolean }) {
   const [route, setRoute] = useState<Route>(parseHash);
   useEffect(() => {
     const on = () => setRoute(parseHash());
@@ -100,6 +101,7 @@ function App() {
   let body;
   if (sites.error) body = <ErrorBox text={sites.error} onRetry={sites.reload} />;
   else if (!sites.data) body = <p className="faint">Loading…</p>;
+  else if (route.view === "account" && local) body = <AccountView />;
   else if (!site || route.view === "setup") body = <SetupView onCreated={(s) => { sites.reload(); setSiteId(s.id); localStorageSet("qc6-site", String(s.id)); go("today"); }} />;
   else {
     const p = { site, params: route.params };
@@ -148,6 +150,7 @@ function App() {
         </nav>
         <div className="foot">
           <a className="nav" href="#/setup" style={{ padding: "4px 0" }}>Add a site</a>
+          {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}
           <button className="btn quiet" onClick={toggleTheme} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>Switch light / dark</button>
         </div>
       </aside>
@@ -163,6 +166,16 @@ function App() {
   );
 }
 
+/* With QC's own sign-in (QC6_AUTH=local) nothing else loads until you're signed in. */
+function Root() {
+  const mode = useLoad(() => api.authMode(), []);
+  if (mode.error) return <main id="main" className="signin"><ErrorBox text={mode.error} onRetry={mode.reload} /></main>;
+  if (!mode.data) return null;
+  const local = mode.data.mode === "local";
+  if (local && !mode.data.signed_in) return <SignIn onDone={() => window.location.reload()} />;
+  return <App local={local} />;
+}
+
 createRoot(document.getElementById("root")!).render(
-  <StrictMode><ToastProvider><App /></ToastProvider></StrictMode>,
+  <StrictMode><ToastProvider><Root /></ToastProvider></StrictMode>,
 );

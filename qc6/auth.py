@@ -5,6 +5,8 @@
   proxy   behind an authenticating proxy such as oauth2-proxy (free) in front of Keycloak, Google Workspace or
           Azure AD: the proxy signs people in and passes their e-mail in a header (QC6_AUTH_HEADER, default
           X-Forwarded-Email). The header is trusted only from QC6_TRUSTED_PROXIES (default 127.0.0.1,::1).
+  local   QC's own sign-in: e-mail + password, optional two-factor (qc6.local_auth). Passwords are set with
+          `python -m qc6.admin set-password`.
   oidc    for API clients: `Authorization: Bearer <JWT>` from your OIDC provider (Keycloak …), verified with the
           provider's JWKS (RS256), issuer (QC6_OIDC_ISSUER), audience (QC6_OIDC_AUDIENCE) and expiry. The live
           stream (EventSource can't send headers) may pass the same token as ?access_token=.
@@ -35,7 +37,7 @@ def mode() -> str:
     m = os.environ.get("QC6_AUTH", "dev").lower()
     if m == "dev" and os.environ.get("QC6_ENV", "").lower() == "production":
         raise AuthError(500, "Sign-in is not configured", "QC6_AUTH=dev is not allowed with QC6_ENV=production.")
-    if m not in ("dev", "proxy", "oidc"):
+    if m not in ("dev", "proxy", "oidc", "local"):
         raise AuthError(500, "Sign-in is not configured", f"Unknown QC6_AUTH mode {m!r}.")
     return m
 

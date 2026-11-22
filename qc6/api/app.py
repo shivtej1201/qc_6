@@ -44,6 +44,19 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' https://fonts.go
        "base-uri 'none'; object-src 'none'; form-action 'self'")
 
 
+UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@app.middleware("http")
+async def csrf_guard(request: Request, call_next):
+    """With cookie sign-in, a change must carry X-QC-Requested-With (other websites can't send custom headers)."""
+    if (request.method in UNSAFE and request.url.path.startswith("/api/") and os.environ.get("QC6_AUTH", "dev").lower() == "local"
+            and request.headers.get("x-qc-requested-with") != "qc6"):
+        return JSONResponse({"title": "Refused", "detail": "Requests that change something must come from the QC app."},
+                            status_code=403, media_type="application/problem+json")
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
@@ -94,12 +107,18 @@ async def _http_exc(request: Request, exc: HTTPException):
 # ------------------------------------------------------------------ identity
 async def current_member(request: Request) -> Dict[str, Any]:
     from qc6 import auth
+    pool = await get_pool()
     try:
-        mode, email = await auth.caller_email(dict(request.headers), request.client.host if request.client else None,
-                                              dict(request.query_params))
+        if auth.mode() == "local":
+            from qc6 import local_auth
+            mode, email = "local", await local_auth.member_for(pool, request.cookies.get(local_auth.COOKIE))
+            if not email:
+                raise problem(401, "Sign in first", "auth=local")
+        else:
+            mode, email = await auth.caller_email(dict(request.headers), request.client.host if request.client else None,
+                                                  dict(request.query_params))
     except auth.AuthError as e:
         raise problem(e.status, e.title, e.detail)
-    pool = await get_pool()
     if email:
         m = await pool.fetchrow("SELECT * FROM members WHERE lower(email) = lower($1) ORDER BY id LIMIT 1", email)
         if m is None:
@@ -368,7 +387,7 @@ async def today(site_id: int, me=Depends(current_member)):
     s = await site_for(site_id, me)
     pool = await get_pool()
     last = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 1", site_id)
-    done = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 1", site_id)
+    done = await pool.fetchrow("SELECT * FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT 1", site_id)
     cards: List[Dict[str, Any]] = []
     for f in await pool.fetch("SELECT * FROM fixes WHERE site_id = $1 AND regressed AND status = 'open' ORDER BY pages_affected DESC LIMIT 3", site_id):
         cards.append({"kind": "regressed", "fix_id": f["id"], "title": f["title"], "text": "It was fixed and verified before; the last check found it again.",
@@ -405,7 +424,7 @@ async def today(site_id: int, me=Depends(current_member)):
     jr = await pool.fetchrow("""SELECT count(*) AS total, count(*) FILTER (WHERE jr.status = 'passed') AS passed FROM journeys j
                                 JOIN LATERAL (SELECT status FROM journey_runs WHERE journey_id = j.id ORDER BY id DESC LIMIT 1) jr ON true
                                 WHERE j.site_id = $1 AND j.enabled""", site_id)
-    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' ORDER BY id DESC LIMIT 8""", site_id)
+    flow_runs = await pool.fetch("""SELECT id, finished_at FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot') ORDER BY id DESC LIMIT 8""", site_id)
     ev = {(r["run_id"], r["kind"]): r["n"] for r in await pool.fetch(
         """SELECT e.run_id, e.kind, count(DISTINCT e.fix_id) AS n FROM fix_events e JOIN fixes f ON f.id = e.fix_id
            WHERE f.site_id = $1 AND e.run_id = ANY($2::bigint[]) AND e.kind IN ('found','verified','regressed') GROUP BY 1, 2""",
@@ -437,7 +456,7 @@ async def presets(site_id: int, me=Depends(current_member)):
     from qc6.presets import DEFAULT_PRESET, PRESETS, estimate
     s = await site_for(site_id, me)
     pool = await get_pool()
-    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed'
+    pages = await pool.fetchval("""SELECT (summary->>'pages')::int FROM runs WHERE site_id = $1 AND status = 'completed' AND NOT (options ? 'spot')
                                    AND summary ? 'pages' ORDER BY id DESC LIMIT 1""", site_id)
     st = s["settings"] or {}
     return {"current": st.get("preset", DEFAULT_PRESET), "rate_rps": st.get("rate_rps"), "pages": pages,
@@ -478,7 +497,10 @@ async def get_fix(fix_id: int, me=Depends(current_member)):
         WHERE f.id = $1 AND s.workspace_id = $2""", fix_id, me["workspace_id"])
     if f is None:
         raise problem(404, "Fix not found")
-    pages = await pool.fetch("SELECT DISTINCT page_url FROM findings WHERE fix_id = $1 AND run_id = $2 LIMIT 50", fix_id, f["last_seen_run"])
+    pages = await pool.fetch("SELECT DISTINCT page_url FROM findings WHERE fix_id = $1 AND run_id = $2 ORDER BY page_url LIMIT 50",
+                             fix_id, f["last_seen_run"])
+    from qc6 import history
+    hist = await history.for_run(pool, f["last_seen_run"], [fix_id], [r["page_url"] for r in pages]) if f["last_seen_run"] else {}
     shots = await pool.fetch("""SELECT DISTINCT ON (fd.page_url) fd.page_url, fd.evidence->>'screenshot' AS screenshot
         FROM findings fd WHERE fd.fix_id = $1 AND fd.evidence ? 'screenshot' ORDER BY fd.page_url LIMIT 3""", fix_id)
     if not shots and f["template_id"] is not None:
@@ -487,6 +509,7 @@ async def get_fix(fix_id: int, me=Depends(current_member)):
     events = await pool.fetch("""SELECT e.kind, e.detail, e.created_at, m.name AS actor FROM fix_events e
         LEFT JOIN members m ON m.id = e.actor_id WHERE e.fix_id = $1 ORDER BY e.id DESC LIMIT 50""", fix_id)
     return {"fix": fix_out(f), "pages": [r["page_url"] for r in pages],
+            "page_history": {r["page_url"]: history.remark(hist.get((fix_id, r["page_url"]))) for r in pages},
             "examples": [dict(r) for r in shots if r["screenshot"]], "events": [dict(e) for e in events]}
 
 
@@ -573,8 +596,14 @@ async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     await site_for(site_id, me)
     allowed = {"urls", "sitemap", "max_pages", "rate_rps", "preset", "per_template", "visitors", "images", "fast_visits", "fast_journeys"}
     opts = {k: v for k, v in body.options.items() if k in allowed}
-    if "urls" in opts and (not isinstance(opts["urls"], list) or len(opts["urls"]) > 300_000):
-        raise problem(400, "urls must be a list of at most 3,00,000 addresses")
+    if "urls" in opts:
+        from qc6.url_lists import ListError, for_site
+        if not isinstance(opts["urls"], list):
+            raise problem(400, "urls must be a list of addresses")
+        try:
+            opts["urls"] = for_site([str(u) for u in opts["urls"]], await site_for(site_id, me))["urls"]
+        except ListError as e:
+            raise problem(400, "Check the addresses", str(e))
     pool = await get_pool()
     try:
         rid = await services.start_run(pool, site_id, body.kind, opts, me["id"])
@@ -583,12 +612,69 @@ async def start_run(site_id: int, body: RunIn, me=Depends(current_member)):
     return {"run_id": rid}
 
 
+class SpotIn(BaseModel):
+    text: str = Field(max_length=20_000_000)
+    kind: str = "coverage"
+    whole_site: bool = False
+
+
+async def _start_list_check(site_id: int, me, urls: List[str], kind: str, whole_site: bool, source: str, name: str = ""):
+    from qc6.url_lists import ListError, for_site
+    can_edit(me)
+    s = await site_for(site_id, me)
+    if kind not in ("coverage", "full"):
+        raise problem(400, "Pick a page check or a full check")
+    try:
+        got = for_site(urls, s)
+    except ListError as e:
+        raise problem(400, "Check the addresses", str(e))
+    n = len(got["urls"])
+    label = (got["urls"][0] if n == 1 else f"{n:,} pages" + (f" from {name}" if name else ""))
+    opts: Dict[str, Any] = {"urls": got["urls"]}
+    if not whole_site:
+        opts["spot"] = {"label": label, "source": source, "file": name or None, "count": n}
+    pool = await get_pool()
+    try:
+        rid = await services.start_run(pool, site_id, kind, opts, me["id"])
+    except services.NotAllowed as e:
+        raise problem(409, "A check is already running", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "run.start_list", f"run:{rid}", {"source": source, "file": name, "urls": n})
+    return {"run_id": rid, "urls": n, "other_hosts": got["other_hosts"], "other_examples": got["other_examples"],
+            "duplicates": got["duplicates"], "spot": not whole_site, "label": label}
+
+
+@app.post("/api/v2/sites/{site_id}/checks/urls", status_code=201)
+async def check_urls(site_id: int, body: SpotIn, me=Depends(current_member)):
+    """Check one address or a pasted list. A spot check: results of its own, site-wide figures untouched."""
+    from qc6.url_lists import from_text
+    urls = from_text(body.text)
+    return await _start_list_check(site_id, me, urls, body.kind, body.whole_site, "single" if len(urls) == 1 else "list")
+
+
+@app.post("/api/v2/sites/{site_id}/checks/upload", status_code=201)
+async def check_upload(site_id: int, request: Request, me=Depends(current_member)):
+    """Check the URLs in an uploaded sheet (.csv, .tsv, .txt or .xlsx; the URL column or any http(s) cell)."""
+    from qc6.url_lists import ListError, MAX_BYTES, from_upload
+    form = await request.form()
+    f = form.get("file")
+    if f is None or not hasattr(f, "read"):
+        raise problem(400, "Choose a file to upload")
+    data = await f.read(MAX_BYTES + 1)
+    name = os.path.basename(getattr(f, "filename", "") or "list")[:120]
+    try:
+        urls = from_upload(data, name)
+    except ListError as e:
+        raise problem(400, "That file can't be used", str(e))
+    return await _start_list_check(site_id, me, urls, str(form.get("kind") or "coverage"),
+                                   str(form.get("whole_site") or "").lower() in ("1", "true", "on", "yes"), "sheet", name)
+
+
 @app.get("/api/v2/sites/{site_id}/runs")
 async def runs(site_id: int, me=Depends(current_member)):
     await site_for(site_id, me)
     pool = await get_pool()
-    rows = await pool.fetch("SELECT id, kind, status, progress, summary, error, created_at, started_at, finished_at "
-                            "FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 50", site_id)
+    rows = await pool.fetch("SELECT id, kind, status, progress, summary, error, created_at, started_at, finished_at, "
+                            "options->'spot' AS spot FROM runs WHERE site_id = $1 ORDER BY id DESC LIMIT 50", site_id)
     return {"runs": [dict(r) for r in rows]}
 
 
@@ -631,6 +717,298 @@ async def resume_run(run_id: int, me=Depends(current_member)):
 async def stop_run(run_id: int, me=Depends(current_member)):
     return await _run_transition(run_id, me, ("queued", "paused"), "cancelled", "This check can't be cancelled now",
                                  "Pause it first; a paused or queued check can be cancelled.")
+
+
+# ------------------------------------------------------------------ built-in sign-in (QC6_AUTH=local)
+class LoginIn(BaseModel):
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=500)
+
+
+class CodeIn(BaseModel):
+    code: str = Field(max_length=40)
+
+
+class PasswordIn(BaseModel):
+    current: str = Field(max_length=500)
+    new: str = Field(max_length=500)
+
+
+class TwoFactorEnable(BaseModel):
+    secret: str = Field(max_length=64)
+    code: str = Field(max_length=10)
+
+
+def _local_only():
+    from qc6 import auth
+    if auth.mode() != "local":
+        raise problem(404, "Not found", "QC's own sign-in is off (QC6_AUTH is not 'local').")
+
+
+def _set_cookie(resp, token: str, max_age: int) -> None:
+    from qc6 import local_auth
+    resp.set_cookie(local_auth.COOKIE, token, max_age=max_age, httponly=True, samesite="strict", path="/",
+                    secure=os.environ.get("QC6_COOKIE_SECURE", "true").lower() != "false")
+
+
+@app.get("/api/v2/auth/mode")
+async def auth_mode(request: Request):
+    from qc6 import auth, local_auth
+    try:
+        m = auth.mode()
+    except auth.AuthError as e:
+        raise problem(e.status, e.title, e.detail)
+    signed = None
+    if m == "local":
+        signed = bool(await local_auth.member_for(await get_pool(), request.cookies.get(local_auth.COOKIE)))
+    return {"mode": m, "signed_in": signed}
+
+
+@app.post("/api/v2/auth/login")
+async def auth_login(body: LoginIn, request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    try:
+        out = await local_auth.login(pool, body.email, body.password, request.client.host if request.client else "",
+                                     request.headers.get("user-agent", ""))
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    resp = J({"two_factor": out["two_factor"]})
+    _set_cookie(resp, out["token"], int((local_auth.PENDING if out["two_factor"] else local_auth.MAX_AGE).total_seconds()))
+    if not out["two_factor"]:
+        await services.log(pool, None, out["member_id"], "auth.login", f"member:{out['member_id']}", {})
+    return resp
+
+
+@app.post("/api/v2/auth/2fa")
+async def auth_second_factor(body: CodeIn, request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    token = request.cookies.get(local_auth.COOKIE)
+    try:
+        out = await local_auth.second_factor(await get_pool(), token, body.code)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    resp = J(out)
+    _set_cookie(resp, token, int(local_auth.MAX_AGE.total_seconds()))
+    return resp
+
+
+@app.post("/api/v2/auth/logout")
+async def auth_logout(request: Request):
+    from fastapi.responses import JSONResponse as J
+    from qc6 import local_auth
+    _local_only()
+    await local_auth.logout(await get_pool(), request.cookies.get(local_auth.COOKIE))
+    resp = J({"ok": True})
+    resp.delete_cookie(local_auth.COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/v2/auth/account")
+async def auth_account(me=Depends(current_member)):
+    _local_only()
+    m = await (await get_pool()).fetchrow("SELECT totp_secret IS NOT NULL AS two_factor, recovery_codes FROM members WHERE id = $1", me["id"])
+    return {"email": me["email"], "two_factor": m["two_factor"], "recovery_codes_left": len(m["recovery_codes"] or [])}
+
+
+@app.post("/api/v2/auth/password")
+async def auth_password(body: PasswordIn, request: Request, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    stored = await pool.fetchval("SELECT password_hash FROM members WHERE id = $1", me["id"])
+    if not local_auth.check_password(body.current, stored):
+        raise problem(400, "Your current password isn't right")
+    try:
+        await local_auth.set_password(pool, me["id"], body.new, end_other_sessions_except=request.cookies.get(local_auth.COOKIE))
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    await services.log(pool, me["workspace_id"], me["id"], "auth.password", f"member:{me['id']}", {})
+    return {"ok": True, "other_sessions_ended": True}
+
+
+@app.post("/api/v2/auth/2fa/setup")
+async def auth_2fa_setup(me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    if not os.environ.get("QC6_SECRET_KEY"):
+        raise problem(400, "Two-factor needs QC6_SECRET_KEY", "Set QC6_SECRET_KEY on the server first; QC encrypts the two-factor key with it.")
+    return await local_auth.start_two_factor(await get_pool(), me["id"], me["email"])
+
+
+@app.post("/api/v2/auth/2fa/enable")
+async def auth_2fa_enable(body: TwoFactorEnable, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    try:
+        codes = await local_auth.enable_two_factor(pool, me["id"], body.secret, body.code)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    await services.log(pool, me["workspace_id"], me["id"], "auth.2fa_on", f"member:{me['id']}", {})
+    return {"recovery_codes": codes}
+
+
+@app.post("/api/v2/auth/2fa/disable")
+async def auth_2fa_disable(body: PasswordIn, me=Depends(current_member)):
+    from qc6 import local_auth
+    _local_only()
+    pool = await get_pool()
+    if not local_auth.check_password(body.current, await pool.fetchval("SELECT password_hash FROM members WHERE id = $1", me["id"])):
+        raise problem(400, "Your password isn't right")
+    await local_auth.disable_two_factor(pool, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "auth.2fa_off", f"member:{me['id']}", {})
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ AI drafts (local model)
+@app.get("/api/v2/ai/status")
+async def ai_status(me=Depends(current_member)):
+    from qc6 import ai
+    return await ai.status()
+
+
+class AIDraftIn(BaseModel):
+    page_url: Optional[str] = Field(default=None, max_length=2000)
+
+
+async def _fix_row(pool, fix_id: int, me) -> Dict[str, Any]:
+    f = await pool.fetchrow("""SELECT f.*, t.name AS template_name, s.base_url, s.primary_host, s.access_token, s.settings AS site_settings,
+                                      s.id AS sid FROM fixes f JOIN sites s ON s.id = f.site_id LEFT JOIN templates t ON t.id = f.template_id
+                               WHERE f.id = $1 AND s.workspace_id = $2""", fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    return dict(f)
+
+
+@app.post("/api/v2/fixes/{fix_id}/ai", status_code=201)
+async def ai_draft(fix_id: int, body: AIDraftIn, me=Depends(current_member)):
+    """Ask the local model for a draft (fix steps, or a title and description). Saved as a draft for a person to review."""
+    from qc6 import ai
+    from qc6.linkgraph import main_text_words
+    from qc6.workers.extras import fetch_html
+    can_edit(me)
+    pool = await get_pool()
+    f = await _fix_row(pool, fix_id, me)
+    url = body.page_url or await pool.fetchval("SELECT page_url FROM findings WHERE fix_id = $1 ORDER BY run_id DESC, page_url LIMIT 1", fix_id)
+    page = await pool.fetchrow("""SELECT p.* FROM pages p JOIN runs r ON r.id = p.run_id WHERE r.site_id = $1 AND p.url = $2
+                                  ORDER BY p.id DESC LIMIT 1""", f["sid"], url) if url else None
+    site = {"id": f["sid"], "base_url": f["base_url"], "primary_host": f["primary_host"], "access_token": f["access_token"],
+            "settings": f["site_settings"]}
+    text = ""
+    if url:
+        try:
+            html = await fetch_html(url, site)
+            text = " ".join(main_text_words(html or ""))[:1800]
+        except httpx.HTTPError:
+            text = ""
+    kind = "title_description" if ai.wants_title(f) else "fix_steps"
+    ev = ai.evidence_for(f, dict(page) if page else None, text)
+    try:
+        out = await ai.generate(kind, ev)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    row = await pool.fetchrow("""INSERT INTO ai_suggestions (site_id, fix_id, page_url, kind, model, evidence, draft, created_by)
+                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+                              f["sid"], fix_id, url, kind, out.pop("model"), ev, out, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "ai.draft", f"fix:{fix_id}", {"kind": kind, "suggestion": row["id"]})
+    return dict(row)
+
+
+@app.get("/api/v2/fixes/{fix_id}/ai")
+async def ai_list(fix_id: int, me=Depends(current_member)):
+    pool = await get_pool()
+    await _fix_row(pool, fix_id, me)
+    rows = await pool.fetch("""SELECT a.*, m.name AS decided_by_name FROM ai_suggestions a LEFT JOIN members m ON m.id = a.decided_by
+                               WHERE a.fix_id = $1 ORDER BY a.id DESC LIMIT 20""", fix_id)
+    return {"suggestions": [dict(r) for r in rows]}
+
+
+class AIDecision(BaseModel):
+    status: str
+    final: Optional[Dict[str, Any]] = None
+
+
+@app.patch("/api/v2/ai/{sid}")
+async def ai_decide(sid: int, body: AIDecision, me=Depends(current_member)):
+    """Approve (optionally with edits) or reject a draft. Approving adds a note to the fix's history."""
+    from qc6 import ai
+    can_edit(me)
+    if body.status not in ("approved", "rejected"):
+        raise problem(400, "Approve or reject the draft")
+    pool = await get_pool()
+    a = await pool.fetchrow("""SELECT a.* FROM ai_suggestions a JOIN sites s ON s.id = a.site_id WHERE a.id = $1 AND s.workspace_id = $2""",
+                            sid, me["workspace_id"])
+    if a is None:
+        raise problem(404, "Draft not found")
+    final = None
+    if body.status == "approved":
+        merged = {**(a["draft"] or {}), **(body.final or {})}
+        final = ai.clean(a["kind"], merged)                     # edited text is plain text too, with the same length checks
+    row = await pool.fetchrow("""UPDATE ai_suggestions SET status = $2, final = $3, decided_by = $4, decided_at = now()
+                                 WHERE id = $1 RETURNING *""", sid, body.status, final, me["id"])
+    if body.status == "approved" and a["fix_id"]:
+        await services.update_fix(pool, a["fix_id"], me["id"], comment="Approved an AI draft: " +
+                                  (f"title \"{final.get('title')}\"" if final.get("title") else "; ".join(final.get("steps", [])[:2]))[:500])
+    await services.log(pool, me["workspace_id"], me["id"], f"ai.{body.status}", f"ai:{sid}", {})
+    return dict(row)
+
+
+# ------------------------------------------------------------------ delete
+@app.delete("/api/v2/runs/{run_id}")
+async def delete_run(run_id: int, me=Depends(current_member)):
+    """Delete a check (full or spot) with its pages, findings, visits, scores and files. Not while it runs."""
+    from qc6 import deletion
+    can_edit(me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2)",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    try:
+        out = await deletion.delete_check(pool, run_id)
+    except deletion.Refused as e:
+        raise problem(409, "This check can't be deleted now", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "run.delete", f"run:{run_id}", out)
+    return out
+
+
+@app.delete("/api/v2/journeys/{journey_id}")
+async def delete_journey(journey_id: int, me=Depends(current_member)):
+    from qc6 import deletion
+    can_edit(me)
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM journeys j JOIN sites s ON s.id = j.site_id WHERE j.id = $1 AND s.workspace_id = $2)",
+                               journey_id, me["workspace_id"]):
+        raise problem(404, "Journey not found")
+    out = await deletion.delete_journey(pool, journey_id)
+    await services.log(pool, me["workspace_id"], me["id"], "journey.delete", f"journey:{journey_id}", out)
+    return out
+
+
+class SiteDelete(BaseModel):
+    confirm: str
+
+
+@app.delete("/api/v2/sites/{site_id}")
+async def delete_site(site_id: int, body: SiteDelete, me=Depends(current_member)):
+    """Delete a site and everything QC stored about it. Owners only; type the site's name to confirm."""
+    from qc6 import deletion
+    if me["role"] != "owner":
+        raise problem(403, "Only an owner can delete a site")
+    s = await site_for(site_id, me)
+    if body.confirm.strip() != s["name"]:
+        raise problem(400, "Type the site's name to confirm", f'Type "{s["name"]}" exactly.')
+    pool = await get_pool()
+    try:
+        out = await deletion.delete_site(pool, site_id)
+    except deletion.Refused as e:
+        raise problem(409, "The site can't be deleted now", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "site.delete", f"site:{site_id}", out)
+    return out
 
 
 @app.get("/api/v2/stream")
@@ -685,7 +1063,7 @@ async def templates_(site_id: int, me=Depends(current_member)):
         (SELECT COUNT(*) FROM visits v WHERE v.template_id = t.id) AS visits,
         (SELECT COUNT(*) FROM fixes f WHERE f.template_id = t.id AND f.status IN ('open','in_progress')) AS open_fixes
         FROM templates t WHERE t.site_id = $1 AND t.id IN (SELECT DISTINCT template_id FROM pages p JOIN runs r ON r.id = p.run_id
-        WHERE r.site_id = $1 AND r.id = (SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full')))
+        WHERE r.site_id = $1 AND r.id = (SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full') AND NOT (options ? 'spot')))
         ORDER BY t.page_count DESC""", site_id)
     return {"templates": [dict(r) for r in rows]}
 
@@ -700,8 +1078,11 @@ async def page(site_id: int, url: str, me=Depends(current_member)):
         raise problem(404, "We haven't checked this page yet")
     v = await pool.fetchrow("""SELECT v.* FROM visits v JOIN runs r ON r.id = v.run_id WHERE r.site_id = $1 AND v.page_url = $2
         ORDER BY v.id DESC LIMIT 1""", site_id, url)
-    fixes = await pool.fetch("""SELECT DISTINCT f.id, f.title, f.severity, f.status FROM findings fd JOIN fixes f ON f.id = fd.fix_id
-        WHERE f.site_id = $1 AND fd.page_url = $2 AND f.status != 'verified'""", site_id, url)
+    fixes = await pool.fetch("""SELECT f.id, f.title, f.severity, f.status, count(DISTINCT fd.run_id) AS checks,
+                                       min(coalesce(r.finished_at, r.started_at)) AS first_seen, max(coalesce(r.finished_at, r.started_at)) AS last_seen
+        FROM findings fd JOIN fixes f ON f.id = fd.fix_id JOIN runs r ON r.id = fd.run_id AND r.status = 'completed'
+        WHERE f.site_id = $1 AND fd.page_url = $2 AND f.status != 'verified'
+        GROUP BY f.id ORDER BY CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END""", site_id, url)
     return {"page": dict(p), "visit": dict(v) if v else None, "fixes": [dict(f) for f in fixes]}
 
 
@@ -709,7 +1090,7 @@ async def page(site_id: int, url: str, me=Depends(current_member)):
 async def pages(site_id: int, q: str = "", limit: int = Query(50, le=500), me=Depends(current_member)):
     await site_for(site_id, me)
     pool = await get_pool()
-    rid = await pool.fetchval("SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full')", site_id)
+    rid = await pool.fetchval("SELECT MAX(id) FROM runs WHERE site_id = $1 AND status = 'completed' AND kind IN ('coverage','full') AND NOT (options ? 'spot')", site_id)
     rows = await pool.fetch("""SELECT p.url, p.http_status, p.title, t.name AS template_name FROM pages p LEFT JOIN templates t
         ON t.id = p.template_id WHERE p.run_id = $1 AND ($2 = '' OR p.url ILIKE '%' || $2 || '%' OR p.title ILIKE '%' || $2 || '%')
         ORDER BY p.url LIMIT $3""",
@@ -725,8 +1106,8 @@ async def _inventory_run(site_id: int, run: Optional[int], pool) -> int:
     checks = await checks_with_pages(pool, site_id)
     if not checks:
         raise problem(404, "No finished check yet", "Pages appear here after the first check.")
-    if run is None:
-        return checks[0]["id"]
+    if run is None:                                   # the latest check of the whole site, not a spot check
+        return next((c["id"] for c in checks if not c["spot"]), checks[0]["id"])
     if run not in {c["id"] for c in checks}:
         raise problem(404, "That check isn't one of this site's finished checks")
     return run
@@ -759,6 +1140,29 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
     name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
     return StreamingResponse(csv_rows(pool, site_id, rid, f), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
+
+
+@app.get("/api/v2/sites/{site_id}/export.{fmt}")
+async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
+    """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
+    from qc6 import export as ex
+    if fmt not in ("csv", "xlsx", "zip"):
+        raise problem(404, "Not found")
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await _inventory_run(site_id, run, pool)
+    name = f"qc-report-{re.sub(r'[^a-z0-9.-]+', '-', s['primary_host'].lower())}-check-{rid}.{fmt}"
+    await services.log(pool, me["workspace_id"], me["id"], f"report.{fmt}", f"run:{rid}", {})
+    if fmt == "csv":
+        return StreamingResponse(ex.csv_stream(pool, s, rid), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    from starlette.background import BackgroundTask
+    if fmt == "zip":
+        path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
+        return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
+    path = await ex.xlsx_file(pool, s, rid)
+    return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/v2/sites/{site_id}/compare")

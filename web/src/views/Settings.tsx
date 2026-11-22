@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Site } from "../api";
 import { useViewMotion } from "../motion";
-import { ErrorBox, useLoad, useToast } from "../ui";
+import { Confirm, ErrorBox, useLoad, useToast } from "../ui";
 
 export function SettingsView({ site }: { site: Site; params: URLSearchParams }) {
   const s = useLoad(() => api.site(site.id), [site.id]);
@@ -11,6 +11,7 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
   const [form, setForm] = useState<Record<string, any>>({});
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   useEffect(() => {
     if (!s.data) return;
     const st = s.data.settings || {};
@@ -162,6 +163,19 @@ export function SettingsView({ site }: { site: Site; params: URLSearchParams }) 
         {err && <ErrorBox text={err} />}
         <div><button className="btn primary" type="submit" disabled={busy}>Save settings</button></div>
       </form>
+      <section className="panel grid danger-zone" data-reveal style={{ marginTop: 24 }}>
+        <h2>Delete this site</h2>
+        <p className="dim" style={{ margin: 0 }}>Removes the site and everything QC stored about it: checks, pages, fixes, journeys, screenshots and reports.
+          Only a workspace owner can do this.</p>
+        <div><button className="btn danger" type="button" onClick={() => setDeleting(true)}>Delete this site…</button></div>
+      </section>
+      {deleting && (
+        <Confirm title={`Delete ${s.data.name}?`} confirmText="Delete the site" typeToConfirm={s.data.name} onClose={() => setDeleting(false)}
+          onConfirm={async () => { const out = await api.deleteSite(site.id, s.data!.name);
+            toast(`${s.data!.name} deleted, with ${out.checks} check${out.checks === 1 ? "" : "s"}.`); window.location.hash = "/today"; window.location.reload(); }}>
+          <p style={{ margin: 0 }}>Everything about {site.primary_host} is removed for everyone in the workspace. This can't be undone.</p>
+        </Confirm>
+      )}
     </div>
   );
 }

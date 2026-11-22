@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from qc6.crawl.budget import HostBudget
 from qc6.settings import settings
+from qc6.workers.analysis import spot_pages
 from qc6.workers.analysis import Item, apply, close_run, notify
 from qc6.workers.visit import VisitResult, VisitTarget, run_visits
 
@@ -196,10 +197,11 @@ async def run_visit_stage(pool, browser, run_id: int, site: Dict[str, Any], opts
     f = findings_from(results, site["primary_host"])
     tpl_rows = await pool.fetch("SELECT id, name, page_count FROM templates WHERE site_id = $1 AND id = ANY($2::bigint[])",
                                 site["id"], [t for t in {r.template_id for r in results} if t is not None])
+    spot = await spot_pages(pool, run_id)
     applied = await apply(pool, run_id, site["id"], f["items"],
                           template_pages={r["id"]: r["page_count"] for r in tpl_rows},
-                          template_names={r["id"]: r["name"] for r in tpl_rows}, project_templates=True)
-    moved = await close_run(pool, run_id, site["id"], ["visit"], complete=f["challenged"] == 0)
+                          template_names={r["id"]: r["name"] for r in tpl_rows}, project_templates=spot is None, spot=spot is not None)
+    moved = await close_run(pool, run_id, site["id"], ["visit"], complete=f["challenged"] == 0, pages=spot)
     return {"templates_changed": changed, "visits_planned": len(targets), "visited": f["visited"], "templates_visited": f["templates"],
             "challenged": f["challenged"], "visits_failed": f["failed"], **{f"visit_{k}": v for k, v in applied.items()},
             "visit_lifecycle": moved}

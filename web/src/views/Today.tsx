@@ -4,6 +4,7 @@ import { go } from "../main";
 import { countTo, useViewMotion } from "../motion";
 import { ErrorBox, Icon, Spark, copyText, count, useLoad, useToast } from "../ui";
 import { FlowBars } from "./Insights";
+import { SpotCheckButton } from "./SpotCheck";
 
 const CARD_ICON: Record<string, [string, boolean]> = {
   regressed: ["up", true], journey: ["journey", true], access: ["shield", false], unassigned: ["fix", false],
@@ -48,7 +49,7 @@ export function TodayView({ site }: { site: Site; params: URLSearchParams }) {
           <p className="lede">{d.lede}</p>
         </div>
         {running ? <button className="btn primary" onClick={() => go("live", { run: d.last_run!.id })}><Icon name="live" />{d.last_run!.status === "paused" ? "Resume the check" : "Watch the check"}</button>
-          : <button className="btn primary" disabled={starting} onClick={start}><Icon name="play" />Check the site now</button>}
+          : <div className="row"><SpotCheckButton site={site} /><button className="btn primary" disabled={starting} onClick={start}><Icon name="play" />Check the site now</button></div>}
       </div>
       <div className="kpis" data-reveal>
         <Kpi label="Site health" value={d.score} format={(n) => n.toFixed(0)} sub={change == null ? "out of 100"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -28,13 +29,20 @@ async def notify(conn, run_id: int, event: str, **data) -> None:
     await conn.execute("SELECT pg_notify('qc6', $1)", payload)
 
 
+MAX_PAGES_PER_FIX = int(os.environ.get("QC6_MAX_PAGES_PER_FIX", "20000"))   # example pages stored per fix per check
+
+
 async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
                 template_pages: Optional[Dict[int, int]] = None, template_names: Optional[Dict[int, str]] = None,
-                project_templates: bool = False) -> Dict[str, int]:
+                project_templates: bool = False, spot: bool = False) -> Dict[str, int]:
+    """spot=True (a check of a few chosen URLs): findings are recorded, but existing fixes keep their site-wide
+    title, page count and last-seen check; only genuinely new problems create a fix."""
     """Upsert fixes for these findings. With project_templates=True (sampled visits), a template-scoped fix that was
     seen on at least half of a template's sampled visits counts every page of that template as affected."""
     template_pages = template_pages or {}
     template_names = template_names or {}
+    if spot:                                     # on a few pages, "nothing links here" or "duplicate of" means nothing
+        items = [it for it in items if not cross_page(it.rule, it.subject)]
     groups: Dict[str, Dict[str, Any]] = {}
     for it in items:
         rule = R.RULES[it.rule]
@@ -59,9 +67,9 @@ async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
                     """INSERT INTO fixes (site_id, fix_key, rule, severity, dimension, scope, template_id, subject, title,
                                           pages_affected, first_seen_run, last_seen_run, source, texts, example_url)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,$14)
-                       ON CONFLICT (site_id, fix_key) DO UPDATE SET
+                       ON CONFLICT (site_id, fix_key) DO UPDATE SET """ + ("""updated_at = fixes.updated_at""" if spot else """
                          title = EXCLUDED.title, pages_affected = EXCLUDED.pages_affected, last_seen_run = EXCLUDED.last_seen_run,
-                         texts = EXCLUDED.texts, example_url = EXCLUDED.example_url, updated_at = now()
+                         texts = EXCLUDED.texts, example_url = EXCLUDED.example_url, updated_at = now()""") + """
                        RETURNING id, (xmax = 0) AS inserted""",
                     site_id, key, it.rule, rule.severity, rule.dimension, rule.scope, it.template_id, it.subject,
                     texts["title"], n, run_id, it.source, texts, it.page_url)
@@ -74,20 +82,51 @@ async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
                 await conn.executemany(
                     "INSERT INTO findings (run_id, fix_id, page_url, subject, evidence, source) VALUES ($1,$2,$3,$4,$5,$6) "
                     "ON CONFLICT DO NOTHING",
-                    [(run_id, row["id"], r.page_url, r.subject, r.evidence, r.source) for r in g["rows"][:5000]])
+                    [(run_id, row["id"], r.page_url, r.subject, r.evidence, r.source) for r in g["rows"][:MAX_PAGES_PER_FIX]])
     return {"fixes_new": new, "fixes_updated": updated, "findings": sum(len(g["rows"]) for g in groups.values())}
 
 
-async def close_run(pool, run_id: int, site_id: int, sources: List[str], complete: bool = True) -> Dict[str, int]:
-    """Lifecycle for fixes of the given sources after a run. Only a complete run can verify a fix."""
+# Problems that depend on other pages (links into a page, duplicates, the sitemap): a spot check can't judge them, so it
+# never confirms them fixed. Only a check of the whole site can.
+CROSS_PAGE_RULES = {"NEAR_DUPLICATE", "DEEP_PAGE", "NOT_REACHABLE_FROM_HOME", "TITLE_DUPLICATE", "CANONICAL_CHAIN",
+                    "NOINDEX_IN_SITEMAP", "CANONICAL_ELSEWHERE", "PRODUCT_DATA_MISSING"}
+CROSS_PAGE_SUBJECTS = {"ORPHAN_PAGE", "NOT_IN_SITEMAP", "DUPLICATE_TITLE", "DUPLICATE_META_DESCRIPTION", "DUPLICATE_H1",
+                       "DUPLICATE_CONTENT", "TRAILING_SLASH_DUPLICATE", "NOINDEX_IN_SITEMAP", "SITEMAP_URL_NOT_CANONICAL"}
+
+
+def cross_page(rule: str, subject: str) -> bool:
+    return rule in CROSS_PAGE_RULES or (subject or "") in CROSS_PAGE_SUBJECTS or (subject or "").startswith("SITEMAP_")
+
+
+async def spot_pages(pool, run_id: int) -> Optional[set]:
+    """The URLs of a spot check (single URL or uploaded list), or None for a check of the whole site."""
+    o = await pool.fetchval("SELECT options FROM runs WHERE id = $1", run_id) or {}
+    return set(o.get("_urls") or o.get("urls") or []) if o.get("spot") else None
+
+
+async def close_run(pool, run_id: int, site_id: int, sources: List[str], complete: bool = True,
+                    pages: Optional[set] = None) -> Dict[str, int]:
+    """Lifecycle for fixes of the given sources after a run. Only a complete run can verify a fix.
+    pages: for a spot check, the URLs it covered; a fix it didn't see is verified only if every page the fix was last
+    found on is among them (a check of 3 URLs says nothing about the other 3,00,000 pages)."""
     moved = defaultdict(int)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            rows = await conn.fetch("SELECT id, status, last_seen_run FROM fixes WHERE site_id = $1 AND source = ANY($2::text[])",
+            rows = await conn.fetch("SELECT id, status, last_seen_run, rule, subject FROM fixes WHERE site_id = $1 AND source = ANY($2::text[])",
                                     site_id, sources)
+            seen_ids = {r["fix_id"] for r in await conn.fetch("SELECT DISTINCT fix_id FROM findings WHERE run_id = $1", run_id)}
+            covered: Dict[int, bool] = {}
+            if pages is not None:
+                unseen = [r["id"] for r in rows if r["id"] not in seen_ids]
+                for r in await conn.fetch("""SELECT fd.fix_id, bool_and(fd.page_url = ANY($2::text[])) AS all_in FROM findings fd
+                                             JOIN fixes f ON f.id = fd.fix_id AND fd.run_id = f.last_seen_run
+                                             WHERE fd.fix_id = ANY($1::bigint[]) GROUP BY fd.fix_id""", unseen, list(pages)):
+                    covered[r["fix_id"]] = r["all_in"]
             for r in rows:
-                seen = r["last_seen_run"] == run_id
+                seen = r["id"] in seen_ids
                 if not seen and not complete:
+                    continue
+                if not seen and pages is not None and (not covered.get(r["id"], False) or cross_page(r["rule"], r["subject"])):
                     continue
                 new_status, regressed = fx.after_run(r["status"], seen)
                 if new_status != r["status"] or regressed:
