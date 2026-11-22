@@ -48,6 +48,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
+      - name: Second loopback address (tests serve a stand-in "other site" there; Linux has the whole 127/8, macOS only 127.0.0.1)
+        run: sudo ifconfig lo0 alias 127.0.0.2 up
       - name: PostgreSQL 16 from Homebrew
         run: |
           brew install postgresql@16
