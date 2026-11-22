@@ -52,6 +52,10 @@ async def _post(channel: str, url: str, text: str, lines: List[str]) -> int:
     kw: Dict[str, Any] = {"timeout": 15}
     if _transport is not None:
         kw["transport"] = _transport
+    else:                                      # a webhook address is typed by a person: never let it reach inside the network
+        from qcv5.crawler.safe_net import safe_transport
+        from qc6.settings import settings
+        kw["transport"] = safe_transport(settings.allow_private_targets)
     async with httpx.AsyncClient(**kw) as c:
         r = await c.post(url, json=body)
         return r.status_code

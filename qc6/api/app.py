@@ -1552,8 +1552,9 @@ async def access_test(site_id: int, me=Depends(current_member)):
         hook = httpx_hook(s)
     except AccessError as e:
         raise problem(400, "The staging login can't be used", str(e))
+    from qcv5.crawler.safe_net import safe_transport
     async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"},
-                                 event_hooks={"request": [hook]}) as c:
+                                 event_hooks={"request": [hook]}, transport=safe_transport(settings.allow_private_targets)) as c:
         for i in range(20):
             try:
                 r = await c.get(s["base_url"] + "/")

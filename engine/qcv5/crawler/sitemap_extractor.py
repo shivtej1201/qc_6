@@ -116,8 +116,9 @@ class SitemapExtractor:
         self.use_browser_fallback = use_browser_fallback
         self._owned_browser_pool = False
         
+        from qcv5.crawler.safe_net import safe_transport
         self.client = httpx.AsyncClient(
-            verify=False,
+            transport=safe_transport(allow_local=bool(allow_local)),   # pinned to checked addresses; certificates checked
             timeout=httpx.Timeout(connect=5.0, read=self.timeout, write=5.0, pool=5.0),
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LinkAuditorBot/2.0"},
             follow_redirects=False # Manual redirect tracking for SSRF check

@@ -93,7 +93,9 @@ async def discover_urls(site: Dict[str, Any], opts: Dict[str, Any], progress_cal
     if not sitemaps:                     # like a crawler would: robots.txt Sitemap lines, else /sitemap.xml
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, event_hooks={"request": [httpx_hook(site)]}) as c:
+            from qcv5.crawler.safe_net import safe_transport
+            async with httpx.AsyncClient(timeout=15, headers=headers, event_hooks={"request": [httpx_hook(site)]},
+                                         transport=safe_transport(settings.allow_private_targets)) as c:
                 r = await c.get(site["base_url"] + "/robots.txt")
                 if r.status_code == 200:
                     sitemaps = [l.split(":", 1)[1].strip() for l in r.text.splitlines() if l.lower().startswith("sitemap:")]

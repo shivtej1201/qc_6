@@ -54,10 +54,13 @@ def visible_text(html: str, limit: int = 4000) -> str:
     return " ".join(parts)[:limit]
 
 
-async def _client(timeout: float = 30) -> httpx.AsyncClient:
+async def _client(timeout: float = 30, site_fetch: bool = False) -> httpx.AsyncClient:
     kw: Dict[str, Any] = {"timeout": timeout}
     if _transport is not None:
         kw["transport"] = _transport
+    elif site_fetch:                           # the audited site: pinned to checked addresses, certificates checked
+        from qcv5.crawler.safe_net import safe_transport
+        kw["transport"] = safe_transport(settings.allow_private_targets)
     return httpx.AsyncClient(**kw)
 
 
@@ -68,7 +71,7 @@ async def fetch_html(url: str, site: Dict[str, Any]) -> Optional[str]:
     from qc6.site_access import httpx_hook, is_site_url
     if not is_site_url(url, site["primary_host"]):
         return None
-    async with await _client() as c:
+    async with await _client(site_fetch=True) as c:
         c.event_hooks["request"].append(httpx_hook(site))
         r = await c.get(url, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"})
         return r.text if r.status_code == 200 and "html" in r.headers.get("content-type", "html") else None
