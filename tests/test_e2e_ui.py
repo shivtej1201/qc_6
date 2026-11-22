@@ -146,6 +146,7 @@ def test_ui_end_to_end(app_url):
                 document.addEventListener('focusin', (e) => t('focus ' + e.target.tagName + '.' + (e.target.className || '') + ' ' + (e.target.getAttribute('href') || '')), true);
                 document.addEventListener('keydown', (e) => t('keydown ' + e.key + ' on ' + document.activeElement.tagName), true);
                 document.addEventListener('keypress', (e) => t('keypress ' + e.key + ' on ' + document.activeElement.tagName), true); }""")
+            await page.mouse.move(640, 300)                           # the pointer rests where the list will appear
             await page.keyboard.press("Control+k")
             await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
             palette_bad = await _axe(page)

@@ -12,7 +12,7 @@ type Hit = { key: string; kind: "screen" | "fix" | "page"; label: string; sub?: 
 export function Palette({ site, screens, onClose }: { site?: Site; screens: Screen[]; onClose: () => void }) {
   const [q, setQ] = useState("");
   const [remote, setRemote] = useState<{ q: string; hits: Hit[] }>({ q: "", hits: [] });
-  const [active, setActive] = useState(0);
+  const [rawActive, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const text = q.trim().toLowerCase();
@@ -24,6 +24,8 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
   ], [text, remote, screens]);
 
   const picked = useRef(false);
+  // the highlighted row always exists: the list can shrink under it while typing
+  const active = hits.length ? Math.min(Math.max(0, rawActive), hits.length - 1) : -1;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     input.current?.focus();
@@ -83,7 +85,7 @@ export function Palette({ site, screens, onClose }: { site?: Site; screens: Scre
             (i === 0 || hits[i - 1].kind !== h.kind) &&
               <li key={`g-${h.kind}`} role="presentation" className="palette-group">{group(h.kind)}</li>,
             <li key={h.key} id={`pal-${i}`} data-i={i} role="option" aria-selected={i === active}
-              className={i === active ? "on" : ""} onMouseEnter={() => setActive(i)} onMouseDown={(e) => { e.preventDefault(); pick(h); }}>
+              className={i === active ? "on" : ""} onMouseMove={() => { if (i !== active) setActive(i); }} onMouseDown={(e) => { e.preventDefault(); pick(h); }}>
               <span className="palette-row">
                 {h.kind === "screen" ? <Icon name={h.icon!} /> : h.kind === "fix" ? <Sev s={h.sev} /> : <Icon name="page" />}
                 <span className="palette-label">{h.label}{h.sub && <span className="faint"> · {h.sub}</span>}</span>
