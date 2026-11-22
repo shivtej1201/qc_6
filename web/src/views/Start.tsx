@@ -21,7 +21,7 @@ function phase(j: Job): string {
   if (!j.run_id) return "ready";
   return j.run_status || "ready";                                       // queued | running | pausing | paused | completed | failed | cancelled
 }
-const LIVE = ["extracting", "queued", "running", "pausing"];
+const LIVE = ["extracting", "queued", "running", "pausing", "cancelling"];
 
 function speed(j: Job) {
   const p = j.run_progress || {};
@@ -168,7 +168,7 @@ export function StartView({ params, onSite, onSitesChanged }: { params: URLSearc
 const SOURCE_TEXT: Record<string, string> = { sitemap: "Sitemap", single: "Page", sheet: "File", list: "List" };
 const PILL: Record<string, [string, string]> = {
   extracting: ["warn", "Reading sitemap"], ready: ["new", "URLs ready"], queued: ["warn", "Waiting to start"], running: ["warn", "Crawling"],
-  pausing: ["warn", "Pausing…"], paused: ["new", "Paused"], completed: ["good", "Report ready"], failed: ["bad", "Stopped"], cancelled: ["", "Cancelled"],
+  pausing: ["warn", "Pausing…"], cancelling: ["warn", "Stopping…"], paused: ["new", "Paused"], completed: ["good", "Report ready"], failed: ["bad", "Stopped"], cancelled: ["", "Cancelled"],
 };
 function StatusPill({ ph }: { ph: string }) {
   const [c, t] = PILL[ph] || ["", ph];
@@ -205,7 +205,7 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
   const runCtl = (what: "pause" | "resume" | "cancel", id = j.run_id!) => act(
     () => (what === "pause" ? api.pauseRun(id) : what === "resume" ? api.resumeRun(id) : api.cancelRun(id)),
     what === "pause" ? "Pausing: finishing the pages in hand, then it stops. Nothing already checked is lost."
-      : what === "resume" ? "Resuming where it stopped." : "Cancelled.");
+      : what === "resume" ? "Resuming where it stopped." : "Cancelling: the pages in hand finish first.");
   const stage = j.run_progress?.stage;
 
   return (
@@ -265,9 +265,9 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
         </div>
       )}
 
-      {["queued", "running", "pausing", "paused"].includes(ph) && (<>
+      {["queued", "running", "pausing", "paused", "cancelling"].includes(ph) && (<>
         <div className="big-num"><b>{count(sp.done)}</b> of {count(sp.total)} pages checked
-          <span>{ph === "queued" ? "Waiting for the worker to pick it up…" : ph === "pausing" ? "Pausing: finishing the pages in hand…"
+          <span>{ph === "queued" ? "Waiting for the worker to pick it up…" : ph === "pausing" ? "Pausing: finishing the pages in hand…" : ph === "cancelling" ? "Stopping: finishing the pages in hand, then it's cancelled…"
             : ph === "paused" ? "Paused. Resume carries on where it stopped." : stage === "analysing" ? "Every page read. Grouping problems and building the report…"
             : stage === "visits" ? "Opening sample pages in a real browser…"
             : sp.rate ? `${sp.rate.toFixed(1)} pages a second · ${duration(sp.eta)} left` : "Starting…"}</span></div>
@@ -276,7 +276,7 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
         <div className="row">
           {["running", "queued"].includes(ph) && <button className="btn" disabled={busy} onClick={() => runCtl("pause")}><Icon name="pause" />Pause</button>}
           {ph === "paused" && <button className="btn primary" disabled={busy} onClick={() => runCtl("resume")}><Icon name="play" />Resume</button>}
-          <button className="btn quiet" disabled={busy} onClick={() => runCtl("cancel")}><Icon name="close" />Cancel</button>
+          {ph !== "cancelling" && <button className="btn quiet" disabled={busy} onClick={() => runCtl("cancel")}><Icon name="close" />Cancel</button>}
           <button className="btn quiet" onClick={() => go("live", { run: j.run_id! })}>Details</button>
         </div>
       </>)}
@@ -300,7 +300,10 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       {ph === "failed" && j.run_id && (<>
         <div className="error-box" role="alert">The crawl stopped: {j.run_error}</div>
         {/403|challenge|bot|CDN|blocked/i.test(j.run_error || "") && <AllowRule siteId={j.site_id} toast={toast} />}
-        <div className="row" style={{ marginTop: 12 }}><button className="btn primary" onClick={start} disabled={busy}>Try again</button></div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="btn primary" disabled={busy} onClick={() => act(() => api.retryRun(j.run_id!), "Back in the queue. It carries on from where it stopped.")}>
+            <Icon name="play" />Retry from where it stopped</button>
+          <button className="btn quiet" onClick={start} disabled={busy}>Start a new crawl</button></div>
       </>)}
       {ph === "cancelled" && j.run_id && (<>
         <p>Cancelled after {count(sp.done)} of {count(sp.total)} pages.</p>

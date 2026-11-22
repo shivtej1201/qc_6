@@ -1,6 +1,7 @@
 """Visit plan -> real-visitor review -> findings (blueprint §5 steps 5-7, §6.3)."""
 from __future__ import annotations
 
+import os
 import random
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
@@ -37,13 +38,16 @@ async def plan(pool, run_id: int, per_template: int = 25, mobile_share: float = 
         for r in top + rng.sample(rest, min(per_template - len(top), len(rest))):
             chosen.append(r)
             seen.add(r["url"])
-    for r in rows:
-        if r["url"] not in seen and (r["facts"] or {}).get("js_rendering_suspected"):
-            chosen.append(r)
-            seen.add(r["url"])
-    chosen = chosen[:max_visits]
+    # Pages whose HTML looks like a JavaScript shell are rendered in the browser too (CrawlPulse crawling engine §3:
+    # Playwright only where hydration is needed), up to QC6_RENDER_MAX of them, and they go FIRST so the visit limit
+    # never squeezes them out; the rendered page is compared with the raw HTML (content / links only after JS).
+    js = [r for r in rows if r["url"] not in seen and (r["facts"] or {}).get("js_rendering_suspected")][:RENDER_MAX]
+    chosen = (js + chosen)[:max(max_visits, len(js))]
     return [VisitTarget(r["url"], "mobile" if rng.random() < mobile_share else "desktop", r["template_id"], dict(r["facts"] or {}))
             for r in chosen]
+
+
+RENDER_MAX = int(os.environ.get("QC6_RENDER_MAX", "50"))
 
 
 def findings_from(results: List[VisitResult], host: str) -> Dict[str, Any]:

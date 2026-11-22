@@ -19,7 +19,7 @@ export function TodayView({ site }: { site: Site; params: URLSearchParams }) {
   if (t.error) return <ErrorBox text={t.error} onRetry={t.reload} />;
   if (!t.data) return <p className="faint">Loading…</p>;
   const d = t.data;
-  const running = d.last_run && ["queued", "running", "pausing", "paused"].includes(d.last_run.status);
+  const running = d.last_run && ["queued", "running", "pausing", "paused", "cancelling"].includes(d.last_run.status);
   const changedTpl: any[] = d.last_run?.summary?.templates_changed || [];
   const change = d.kpis.score_change == null ? null : Math.round(d.kpis.score_change);
 

@@ -1,6 +1,6 @@
 """Built-in sign-in (QC6_AUTH=local), for running QC without an identity provider. CrawlPulse FEAT-20-03.
 
-* Passwords: scrypt (N=2^15, r=8, p=1, 16-byte salt), compared in constant time; at least 10 characters.
+* Passwords: Argon2id (64 MiB, t=3, p=4); older scrypt hashes still verify and are upgraded at the next sign-in.
 * Sessions: 32 random bytes in an HttpOnly, SameSite=Strict cookie (Secure unless QC6_COOKIE_SECURE=false for plain
   http on your own machine). The database keeps only the token's SHA-256. 12 h idle, 7 days at most; sign-out ends it.
 * Two-factor: TOTP (RFC 6238: SHA-1, 6 digits, 30 s, +-1 step), secret encrypted with QC6_SECRET_KEY, a code can't be
@@ -39,22 +39,59 @@ class AuthFailed(Exception):
 
 
 # ------------------------------------------------------------------ passwords
+_PH = None
+
+
+def _ph():
+    """Argon2id (CrawlPulse backend §: memory-hard, the OWASP first choice): 64 MiB, 3 passes, 4 lanes."""
+    global _PH
+    if _PH is None:
+        from argon2 import PasswordHasher
+        _PH = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=4)
+    return _PH
+
+
 def hash_password(pw: str) -> str:
     if len(pw or "") < MIN_PASSWORD:
         raise AuthFailed(400, "Choose a longer password", f"Use at least {MIN_PASSWORD} characters; a short sentence works well.")
-    salt = secrets.token_bytes(16)
-    h = hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)
-    return f"scrypt$15$8$1${base64.b64encode(salt).decode()}${base64.b64encode(h).decode()}"
+    return _ph().hash(pw)
+
+
+def _scrypt(pw: bytes, salt: bytes, n: int, r: int, p: int) -> bytes:
+    return hashlib.scrypt(pw, salt=salt, n=n, r=r, p=p, maxmem=64 * 1024 * 1024, dklen=32)
 
 
 def check_password(pw: str, stored: Optional[str]) -> bool:
-    if not stored or not stored.startswith("scrypt$"):
-        hashlib.scrypt(b"x", salt=b"0" * 16, n=2 ** 15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)   # same time either way
-        return False
-    _, n, r, p, salt, h = stored.split("$")
-    got = hashlib.scrypt((pw or "").encode(), salt=base64.b64decode(salt), n=2 ** int(n), r=int(r), p=int(p),
-                         maxmem=64 * 1024 * 1024, dklen=32)
-    return hmac.compare_digest(got, base64.b64decode(h))
+    """Argon2id hashes, and scrypt hashes made by earlier versions (upgraded on the next sign-in, see needs_rehash)."""
+    from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+    if stored and stored.startswith("$argon2"):
+        try:
+            return _ph().verify(stored, pw or "")
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+    if stored and stored.startswith("scrypt$"):
+        _, n, r, p, salt, h = stored.split("$")
+        got = _scrypt((pw or "").encode(), base64.b64decode(salt), 2 ** int(n), int(r), int(p))
+        return hmac.compare_digest(got, base64.b64decode(h))
+    try:                                                # unknown e-mail: spend the same time as a real check
+        _ph().verify(_dummy(), pw or "")
+    except Exception:
+        pass
+    return False
+
+
+def needs_rehash(stored: Optional[str]) -> bool:
+    return bool(stored) and (not stored.startswith("$argon2") or _ph().check_needs_rehash(stored))
+
+
+_DUMMY: Optional[str] = None
+
+
+def _dummy() -> str:
+    global _DUMMY
+    if _DUMMY is None:
+        _DUMMY = _ph().hash(secrets.token_urlsafe(16))
+    return _DUMMY
 
 
 # ------------------------------------------------------------------ TOTP (RFC 6238)
@@ -131,6 +168,8 @@ async def login(pool, email: str, password: str, ip: str, ua: str) -> Dict[str, 
                                0 if n >= LOCK_AFTER else n, now + LOCK_FOR if n >= LOCK_AFTER else None)
         raise AuthFailed(401, "Wrong e-mail or password")
     await pool.execute("UPDATE members SET failed_logins = 0, locked_until = NULL WHERE id = $1", m["id"])
+    if needs_rehash(m["password_hash"]):             # an older scrypt hash: upgrade to Argon2id now that we have the password
+        await pool.execute("UPDATE members SET password_hash = $2 WHERE id = $1", m["id"], _ph().hash(password))
     token = secrets.token_urlsafe(32)
     two = bool(m["totp_secret"])
     await pool.execute("""INSERT INTO sessions (token_hash, member_id, two_factor_ok, expires_at, ip, user_agent)
@@ -206,3 +245,61 @@ async def enable_two_factor(pool, member_id: int, secret: str, code: str) -> Lis
 
 async def disable_two_factor(pool, member_id: int) -> None:
     await pool.execute("UPDATE members SET totp_secret = NULL, recovery_codes = NULL, totp_last_step = NULL WHERE id = $1", member_id)
+
+
+# ------------------------------------------------------------------ forgot password (e-mail)
+RESET_FOR = timedelta(minutes=30)
+
+
+def mail_configured() -> bool:
+    return bool(os.environ.get("QC6_SMTP_HOST") and os.environ.get("QC6_PUBLIC_URL"))
+
+
+def _send_mail(to: str, subject: str, text: str) -> None:
+    """Plain SMTP with STARTTLS (QC6_SMTP_HOST, QC6_SMTP_PORT=587, QC6_SMTP_USER, QC6_SMTP_PASSWORD, QC6_MAIL_FROM)."""
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["From"] = os.environ.get("QC6_MAIL_FROM") or os.environ.get("QC6_SMTP_USER") or "qc@localhost"
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(text)
+    port = int(os.environ.get("QC6_SMTP_PORT", "587"))
+    with smtplib.SMTP(os.environ["QC6_SMTP_HOST"], port, timeout=20) as s:
+        if port != 25 or os.environ.get("QC6_SMTP_STARTTLS", "true").lower() != "false":
+            s.starttls(context=ssl.create_default_context())
+        if os.environ.get("QC6_SMTP_USER"):
+            s.login(os.environ["QC6_SMTP_USER"], os.environ.get("QC6_SMTP_PASSWORD", ""))
+        s.send_message(msg)
+
+
+_mail = _send_mail          # tests replace this
+
+
+async def request_reset(pool, email: str, ip: str) -> None:
+    """Always looks the same from outside (no way to learn which e-mails have accounts). With a matching account and
+    mail configured, sends a one-time link valid for 30 minutes."""
+    _rate(ip)
+    m = await pool.fetchrow("SELECT id, email FROM members WHERE lower(email) = lower($1) ORDER BY id LIMIT 1", (email or "").strip())
+    if m is None or not mail_configured():
+        hashlib.scrypt(b"x", salt=b"0" * 16, n=2 ** 14, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)    # similar time
+        return
+    token = secrets.token_urlsafe(32)
+    await pool.execute("DELETE FROM password_resets WHERE member_id = $1 OR expires_at < now()", m["id"])
+    await pool.execute("INSERT INTO password_resets (token_hash, member_id, expires_at) VALUES ($1, $2, $3)",
+                       _hash(token), m["id"], datetime.now(timezone.utc) + RESET_FOR)
+    link = os.environ["QC6_PUBLIC_URL"].rstrip("/") + "/#/reset?token=" + urllib.parse.quote(token)
+    import asyncio
+    await asyncio.to_thread(_mail, m["email"], "Reset your QC password",
+                            "Someone (hopefully you) asked to reset your QC password.\n\n"
+                            f"Choose a new one here within 30 minutes:\n{link}\n\n"
+                            "If it wasn't you, ignore this e-mail: your password stays as it is.")
+
+
+async def reset_password(pool, token: str, new: str) -> None:
+    hash_password(new)                                    # a too-short password must not use up the link
+    row = await pool.fetchrow("DELETE FROM password_resets WHERE token_hash = $1 RETURNING member_id, expires_at", _hash(token or ""))
+    if row is None or row["expires_at"] < datetime.now(timezone.utc):
+        raise AuthFailed(400, "This reset link can't be used", "It was used already or is older than 30 minutes. Ask for a new one.")
+    await set_password(pool, row["member_id"], new)        # also ends every session of that account

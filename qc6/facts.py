@@ -24,7 +24,8 @@ LINKS_SQL = """
 SELECT r.source_page_url, r.found_url, r.normalized_found_url AS url, r.found_url_type AS kind, r.found_url_scope AS scope,
        COALESCE(r.anchor_text, '') AS anchor_text, r.occurrence_count AS occurrences, COALESCE(r.representative_location, '') AS location,
        c.http_status, c.initial_http_status, COALESCE(c.final_url, '') AS final_url, COALESCE(c.redirect_count, 0) AS redirects,
-       COALESCE(c.status_bucket, '') AS status_bucket, COALESCE(c.response_time_ms, 0) AS response_ms
+       COALESCE(c.status_bucket, '') AS status_bucket, COALESCE(c.response_time_ms, 0) AS response_ms,
+       COALESCE(r.rel, '') AS rel, CASE WHEN lower(COALESCE(r.rel, '')) LIKE '%nofollow%' THEN 1 ELSE 0 END AS nofollow
   FROM on_page_link_relationships r
   LEFT JOIN on_page_validation_cache c ON c.job_id = r.job_id AND c.normalized_url = r.normalized_found_url
  WHERE r.job_id = ? AND r.id > ? ORDER BY r.id LIMIT ?"""
@@ -40,7 +41,8 @@ SELECT r.source_page_url, r.image_url, r.normalized_image_url AS url, r.image_ty
 LINK_SCHEMA = pa.schema([("source_page_url", pa.string()), ("found_url", pa.string()), ("url", pa.string()), ("kind", pa.string()),
                          ("scope", pa.string()), ("anchor_text", pa.string()), ("occurrences", pa.int32()), ("location", pa.string()),
                          ("http_status", pa.int32()), ("initial_http_status", pa.int32()), ("final_url", pa.string()),
-                         ("redirects", pa.int32()), ("status_bucket", pa.string()), ("response_ms", pa.float64())])
+                         ("redirects", pa.int32()), ("status_bucket", pa.string()), ("response_ms", pa.float64()),
+                         ("rel", pa.string()), ("nofollow", pa.int32())])
 IMAGE_SCHEMA = pa.schema([("source_page_url", pa.string()), ("image_url", pa.string()), ("url", pa.string()), ("kind", pa.string()),
                           ("scope", pa.string()), ("alt_present", pa.int32()), ("alt_text", pa.string()), ("width", pa.string()),
                           ("height", pa.string()), ("loading", pa.string()), ("occurrences", pa.int32()), ("http_status", pa.int32()),
@@ -106,13 +108,15 @@ FILTERS = {
     "internal": "scope = 'INTERNAL'",
     "ok": "http_status BETWEEN 200 AND 299 AND redirects = 0",
     "missing_alt": "alt_present = 0",
+    "nofollow": "nofollow = 1",                       # per-link rel=nofollow (CrawlPulse link graph: is_nofollow on every edge)
 }
 IMAGE_FILTERS = {**FILTERS, "redirect": "http_status BETWEEN 300 AND 399",
                  "ok": "http_status BETWEEN 200 AND 299"}
 
 
 def _filters(dataset: str) -> Dict[str, str]:
-    return IMAGE_FILTERS if dataset == "images" else {k: v for k, v in FILTERS.items() if k != "missing_alt"}
+    return ({k: v for k, v in IMAGE_FILTERS.items() if k != "nofollow"} if dataset == "images"
+            else {k: v for k, v in FILTERS.items() if k != "missing_alt"})
 
 
 SORTS = {"page": "source_page_url", "url": "url", "status": "http_status", "occurrences": "occurrences"}
@@ -137,6 +141,8 @@ def query(run_id: int, dataset: str, flt: str = "", q: str = "", page_url: str =
     if flt:
         if flt not in _filters(dataset):
             raise ValueError("unknown filter")
+        if flt == "nofollow" and "nofollow" not in pq.read_schema(path).names:
+            raise ValueError("This check was made before nofollow links were recorded; run a new check")
         where.append(f"({_filters(dataset)[flt]})")
     if q:
         where.append("(url ILIKE ? OR source_page_url ILIKE ?)")
@@ -166,7 +172,8 @@ def export_csv(run_id: int, dataset: str, dest: str, flt: str = "") -> int:
     if not os.path.exists(path):
         raise FileNotFoundError(dataset)
     w = f"WHERE {_filters(dataset)[flt]}" if flt in _filters(dataset) else ""
-    schema = LINK_SCHEMA if dataset == "links" else IMAGE_SCHEMA
+    have = set(pq.read_schema(path).names)          # checks made before a column existed export without it
+    schema = [f for f in (LINK_SCHEMA if dataset == "links" else IMAGE_SCHEMA) if f.name in have]
     # Spreadsheet formula injection: a text cell starting with = + - @ tab or CR gets a leading apostrophe (as in V5).
     cols = ", ".join(
         "CASE WHEN regexp_matches(\"%s\", '^[=+@\\t\\r-]') THEN chr(39) || \"%s\" ELSE \"%s\" END AS \"%s\"" % ((f.name,) * 4)

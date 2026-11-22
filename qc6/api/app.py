@@ -9,6 +9,9 @@ import asyncio
 import json
 import os
 import re
+import uuid
+import traceback
+import logging
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -22,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from qc6 import services
 from qc6.crawl import challenge
+from qc6.logs import REQUEST_ID
 from qc6.db.pool import close_pool, get_pool
 from qc6.domain import rules as R
 from qc6.settings import settings
@@ -112,10 +116,44 @@ def _start_problem(e: Exception) -> HTTPException:
     return problem(409, "This check can't start", str(e))
 
 
+def _code(title: str, status: int) -> str:
+    """A stable machine code for a problem, from its title: "Run not found" -> RUN_NOT_FOUND."""
+    c = re.sub(r"[^A-Z0-9]+", "_", (title or "").upper()).strip("_")[:60]
+    return c or f"HTTP_{status}"
+
+
 @app.exception_handler(HTTPException)
 async def _http_exc(request: Request, exc: HTTPException):
-    body = exc.detail if isinstance(exc.detail, dict) else {"title": str(exc.detail)}
+    body = dict(exc.detail) if isinstance(exc.detail, dict) else {"title": str(exc.detail)}
+    body.setdefault("status", exc.status_code)
+    body.setdefault("code", _code(body.get("title", ""), exc.status_code))
+    body["request_id"] = getattr(request.state, "request_id", None)
     return JSONResponse(body, status_code=exc.status_code, media_type="application/problem+json")
+
+
+@app.exception_handler(Exception)
+async def _unexpected(request: Request, exc: Exception):
+    rid = getattr(request.state, "request_id", None)
+    logging.getLogger("qc6.api").error("request %s failed: %s", rid, traceback.format_exc())
+    return JSONResponse({"title": "Something went wrong on the server", "status": 500, "code": "INTERNAL_ERROR",
+                         "detail": f"Quote this reference if you report it: {rid}", "request_id": rid},
+                        status_code=500, media_type="application/problem+json")
+
+
+@app.middleware("http")
+async def request_id(request: Request, call_next):
+    """Every request gets an id (kept from X-Request-ID when a proxy sent a sane one), returned in the X-Request-ID
+    header and in every problem body, and stamped on every log line written while it runs."""
+    given = request.headers.get("x-request-id", "")
+    rid = given if re.fullmatch(r"[A-Za-z0-9._:-]{8,64}", given) else uuid.uuid4().hex[:16]
+    request.state.request_id = rid
+    token = REQUEST_ID.set(rid)
+    try:
+        resp = await call_next(request)
+    finally:
+        REQUEST_ID.reset(token)
+    resp.headers["X-Request-ID"] = rid
+    return resp
 
 
 # ------------------------------------------------------------------ identity
@@ -720,6 +758,11 @@ async def _run_transition(run_id: int, me, src: tuple, dst: str, title: str, det
             raise problem(404, "Check not found")
         raise problem(409, title, detail or f"It is {cur} now.")
     await services.log(pool, me["workspace_id"], me["id"], f"run.{dst}", f"run:{run_id}", {})
+    from qc6 import events
+    who = me.get("name") or me["email"]
+    await events.record(pool, run_id, f"asked_{dst}", {
+        "pausing": f"Pause asked by {who}; finishing the pages in hand", "paused": f"Paused by {who} before it started",
+        "queued": f"Resumed by {who}", "cancelling": f"Cancel asked by {who}; stopping", "cancelled": f"Cancelled by {who}"}.get(dst, dst))
     if dst in ("cancelled", "paused"):
         async with pool.acquire() as conn:
             from qc6.workers.analysis import notify
@@ -743,9 +786,51 @@ async def resume_run(run_id: int, me=Depends(current_member)):
 
 @app.post("/api/v2/runs/{run_id}/stop")
 async def stop_run(run_id: int, me=Depends(current_member)):
-    """Cancel at any point before it finishes. A running check stops within a few seconds; pages already checked stay."""
-    return await _run_transition(run_id, me, ("queued", "running", "pausing", "paused"), "cancelled",
-                                 "This check has already finished", "")
+    """Cancel at any point before it finishes. Waiting or paused: cancelled at once. Running: 'cancelling' while the
+    worker stops at its checkpoint (seconds), then 'cancelled'. Pages already checked stay."""
+    try:
+        return await _run_transition(run_id, me, ("queued", "paused"), "cancelled", "", "")
+    except HTTPException:
+        return await _run_transition(run_id, me, ("running", "pausing"), "cancelling", "This check has already finished", "")
+
+
+@app.post("/api/v2/runs/{run_id}/retry")
+async def retry_run(run_id: int, me=Depends(current_member)):
+    """A failed check back in the queue (CrawlPulse: FAILED -> QUEUED by an operator). It resumes from its checkpoint:
+    pages already checked aren't fetched again."""
+    can_edit(me)
+    pool = await get_pool()
+    site_id = await pool.fetchval("SELECT r.site_id FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                                  run_id, me["workspace_id"])
+    if site_id is None:
+        raise problem(404, "Check not found")
+    busy = await pool.fetchrow("SELECT id, status FROM runs WHERE site_id = $1 AND id <> $2 AND status IN "
+                               "('queued','running','pausing','paused','cancelling')", site_id, run_id)
+    if busy:
+        raise _start_problem(services.Busy(f"Check {busy['id']} of this site isn't finished. Let it finish, or cancel it first.",
+                                           busy["id"], busy["status"]))
+    row = await pool.fetchrow("UPDATE runs SET status = 'queued', attempts = 0, error = NULL, finished_at = NULL, worker_id = NULL "
+                              "WHERE id = $1 AND status = 'failed' RETURNING id", run_id)
+    if row is None:
+        raise problem(409, "Only a check that stopped with an error can be retried")
+    await services.log(pool, me["workspace_id"], me["id"], "run.retry", f"run:{run_id}", {})
+    from qc6 import events
+    await events.record(pool, run_id, "retry", f"Retried by {me.get('name') or me['email']}; it resumes from its checkpoint")
+    return {"status": "queued"}
+
+
+@app.get("/api/v2/runs/{run_id}/timeline")
+async def run_timeline(run_id: int, me=Depends(current_member)):
+    """What happened to a check (events) and how fast it went (pages, errors and response time per minute)."""
+    pool = await get_pool()
+    ok = await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                             run_id, me["workspace_id"])
+    if not ok:
+        raise problem(404, "Check not found")
+    ev = await pool.fetch("SELECT kind, message, data, created_at FROM run_events WHERE run_id = $1 ORDER BY id DESC LIMIT 200", run_id)
+    mins = await pool.fetch("SELECT minute, pages, errors, CASE WHEN pages > 0 THEN round((latency_ms_sum / pages)::numeric, 0) END AS avg_ms "
+                            "FROM run_minutes WHERE run_id = $1 ORDER BY minute DESC LIMIT 240", run_id)
+    return {"events": [dict(e) for e in ev], "minutes": [dict(m) for m in reversed(mins)]}
 
 
 # ------------------------------------------------------------------ the simple flow: URL list -> Start crawling -> report
@@ -1028,6 +1113,38 @@ async def auth_password(body: PasswordIn, request: Request, me=Depends(current_m
         raise problem(e.status, e.title, e.detail)
     await services.log(pool, me["workspace_id"], me["id"], "auth.password", f"member:{me['id']}", {})
     return {"ok": True, "other_sessions_ended": True}
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(max_length=200)
+    password: str = Field(max_length=500)
+
+
+@app.post("/api/v2/auth/forgot")
+async def auth_forgot(body: ForgotIn, request: Request):
+    """Send a reset link if the e-mail has an account and mail is set up. The answer is the same either way."""
+    from qc6 import local_auth
+    _local_only()
+    try:
+        await local_auth.request_reset(await get_pool(), body.email, request.client.host if request.client else "")
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    return {"ok": True, "mail": local_auth.mail_configured()}
+
+
+@app.post("/api/v2/auth/reset")
+async def auth_reset(body: ResetIn):
+    from qc6 import local_auth
+    _local_only()
+    try:
+        await local_auth.reset_password(await get_pool(), body.token, body.password)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    return {"ok": True}
 
 
 @app.post("/api/v2/auth/2fa/setup")
@@ -1341,11 +1458,29 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
 
 
+@app.get("/api/v2/runs/{run_id}/package.zip")
+async def run_package(run_id: int, me=Depends(current_member)):
+    """Every data file of a check as CSV, in one ZIP (the V5 package: all link relationships, unique URLs, broken,
+    redirect and external URLs, images, SEO page audit, sitemap audit, issues, reconciliation)."""
+    pool = await get_pool()
+    r = await pool.fetchrow("SELECT r.id, r.summary, s.primary_host FROM runs r JOIN sites s ON s.id = r.site_id "
+                            "WHERE r.id = $1 AND s.workspace_id = $2", run_id, me["workspace_id"])
+    if r is None:
+        raise problem(404, "Check not found")
+    path = (r["summary"] or {}).get("zip")
+    base = os.path.realpath(os.path.join(settings.data_dir, "runs", str(run_id)))
+    if not path or not os.path.realpath(path).startswith(base + os.sep) or not os.path.exists(path):
+        raise problem(404, "No data package for this check", "It is made when a page check finishes.")
+    await services.log(pool, me["workspace_id"], me["id"], "report.package", f"run:{run_id}", {})
+    host = re.sub(r"[^a-z0-9.-]+", "-", r["primary_host"].lower())
+    return FileResponse(path, filename=f"qc-data-{host}-check-{run_id}.zip", media_type="application/zip")
+
+
 @app.get("/api/v2/sites/{site_id}/export.{fmt}")
 async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
     """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
     from qc6 import export as ex
-    if fmt not in ("csv", "xlsx", "zip"):
+    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx"):
         raise problem(404, "Not found")
     s = await site_for(site_id, me)
     pool = await get_pool()
@@ -1359,7 +1494,11 @@ async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=De
     if fmt == "zip":
         path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
         return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
-    path = await ex.xlsx_file(pool, s, rid)
+    if fmt == "workbook.xlsx":                  # the full workbook, V5 layout: many sheets
+        path = await ex.workbook_file(pool, s, rid)
+        name = name.replace("qc-report-", "qc-audit-workbook-").replace(".workbook.xlsx", ".xlsx")
+    else:
+        path = await ex.xlsx_file(pool, s, rid)
     return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1552,8 +1691,9 @@ async def access_test(site_id: int, me=Depends(current_member)):
         hook = httpx_hook(s)
     except AccessError as e:
         raise problem(400, "The staging login can't be used", str(e))
+    from qcv5.crawler.safe_net import safe_transport
     async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": f"Mozilla/5.0 {settings.ua_suffix}"},
-                                 event_hooks={"request": [hook]}) as c:
+                                 event_hooks={"request": [hook]}, transport=safe_transport(settings.allow_private_targets)) as c:
         for i in range(20):
             try:
                 r = await c.get(s["base_url"] + "/")

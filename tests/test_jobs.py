@@ -133,7 +133,7 @@ def test_pause_resume_cancel_while_running(env):
         task = asyncio.create_task(execute_run(pool, rid))
         await asyncio.sleep(2.5)
         r = await asyncio.to_thread(c.post, f"/api/v2/runs/{rid}/stop", headers=H)
-        assert r.json()["status"] == "cancelled"
+        assert r.json()["status"] == "cancelling"                      # stopping; "cancelled" once the worker has stopped
         t0 = time.monotonic()
         await asyncio.wait_for(task, 30)
         stopped_in = time.monotonic() - t0
@@ -198,3 +198,201 @@ def test_missing_package_message(env, monkeypatch):
     monkeypatch.setattr(R, "discover_urls", boom)
     j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
     assert j["status"] == "failed" and "isn't installed (numpy)" in j["error"] and "start.bat" in j["error"]
+
+
+def test_timeline_minutes_retry_and_request_ids(env):
+    """P2/P3 operations: the check's timeline and per-minute figures, retry of a failed check, request ids and codes."""
+    c, site, dsn = env
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def go():
+        pool = await _pool(dsn)
+        await pool.execute("UPDATE sites SET settings = settings || '{\"rate_rps\": 40}'::jsonb")
+        await execute_run(pool, rid)
+        # make it a failed check, as a crash would, then retry it
+        await pool.execute("UPDATE runs SET status = 'failed', error = 'boom' WHERE id = $1", rid)
+        await pool.close()
+    asyncio.run(go())
+    t = c.get(f"/api/v2/runs/{rid}/timeline").json()
+    kinds = [e["kind"] for e in t["events"]]
+    assert {"created", "started", "stage", "completed"} <= set(kinds)
+    assert sum(m["pages"] for m in t["minutes"]) > 0 and all("avg_ms" in m for m in t["minutes"])
+    r = c.post(f"/api/v2/runs/{rid}/retry", headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "queued"
+    assert c.get(f"/api/v2/runs/{rid}/timeline").json()["events"][0]["kind"] == "retry"
+    again = c.post(f"/api/v2/runs/{rid}/retry", headers=H)
+    assert again.status_code == 409 and again.json()["code"] and again.json()["request_id"]
+    assert c.post(f"/api/v2/runs/{rid}/stop", headers=H).json()["status"] == "cancelled"
+    # request ids: echoed when sane, made up otherwise, and on every problem body
+    ok = c.get("/api/v2/worker", headers={"X-Request-ID": "trace-12345678"})
+    assert ok.headers["X-Request-ID"] == "trace-12345678"
+    bad = c.get("/api/v2/runs/999999/timeline", headers={"X-Request-ID": "<script>"})
+    assert bad.status_code == 404 and bad.headers["X-Request-ID"] != "<script>" and bad.json()["code"] == "CHECK_NOT_FOUND"
+    assert bad.json()["request_id"] == bad.headers["X-Request-ID"]
+
+
+def test_cancelling_with_a_dead_worker_becomes_cancelled_and_pruning(env):
+    c, site, dsn = env
+    from qc6.workers.runner import prune
+
+    async def go():
+        pool = await _pool(dsn)
+        sid = await pool.fetchval("SELECT id FROM sites ORDER BY id LIMIT 1")
+        rid = await pool.fetchval("INSERT INTO runs (site_id, kind, status, worker_id, heartbeat_at, started_at) "
+                                  "VALUES ($1, 'coverage', 'cancelling', 'dead-w', now(), now()) RETURNING id", sid)
+        await pool.execute("INSERT INTO workers (id, last_seen) VALUES ('dead-w', now() - interval '10 minutes') ON CONFLICT DO NOTHING")
+        got = {r["id"]: r["status"] for r in await recover_stale(pool)}
+        fin = await pool.fetchval("SELECT finished_at FROM runs WHERE id = $1", rid)
+        # old figures go, recent ones stay; the check itself is never touched
+        await pool.execute("INSERT INTO run_minutes (run_id, minute, pages) VALUES ($1, now() - interval '200 days', 5), ($1, now(), 7)", rid)
+        await pool.execute("INSERT INTO run_events (run_id, kind, message, created_at) VALUES ($1, 'x', 'old', now() - interval '200 days')", rid)
+        pruned = await prune(pool, days=90)
+        left = await pool.fetchval("SELECT sum(pages) FROM run_minutes WHERE run_id = $1", rid)
+        still = await pool.fetchval("SELECT count(*) FROM runs WHERE id = $1", rid)
+        await pool.close()
+        return rid, got, fin, pruned, left, still
+    rid, got, fin, pruned, left, still = asyncio.run(go())
+    assert got[rid] == "cancelled" and fin is not None
+    assert pruned["minutes"] == 1 and pruned["events"] >= 1 and left == 7 and still == 1
+
+
+def test_dedup_key_and_streaming_sitemap():
+    from qc6.url_lists import dedup_key, dedupe
+    assert dedup_key("HTTPS://Shop.example:443/p?b=2&a=1&utm_source=x&gclid=1#top") == "https://shop.example/p?a=1&b=2"
+    assert dedup_key("https://shop.example/p?color=red") != dedup_key("https://shop.example/p?color=blue")
+    keep, dropped = dedupe(["https://s.ex/p?a=1&b=2", "https://s.ex/p?b=2&a=1&fbclid=z", "https://s.ex/p"])
+    assert keep == ["https://s.ex/p?a=1&b=2", "https://s.ex/p"] and dropped == 1
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine"))
+    from qcv5.crawler.sitemap_extractor import SitemapExtractor
+    xml = (b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">'
+           + b"".join(b'<url><loc>https://s.ex/en/%d</loc><xhtml:link rel="alternate" hreflang="hi" href="https://s.ex/hi/%d"/></url>' % (i, i)
+                      for i in range(3000)) + b"</urlset>")
+    r = SitemapExtractor()._stream_parse(xml, "https://s.ex/sitemap.xml", chunk=4096)
+    assert len(r["urls"]) == 3000 and r["urls"][5]["alternates"] == [{"hreflang": "hi", "href": "https://s.ex/hi/5"}]
+    with pytest.raises(ValueError, match="nesting"):
+        SitemapExtractor()._stream_parse(b"<urlset>" + b"<a>" * 60 + b"</a>" * 60 + b"</urlset>", "")
+
+
+SAMPLE_SHEETS = ["Executive Summary", "Sitemap Progress", "Business Summary", "Language Summary", "Page Type Summary",
+                 "Destination Status", "Source Page Issues", "Destination Issues", "External URLs (Unique)", "Validation Cache Reuse"]
+
+
+def test_full_workbook_like_the_v5_sample(env):
+    """The full workbook has the V5 sample's sheets and columns, filled from the crawl; plus QC's problems and the CSV package."""
+    import openpyxl
+    c, site, dsn = env
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def go():
+        pool = await _pool(dsn)
+        await pool.execute("UPDATE sites SET settings = settings || '{\"rate_rps\": 40}'::jsonb")
+        await execute_run(pool, rid)
+        await pool.close()
+    asyncio.run(go())
+    r = c.get(f"/api/v2/sites/{j['site_id']}/export.workbook.xlsx?run={rid}")
+    assert r.status_code == 200, r.text
+    assert "qc-audit-workbook-" in r.headers["content-disposition"]
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), read_only=True)
+    names = wb.sheetnames
+    assert all(n in names for n in SAMPLE_SHEETS) and "QC Problems" in names and "QC Problem Pages" in names, names
+    rows = lambda n: [list(x) for x in wb[n].iter_rows(values_only=True)]                       # noqa: E731
+    ex = {x[0]: x[1] for x in rows("Executive Summary") if x and len(x) > 1}
+    assert ex["Source pages total (sitemap inventory)"] == 90 and ex["Source pages completed (HTTP fetched & parsed)"] == 90
+    assert ex["Crawl State"] == "COMPLETED" and ex["Check ID"] == f"#{rid}"
+    sm = rows("Sitemap Progress")
+    assert sm[0] == ["Sitemap #", "Sitemap URL", "Assigned Unique", "Processed", "Pending", "Completed", "Failed", "Blocked",
+                     "Timed Out", "Completion %", "Relationships Extracted"]
+    assert sm[1][1] == site.base + "/sitemap.xml" and sm[1][2] == 90 and sm[1][9] == 100.0      # each page knows its sitemap
+    assert rows("Business Summary")[0] == ["Business", "Source Pages Processed", "Completed", "Failed", "Blocked", "Timed Out",
+                                          "Relationships Extracted"]
+    assert sum(x[1] for x in rows("Page Type Summary")[1:]) == 90
+    dest = rows("Destination Status")
+    assert dest[0] == ["Status Bucket", "Unique HTTP Destinations", "Share %"] and dest[1][0] == "2xx"
+    assert rows("Destination Issues")[0][:3] == ["normalized_url", "url_scope", "validation_state"]
+    assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
+    assert len(rows("QC Problem Pages")) > 1 and rows("QC Problem Pages")[1][7] in ("New",) or "Seen before" in rows("QC Problem Pages")[1][7]
+    pkg = c.get(f"/api/v2/runs/{rid}/package.zip")
+    assert pkg.status_code == 200
+    import zipfile
+    names = zipfile.ZipFile(io.BytesIO(pkg.content)).namelist()
+    assert any(n.endswith("03_url_audit.csv") for n in names) and any(n.endswith("07_broken_urls.csv") for n in names)
+
+
+def test_sitemap_hreflang_sheet(tmp_path):
+    """Sitemap hreflang alternates that don't answer 200 are listed, with a plain remark."""
+    import gzip
+    import json
+    import sqlite3
+    from qc6 import workbook
+    db = tmp_path / "c.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE on_page_validation_cache (job_id, normalized_url, http_status, status_bucket)")
+    con.execute("CREATE TABLE on_page_source_pages (job_id, normalized_source_url, http_status)")
+    con.executemany("INSERT INTO on_page_validation_cache VALUES ('RUN1', ?, ?, ?)",
+                    [("https://s.ex/hi/1", 200, "2xx"), ("https://s.ex/hi/2", 404, "4xx"), ("https://s.ex/hi/3", 301, "3xx")])
+    con.commit()
+    f = tmp_path / "alt.json.gz"
+    with gzip.open(f, "wt") as g:
+        json.dump([["https://s.ex/en/1", "hi", "https://s.ex/hi/1"], ["https://s.ex/en/2", "hi", "https://s.ex/hi/2"],
+                   ["https://s.ex/en/3", "hi", "https://s.ex/hi/3"], ["https://s.ex/en/4", "hi", "https://s.ex/hi/4"]], g)
+    out = list(workbook._alternates({"options": {"_alternates_file": str(f)}}, con, "RUN1"))
+    assert [r[2] for r in out] == ["https://s.ex/hi/2", "https://s.ex/hi/3", "https://s.ex/hi/4"]
+    assert "broken" in out[0][5] and "redirects" in out[1][5] and "not checked" in out[2][5]
+
+
+def test_nofollow_links_and_html_archive(env, monkeypatch):
+    """Per-link rel=nofollow is kept with every link; QC6_KEEP_HTML=true keeps each page's HTML, gzipped, with an index."""
+    import csv
+    import gzip
+    from qc6 import facts
+    from qc6.settings import settings
+    c, site, dsn = env
+    monkeypatch.setenv("QC6_KEEP_HTML", "true")
+    one = c.post("/api/v2/lists", json={"source": "single", "url": site.base + "/product/2"}, headers=H).json()
+    rid = c.post(f"/api/v2/lists/{one['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def go():
+        pool = await _pool(dsn)
+        await execute_run(pool, rid)
+        await pool.close()
+    asyncio.run(go())
+    got = facts.query(rid, "links", "", "", "", "page", False, 0, 500)
+    assert got["rows"] and all("rel" in r and "nofollow" in r for r in got["rows"])
+    # a page with a real nofollow link, on its own little server
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    class NF(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (b"<html><head><title>Nofollow test page for QC</title></head><body><h1>Hi</h1>"
+                    b'<a rel="nofollow sponsored" href="/paid">Paid</a> <a href="/free">Free</a></body></html>')
+            self.send_response(200 if self.path in ("/", "/paid", "/free") else 404)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.2", 0), NF)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.2:{srv.server_address[1]}"
+    lid = c.post("/api/v2/lists", json={"source": "single", "url": base + "/"}, headers=H).json()["id"]
+    rid2 = c.post(f"/api/v2/lists/{lid}/start", json={}, headers=H).json()["run_id"]
+
+    async def go2():
+        pool = await _pool(dsn)
+        await execute_run(pool, rid2)
+        await pool.close()
+    asyncio.run(go2())
+    srv.shutdown()
+    nf = facts.query(rid2, "links", "nofollow", "", "", "page", False, 0, 500)["rows"]
+    assert [r["url"] for r in nf] == [base + "/paid"] and nf[0]["rel"] == "nofollow sponsored"
+    hdir = os.path.join(settings.data_dir, "runs", str(rid), "html")
+    rows = list(csv.DictReader(open(os.path.join(hdir, "index.csv"))))
+    assert rows and rows[0]["url"].endswith("/product/2") and rows[0]["http_status"] == "200"
+    with gzip.open(os.path.join(hdir, rows[0]["file"]), "rt") as f:
+        assert "<html" in f.read().lower()

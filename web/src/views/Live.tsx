@@ -4,7 +4,7 @@ import { go } from "../main";
 import { fadeText, useViewMotion } from "../motion";
 import { Confirm, ErrorBox, Icon, Sev, ago, count, useLoad, useToast } from "../ui";
 
-const STATUS: Record<string, string> = { running: "Running", queued: "Waiting to start", pausing: "Pausing…", paused: "Paused",
+const STATUS: Record<string, string> = { running: "Running", queued: "Waiting to start", pausing: "Pausing…", paused: "Paused", cancelling: "Stopping…",
   completed: "Completed", failed: "Stopped", cancelled: "Cancelled" };
 const STEP_TEXT: Record<string, string> = {
   open: "Loading the page", settled: "Page settled", consent: "Answered the cookie banner", read: "Reading", scrolled: "Scrolling down",
@@ -33,7 +33,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
   }, [detail.data]);
 
   useEffect(() => {
-    if (!run || !["queued", "running", "pausing"].includes(run.status)) return;
+    if (!run || !["queued", "running", "pausing", "cancelling"].includes(run.status)) return;
     const es = new EventSource(`/api/v2/stream?run=${run.id}`);
     let lane = 0;
     const onProgress = (e: MessageEvent) => {
@@ -76,12 +76,13 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
   const p = run.progress || {};
   const pagesDone = p.pages_done ?? run.summary?.pages ?? 0, pagesTotal = p.pages_total ?? run.summary?.pages ?? 0;
   const visitsDone = p.visits_done ?? run.summary?.visited ?? 0, visitsTotal = p.visits_total ?? run.summary?.visits_planned ?? 0;
-  const live = ["queued", "running", "pausing"].includes(run.status);
-  const control = async (what: "pause" | "resume" | "cancel") => {
+  const live = ["queued", "running", "pausing", "cancelling"].includes(run.status);
+  const control = async (what: "pause" | "resume" | "cancel" | "retry") => {
     try {
       if (what === "pause") { await api.pauseRun(run.id); toast("Pausing. Visitors finish the page they're on; nothing already checked is lost."); }
       if (what === "resume") { await api.resumeRun(run.id); toast("Resuming where it stopped."); }
-      if (what === "cancel") { await api.cancelRun(run.id); toast("Check cancelled."); }
+      if (what === "cancel") { const r = await api.cancelRun(run.id); toast(r.status === "cancelling" ? "Stopping: the pages in hand finish, then it's cancelled." : "Check cancelled."); }
+      if (what === "retry") { await api.retryRun(run.id); toast("Back in the queue. It carries on from where it stopped."); }
       detail.reload(); runs.reload();
     } catch (e: any) { toast(e.detail || e.title || e.message); }
   };
@@ -89,7 +90,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
   const sentence = live
     ? (p.stage === "visits" ? `Visitors have checked ${count(visitsDone)} of ${count(visitsTotal)} sample pages in a real browser.`
       : `${count(pagesDone)} of ${count(pagesTotal)} pages checked.`)
-    : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked, ${count(run.summary?.visited)} visited in a real browser.`
+    : run.status === "paused" ? "Paused. Resume to carry on where it stopped." : run.status === "completed" ? `Finished ${ago(run.finished_at)}. ${count(run.summary?.pages)} pages checked${run.summary?.visited ? `, ${count(run.summary.visited)} visited in a real browser` : ""}.`
       : run.status === "failed" ? `This check stopped: ${run.error}` : `This check was ${run.status}.`;
   const imported = run.options?.imported_from === "QC V5";
   const spot = run.spot || run.options?.spot;
@@ -104,7 +105,8 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
         <div className="row">
           {run.status === "running" && <button className="btn" onClick={() => control("pause")}><Icon name="pause" />Pause</button>}
           {run.status === "paused" && <button className="btn primary" onClick={() => control("resume")}><Icon name="play" />Resume</button>}
-          {["paused", "queued"].includes(run.status) && <button className="btn quiet" onClick={() => control("cancel")}>Cancel</button>}
+          {["paused", "queued", "running", "pausing"].includes(run.status) && <button className="btn quiet" onClick={() => control("cancel")}>Cancel</button>}
+          {run.status === "failed" && <button className="btn primary" onClick={() => control("retry")}><Icon name="play" />Retry from where it stopped</button>}
           <span className={`pill ${run.status === "completed" ? "good" : run.status === "failed" ? "bad" : "warn"}`}>
             {STATUS[run.status] || run.status}</span>
         </div>
@@ -145,6 +147,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
           )}
         </div>
       </div>
+      <Timeline runId={run.id} live={live} />
       <div className="panel" data-reveal style={{ marginTop: 16 }}>
         <div className="panel-head"><h2>Past checks</h2><span className="faint" style={{ fontSize: 13 }}>the last 50</span></div>
         <div className="table-wrap flat" tabIndex={0} role="region" aria-label="Past checks">
@@ -159,7 +162,7 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
                 <td className="nowrap">{r.finished_at ? ago(r.finished_at) : "—"}</td>
                 <td className="num">{count(r.summary?.pages)}</td>
                 <td className="nowrap"><button className="btn quiet small" onClick={() => go("live", { run: r.id })}>Open</button>
-                  {!["running", "pausing"].includes(r.status) &&
+                  {!["running", "pausing", "cancelling"].includes(r.status) &&
                     <button className="btn quiet small" onClick={() => setToDelete(r)} aria-label={`Delete check ${r.id}`}>Delete</button>}</td>
               </tr>))}
             </tbody>
@@ -183,4 +186,44 @@ export function LiveView({ site, params }: { site: Site; params: URLSearchParams
 
 function safePath(u: string) {
   try { const x = new URL(u); return x.pathname + x.search; } catch { return u; }
+}
+
+
+/* What happened to this check and how fast it went, minute by minute (refreshes while it runs). */
+function Timeline({ runId, live }: { runId: number; live: boolean }) {
+  const t = useLoad(() => api.timeline(runId), [runId]);
+  useEffect(() => {
+    if (!live) return;
+    const i = window.setInterval(t.reload, 5000);
+    return () => window.clearInterval(i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, runId]);
+  if (!t.data || (t.data.events.length === 0 && t.data.minutes.length === 0)) return null;
+  const mins = t.data.minutes.slice(-30);
+  const peak = Math.max(1, ...mins.map((m) => m.pages));
+  return (
+    <div className="grid g-2" style={{ marginTop: 16 }}>
+      <div className="panel" data-reveal>
+        <div className="panel-head"><h2>Timeline</h2><span className="faint" style={{ fontSize: 13 }}>newest first</span></div>
+        <ol className="run-timeline" tabIndex={0} aria-label="Timeline of this check">
+          {t.data.events.slice(0, 30).map((e, i) => (
+            <li key={i} className={`ev-${e.kind}`}><time dateTime={e.created_at}>{new Date(e.created_at).toLocaleTimeString()}</time><span>{e.message}</span></li>
+          ))}
+        </ol>
+      </div>
+      <div className="panel" data-reveal>
+        <div className="panel-head"><h2>Pages per minute</h2><span className="faint" style={{ fontSize: 13 }}>last {mins.length} min</span></div>
+        {mins.length === 0 ? <p className="empty">Figures appear after the first minute of crawling.</p> : (<>
+          <div className="minute-bars" role="img" aria-label={`Pages per minute, latest ${mins[mins.length - 1].pages}`}>
+            {mins.map((m) => <i key={m.minute} style={{ height: `${Math.max(4, (m.pages / peak) * 100)}%` }} className={m.errors ? "err" : ""}
+              title={`${new Date(m.minute).toLocaleTimeString()}: ${m.pages} pages, ${m.errors} errors, ${m.avg_ms ?? "–"} ms`} />)}
+          </div>
+          <details className="sample"><summary>As a table</summary>
+            <div className="table-wrap flat"><table><thead><tr><th>Minute</th><th className="num">Pages</th><th className="num">Errors</th><th className="num">Avg. response</th></tr></thead>
+              <tbody>{[...mins].reverse().map((m) => <tr key={m.minute}><td>{new Date(m.minute).toLocaleTimeString()}</td><td className="num">{count(m.pages)}</td>
+                <td className="num">{count(m.errors)}</td><td className="num">{m.avg_ms == null ? "–" : `${m.avg_ms} ms`}</td></tr>)}</tbody></table></div></details>
+        </>)}
+      </div>
+    </div>
+  );
 }

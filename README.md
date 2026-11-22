@@ -109,6 +109,12 @@ python -m pytest -q
 | `QC6_COOKIE_SECURE` | `local` sign-in only: set `false` when you open QC over plain `http://` (e.g. `http://localhost:8000`); keep the default (`true`) behind HTTPS |
 | `QC6_OLLAMA_URL`, `QC6_AI_MODEL` | AI drafts from a free local model: Ollama address (default `http://127.0.0.1:11434`) and model (default `qwen2.5:3b`) |
 | `QC6_MAX_PAGES_PER_FIX` | most affected pages kept per fix (default 20000) |
+| `QC6_TLS_VERIFY` | `false` only for a site with a self-made certificate; by default certificates are checked and bad ones reported as `SSL_ERROR` |
+| `QC6_RENDER_MAX` | how many JavaScript-built pages a full check opens in a real browser first (default 50) |
+| `QC6_KEEP_METRICS_DAYS` | per-minute figures and timelines of finished checks are kept this many days (default 90) |
+| `QC6_KEEP_HTML` | `true` keeps every page's HTML, gzipped, under `runs/<id>/html/` (large; off by default) |
+| `QC6_SMTP_HOST`, `QC6_SMTP_PORT`, `QC6_SMTP_USER`, `QC6_SMTP_PASSWORD`, `QC6_MAIL_FROM`, `QC6_PUBLIC_URL` | "Forgot your password?" e-mails for `QC6_AUTH=local` (QC's address goes in `QC6_PUBLIC_URL`) |
+| `QC6_DOMAIN` | with `docker compose --profile https up`: Caddy serves QC on this name with an automatic certificate |
 | `QC6_VISITORS_PER_HOST`, `QC6_VISIT_SHARE` | real-visitor concurrency and their share of a site's speed limit |
 | `QC6_NU_URL`, `QC6_LANGUAGETOOL_URL`, `QC6_LIGHTHOUSE_CMD`, `QC6_CHROME_PATH` | optional extra checks (self-hosted Nu HTML checker, LanguageTool, local Lighthouse) |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | GA4-led sampling (site setting `ga4_property_id`) and the V5 Search Console integration |
@@ -147,7 +153,11 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
-* **Download report** (Insights, All pages): one file, one sheet: the summary at the top, then one row per problem and
+* **Full audit workbook** (Download report → Full audit workbook): the QC V5 layout, one sheet each for Executive
+  Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, Source Page Issues, Destination
+  Issues, Broken / Redirect / External URLs, Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
+  "All data as CSVs (ZIP)" has every link-level file.
+* **Download report** (Insights, All pages, New check): one file, one sheet: the summary at the top, then one row per problem and
   page with severity, what to do, owner, status and the seen-before remark. CSV, Excel (`.xlsx`) or ZIP (the CSV,
   compressed, about a fortieth of the size; best for big sites). Excel stops at its 1,048,576-row limit and says so.
 * **Delete**: a past check (Live, Past checks), a journey (Journeys), or a whole site (New check, open one of its

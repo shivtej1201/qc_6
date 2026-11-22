@@ -137,10 +137,12 @@ export function Spark({ values }: { values: number[] }) {
 export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | null }) {
   const q = run ? `?run=${run}` : "";
   const items: [string, string, string][] = [
+    [`/api/v2/sites/${siteId}/export.workbook.xlsx${q}`, "Full audit workbook (Excel)", "Executive summary, sitemap progress, business / language / page type, status, issues, broken, redirect, external URLs, QC problems"],
     [`/api/v2/sites/${siteId}/report.pdf`, "PDF summary", "one page for people"],
-    [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row"],
+    [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row: small"],
     [`/api/v2/sites/${siteId}/export.csv${q}`, "CSV", "the same, as plain text"],
     [`/api/v2/sites/${siteId}/export.zip${q}`, "ZIP", "the CSV compressed: smallest"],
+    ...(run ? [[`/api/v2/runs/${run}/package.zip`, "All data as CSVs (ZIP)", "every link, unique URL, broken / redirect / external URL, images, SEO"] as [string, string, string]] : []),
   ];
   return (
     <details className="menu">

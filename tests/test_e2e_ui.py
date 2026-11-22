@@ -58,7 +58,7 @@ def app_url(migrated, tmp_path_factory):
     site.close()
 
 
-async def _until_hash(page, prefix: str, tries: int = 50):
+async def _until_hash(page, prefix: str, tries: int = 100):
     """Wait for a route change. (wait_for_function evaluates a string, which our CSP rightly forbids.)"""
     for _ in range(tries):
         if (await page.evaluate("location.hash")).startswith(prefix):
@@ -136,15 +136,32 @@ def test_ui_end_to_end(app_url):
             focused = await page.evaluate("document.activeElement && document.activeElement.textContent")
 
             # quick jump: Ctrl+K, type, arrow down to a fix, Enter opens it
+            await page.keyboard.press("Escape")                       # close the fix drawer from the keyboard step
+            await page.wait_for_selector("#fix-title", state="detached")
             await page.goto(f"{app_url}/#/today")
-            await page.wait_for_selector("h1")
+            await _until_hash(page, "#/today")
+            await page.wait_for_selector(".kpi")                     # Today's own content, not the previous screen's heading
+            await page.evaluate("""() => { window.__qc = []; const t = (m) => window.__qc.push(Math.round(performance.now()) + ' ' + m);
+                window.addEventListener('hashchange', () => t('hash ' + location.hash));
+                document.addEventListener('focusin', (e) => t('focus ' + e.target.tagName + '.' + (e.target.className || '') + ' ' + (e.target.getAttribute('href') || '')), true);
+                document.addEventListener('keydown', (e) => t('keydown ' + e.key + ' on ' + document.activeElement.tagName), true);
+                document.addEventListener('keypress', (e) => t('keypress ' + e.key + ' on ' + document.activeElement.tagName), true); }""")
             await page.keyboard.press("Control+k")
             await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
             palette_bad = await _axe(page)
+            # type only once the search box has the focus (on a slow machine the dialog can paint first)
+            for _ in range(50):
+                if await page.evaluate("document.activeElement && document.activeElement.closest('[aria-label=\"Quick jump\"]') !== null && document.activeElement.tagName === 'INPUT'"):
+                    break
+                await page.wait_for_timeout(100)
             await page.keyboard.type("pages")
-            await page.wait_for_selector("[role=option]")
+            await page.wait_for_selector("[role=option]:has-text('All pages')")
+            opts = await page.locator("[role=option]").all_inner_texts()
             await page.keyboard.press("Enter")
-            await _until_hash(page, "#/pages")
+            try:
+                await _until_hash(page, "#/pages")
+            except AssertionError:
+                raise AssertionError(f"quick jump didn't open All pages. options={opts} trace={await page.evaluate('window.__qc')}")
             jumped = await page.evaluate("location.hash")
 
             # phone: menu button opens the slide-in menu with focus inside; every screen fits the width

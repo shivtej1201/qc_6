@@ -23,7 +23,8 @@ import httpx
 class PerHostPoolTransport(httpx.AsyncBaseTransport):
     def __init__(self, *, limits: httpx.Limits, other_host_keepalive: int = 8,
                  is_heavy_host: Optional[Callable[[str], bool]] = None, shard_keepalive: int = 8,
-                 **transport_kwargs) -> None:
+                 allow_local: bool = False, **transport_kwargs) -> None:
+        self._allow_local = allow_local
         self._limits = limits
         self._heavy_keepalive = limits.max_keepalive_connections or limits.max_connections or 20
         self._other_keepalive = max(1, min(other_host_keepalive, self._heavy_keepalive))
@@ -49,7 +50,8 @@ class PerHostPoolTransport(httpx.AsyncBaseTransport):
         shard_limits = httpx.Limits(max_connections=self._limits.max_connections,
                                     max_keepalive_connections=math.ceil(keepalive / n),
                                     keepalive_expiry=self._limits.keepalive_expiry)
-        return [httpx.AsyncHTTPTransport(limits=shard_limits, **self._kwargs) for _ in range(n)]
+        from qcv5.crawler.safe_net import pin              # connect only to the address that was checked
+        return [pin(httpx.AsyncHTTPTransport(limits=shard_limits, **self._kwargs), self._allow_local) for _ in range(n)]
 
     def _pool_for(self, url: httpx.URL) -> httpx.AsyncHTTPTransport:
         key = (url.raw_scheme, url.raw_host, url.port)

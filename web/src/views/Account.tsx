@@ -12,6 +12,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (step === "code") codeRef.current?.focus(); }, [step]);
   const submit = async (e: React.FormEvent) => {
@@ -50,8 +51,16 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         )}
         {err && <div className="error-box" role="alert">{err}</div>}
         <button className="btn primary" type="submit" disabled={busy}>{busy ? "Checking…" : step === "password" ? "Sign in" : "Continue"}</button>
-        <p className="faint" style={{ fontSize: 13, margin: 0 }}>Forgot your password, or lost your phone? Whoever runs QC can reset it with
-          <span className="mono"> python -m qc6.admin set-password</span> or <span className="mono">reset-2fa</span>.</p>
+        {step === "password" && <button type="button" className="btn quiet small" style={{ justifySelf: "start", padding: 0 }}
+          onClick={async () => {
+            if (!email) { setErr("Type your e-mail first, then choose Forgot your password."); return; }
+            try { const r = await api.forgot(email); setErr(null); setSent(r.mail ? "If that address has an account, a link to choose a new password is on its way (valid 30 minutes)."
+              : "E-mail isn't set up on this QC. Ask whoever runs it to reset your password."); }
+            catch (x: any) { setErr(x.detail ? `${x.title}. ${x.detail}` : x.title || x.message); }
+          }}>Forgot your password?</button>}
+        {sent && <p role="status" style={{ margin: 0, fontSize: 14 }}>{sent}</p>}
+        <p className="faint" style={{ fontSize: 13, margin: 0 }}>Lost your phone? Whoever runs QC can turn two-factor off with
+          <span className="mono"> python -m qc6.admin reset-2fa</span>.</p>
       </form>
     </main>
   );
@@ -126,5 +135,34 @@ export function AccountView() {
         )}
       </section>
     </div>
+  );
+}
+
+
+/* The page an e-mailed reset link opens (#/reset?token=...). */
+export function ResetPassword({ token }: { token: string }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  return (
+    <main className="signin" id="main">
+      <form className="panel grid" style={{ gap: 14 }} aria-labelledby="rp-h" onSubmit={async (e) => {
+        e.preventDefault();
+        try { await api.resetPassword(token, pw); setDone(true); }
+        catch (x: any) { setErr(x.detail ? `${x.title}. ${x.detail}` : x.title || x.message); }
+      }}>
+        <div className="logo"><div className="logo-mark">QC</div><div><b>QC V6</b><span>Site quality</span></div></div>
+        <h1 id="rp-h" style={{ fontSize: 24 }}>Choose a new password</h1>
+        {done ? (<>
+          <p role="status" style={{ margin: 0 }}>Done. Every place you were signed in has been signed out.</p>
+          <a className="btn primary" href="#/start" onClick={() => window.setTimeout(() => window.location.reload(), 0)}>Sign in</a>
+        </>) : (<>
+          <label className="grid" style={{ gap: 4 }}>New password <span className="faint" style={{ fontSize: 13 }}>at least 10 characters</span>
+            <input className="input" type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus /></label>
+          {err && <div className="error-box" role="alert">{err}</div>}
+          <button className="btn primary" type="submit" disabled={pw.length < 10}>Save the new password</button>
+        </>)}
+      </form>
+    </main>
   );
 }

@@ -21,6 +21,7 @@ from qcv5.core.config import settings
 from qcv5.crawler.diagnostics_403 import Diagnostics403
 from qcv5.crawler.html_parser import Parser
 from qcv5.crawler.http_pool import PerHostPoolTransport
+from qcv5.crawler.safe_net import tls_verify
 from qcv5.audit.seo_audit import SEO_COLUMNS, page_facts as seo_page_facts
 from qcv5.crawler.status_classifier import StatusClassifier
 from qcv5.crawler.url_normalizer import URLNormalizer
@@ -2953,8 +2954,8 @@ class OnPageAuditEngine:
         # request, so a single pool shared by the primary site, CDN and external hosts costs O(all connections)
         transport = PerHostPoolTransport(
             limits=limits, other_host_keepalive=self.per_host_concurrency,
-            is_heavy_host=self._is_heavy_host,
-            verify=False, http2=self.http2,
+            is_heavy_host=self._is_heavy_host, allow_local=self.allow_local,
+            verify=tls_verify(), http2=self.http2,           # bad certificates are reported as SSL_ERROR, not ignored
         )
         async with httpx.AsyncClient(
             transport=transport,
@@ -3085,6 +3086,10 @@ class OnPageAuditEngine:
                         src_url = item["source_page_url"]
                         html = fetch_res.get("html") or ""
                         fetch_res["html"] = ""  # do not retain HTML beyond extraction+classification
+                        sink = getattr(self, "html_sink", None)
+                        if sink is not None and html:   # opt-in raw HTML archive (V6: QC6_KEEP_HTML); compressed off-loop
+                            await loop.run_in_executor(parse_pool, sink, src_url, fetch_res.get("final_url") or src_url,
+                                                       fetch_res.get("http_status"), html)
                         final_src_url = fetch_res["final_url"]
                         src_http = fetch_res["http_status"]
                         now_iso = utc_now_iso()

@@ -418,6 +418,17 @@ table.jobs tr[aria-current="true"] td { background: var(--measure-soft); }
   .start-cta .btn.big { justify-self: stretch; justify-content: center; }
 }
 
+/* Live: timeline and pages per minute */
+.run-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 320px; overflow: auto; font-size: 13.5px; }
+.run-timeline li { display: grid; grid-template-columns: 104px 1fr; gap: 8px; padding-left: 10px; border-left: 3px solid var(--line); }
+.run-timeline time { font: 12px var(--mono); color: var(--ink-3); padding-top: 1px; white-space: nowrap; }
+.run-timeline li.ev-completed { border-left-color: var(--good); }
+.run-timeline li.ev-failed, .run-timeline li.ev-worker_lost { border-left-color: var(--critical); }
+.run-timeline li[class*="ev-asked"], .run-timeline li.ev-paused, .run-timeline li.ev-cancelled { border-left-color: var(--marker); }
+.minute-bars { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.minute-bars i { flex: 1; min-width: 3px; background: var(--measure); border-radius: 2px 2px 0 0; }
+.minute-bars i.err { background: var(--high); }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 /* sign-in (QC6_AUTH=local) */
