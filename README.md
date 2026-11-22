@@ -256,6 +256,8 @@ checks (FEAT-08-02).
 |---|---|
 | Coverage, 2,000 pages | 78 s end to end in V6 (crawl, page types, V5 report package, Parquet facts, fixes): 73,503 links, 50,061 images, trust gate PASS |
 | Full, 2,000 pages | 224 s: coverage, then 25 real-browser visits at human pace (6 visitors), then journeys |
+| **10,000 pages at the default speed (Standard, 12 req/s)**, `scripts/bench_site.py` | **15 min 53 s** end to end (sitemap to report): 429,970 links, 60,000 images, 10,651 unique URLs and 2,000 unique images each checked once (100 x 301 -> 200, 50 x 404 found and placed on their pages); full workbook 11 s |
+| Large site speed (16 -> 18 req/s), same stand-in site | held 16.0 req/s steady, no slow-downs; 3 lakh pages at that rate is about 5¾ h (Standard: about 7½ h) |
 | V5 engine alone, 300,000 pages | 3 h 22 min end to end (V5 benchmark) |
 
 ## Status against the delivery plan (blueprint §16)
