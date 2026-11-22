@@ -136,8 +136,11 @@ def test_ui_end_to_end(app_url):
             focused = await page.evaluate("document.activeElement && document.activeElement.textContent")
 
             # quick jump: Ctrl+K, type, arrow down to a fix, Enter opens it
+            await page.keyboard.press("Escape")                       # close the fix drawer from the keyboard step
+            await page.wait_for_selector("#fix-title", state="detached")
             await page.goto(f"{app_url}/#/today")
-            await page.wait_for_selector("h1")
+            await _until_hash(page, "#/today")
+            await page.wait_for_selector(".kpi")                     # Today's own content, not the previous screen's heading
             await page.keyboard.press("Control+k")
             await page.wait_for_selector("[role=dialog][aria-label='Quick jump']")
             palette_bad = await _axe(page)
