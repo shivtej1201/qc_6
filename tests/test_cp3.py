@@ -137,7 +137,9 @@ class _Shop(BaseHTTPRequestHandler):
                 if _Shop.fixed else ""
             body = (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
                     f"<title>Shop page {self.path} with a decent title</title>{desc}</head><body><h1>Shop {self.path}</h1>"
-                    + "".join(f"<a href='/p/{i}'>Page {i}</a> " for i in range(3)) + "<p>" + "words " * 120 + "</p></body></html>").encode()
+                    + "".join(f"<a href='/p/{i}'>Page {i}</a> " for i in range(3))
+                    + "<a href='/p/1'>Read more</a> <a href='/p/2'>  CLICK   here </a> <a href='/p/0?from=icon'></a>"
+                    + "<p>" + "words " * 120 + "</p></body></html>").encode()
             ct = "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", ct)
@@ -263,3 +265,83 @@ def test_opportunity_review_and_score_breakdown(shop):
     assert url not in [x["url"] for x in still_open["pages"]] and still_open["review_counts"]["dismissed"] == 1
     bad = c.post(f"/api/v2/sites/{sid}/growth/opportunities/review", json={"url": url, "status": "maybe"}, headers=H)
     assert bad.status_code == 422
+
+
+
+# ------------------------------------------------------------------ 7-9. content briefs, anchor text, saved HTML
+def test_anchor_text_report_and_saved_html(shop, monkeypatch):
+    c, base, dsn = shop
+    monkeypatch.setenv("QC6_KEEP_HTML", "true")
+    sid = c.get("/api/v2/sites").json()["sites"][0]["id"]
+    lid = c.post("/api/v2/lists", json={"source": "sitemap", "url": base + "/sitemap.xml"}, headers=H).json()["id"]
+    for _ in range(100):
+        if c.get(f"/api/v2/lists/{lid}").json()["status"] != "extracting":
+            break
+        time.sleep(0.1)
+    rid = c.post(f"/api/v2/lists/{lid}/start", json={}, headers=H).json()["run_id"]
+    _run(dsn, rid)
+    a = c.get(f"/api/v2/runs/{rid}/anchors").json()
+    gen = {g["anchor"]: g for g in a["generic"]}
+    assert set(gen) == {"read more", "click here"} and gen["read more"]["links"] == 3 and gen["click here"]["pages"] == 3
+    assert a["empty"]["links"] == 3 and a["empty"]["pages"] == 3 and a["generic_links"] == 6 and a["internal_links"] == 18
+    assert a["generic_share"] == round(100 * 6 / 18, 1)
+    # the HTML QC received, as plain text that can't run in QC's window
+    page = f"{base}/p/1"
+    h = c.get(f"/api/v2/runs/{rid}/html", params={"url": page})
+    assert h.status_code == 200 and h.headers["content-type"].startswith("text/plain")
+    assert "sandbox" in h.headers["content-security-policy"] and "Read more" in h.text and "<html" in h.text
+    d = c.get(f"/api/v2/runs/{rid}/html", params={"url": page, "download": "true"})
+    assert "attachment" in d.headers["content-disposition"]
+    missing = c.get(f"/api/v2/runs/{rid}/html", params={"url": base + "/never"})
+    assert missing.status_code == 404 and "No saved HTML" in missing.json()["title"]
+    monkeypatch.delenv("QC6_KEEP_HTML")
+    off = c.get(f"/api/v2/runs/{rid}/html", params={"url": base + "/never"})
+    assert "QC6_KEEP_HTML" in off.json()["detail"]
+
+
+def test_content_brief_sections_edit_and_rewrite(shop, monkeypatch):
+    import json as _json
+    import httpx
+    from qc6 import ai
+    c, base, dsn = shop
+    sid = c.get("/api/v2/sites").json()["sites"][0]["id"]
+    asked = []
+
+    def ollama(req: httpx.Request) -> httpx.Response:
+        body = _json.loads(req.content)
+        user = body["messages"][1]["content"]
+        asked.append(user)
+        assert "Use ONLY the evidence" in body["messages"][0]["content"] and body["format"] == "json"
+        if '"outline":' in user and '"intent":' not in user.split("TASK:")[1]:          # one section written again
+            return httpx.Response(200, json={"message": {"content": _json.dumps({"outline": ["H2: Fresh outline", "H3: Detail"]})}})
+        return httpx.Response(200, json={"message": {"content": _json.dumps({
+            "intent": "People comparing shop pages.", "audience": "Shoppers.", "target_queries": ["shop page"],
+            "outline": ["H2: First", "H2: Second"], "title_description": "Shop page title\nA description.",
+            "faq": ["What is it?"], "schema": ["Product: name, offers"], "internal_links": [{"from": "/p/0", "anchor": "shop page"}]})}})
+    ai.set_transport(httpx.MockTransport(ollama))
+    try:
+        r = c.post(f"/api/v2/sites/{sid}/briefs", json={"url": f"{base}/p/1"}, headers=H)
+        assert r.status_code == 201, r.text
+        b = r.json()
+        assert b["order"][0] == "intent" and b["sections"]["outline"]["text"] == "• H2: First\n• H2: Second"
+        assert "/p/0 — shop page" in b["sections"]["internal_links"]["text"]                  # dict items flattened to text
+        ev = asked[0].split("EVIDENCE (JSON):")[1].split("TASK:")[0]
+        assert f"{base}/p/1" in ev and "link_candidates" in ev                                    # grounded in QC's evidence
+        # a person edits one section, then asks for another one again: the edit stays
+        e = c.put(f"/api/v2/briefs/{b['id']}/sections/intent", json={"text": "Our own intent text."}, headers=H).json()
+        assert e["sections"]["intent"] == {**e["sections"]["intent"], "text": "Our own intent text.", "edited": True}
+        w = c.post(f"/api/v2/briefs/{b['id']}/sections/outline/rewrite", headers=H).json()
+        assert w["sections"]["outline"]["text"] == "• H2: Fresh outline\n• H3: Detail" and w["sections"]["intent"]["text"] == "Our own intent text."
+        assert "Our own intent text." in asked[-1]                                                 # the rest given as context
+        md = c.get(f"/api/v2/briefs/{b['id']}/brief.md")
+        assert md.status_code == 200 and "## Outline" in md.text and "Fresh outline" in md.text
+        assert c.put(f"/api/v2/briefs/{b['id']}/sections/nope", json={"text": "x"}, headers=H).status_code == 404
+        assert len(c.get(f"/api/v2/sites/{sid}/briefs", params={"url": f"{base}/p/1"}).json()["briefs"]) == 1
+        assert c.post(f"/api/v2/sites/{sid}/briefs", json={"url": base + "/not-checked"}, headers=H).status_code == 404
+        assert c.delete(f"/api/v2/briefs/{b['id']}", headers=H).status_code == 200
+    finally:
+        ai.set_transport(None)
+    # with Ollama not running: a plain 503, nothing saved
+    monkeypatch.setenv("QC6_OLLAMA_URL", "http://127.0.0.1:9")
+    down = c.post(f"/api/v2/sites/{sid}/briefs", json={"url": f"{base}/p/1"}, headers=H)
+    assert down.status_code == 503 and "isn't available" in down.json()["title"]

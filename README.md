@@ -165,6 +165,22 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Product pages**: name, price, currency, availability, identifier (SKU/GTIN/MPN) and image in the page's
   Product data (JSON-LD or microdata), and product pages with no Product data at all.
 
+## Polite crawling, fixes and content (from the CrawlPulse 3 comparison)
+
+* **Crawl-delay**: when a site's robots.txt asks for N seconds between requests (for `QC-Audit` or `*`), QC waits at
+  least that long between page fetches, link checks on its own hosts and real-browser visits. The check's timeline says so.
+* **More page rules**: missing charset, JSON-LD without `@context` / `@type`, empty pages, pages without `<html>` /
+  `<body>`, contradicting index signals, canonicals to another domain.
+* **Check this fix now** (in a fix): re-checks just that fix's pages; it's confirmed when every one is clean.
+* **Impact** (in a verified fix): Search Console clicks, impressions and rank for the fix's pages 14, 28 and 60 days
+  before and after it was confirmed. Needs Search Console; read it as a signal, not proof.
+* **Fixes → Board**: drag fixes between Open, In progress, Fixed and Won't fix (or use each card's Move-to menu).
+* **Growth**: accept, dismiss or mark done each opportunity (kept as a history); click a score to see how it's made.
+* **Content brief** (on a page): intent, audience, target queries, outline, title and description, questions,
+  structured data and pages that should link here, written by the local AI. Edit any part or write one part again.
+* **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
+* **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
+
 ## AI drafts (free, on your own machine)
 
 1. Install Ollama from https://ollama.com and start it.

@@ -1235,6 +1235,126 @@ async def ai_draft(fix_id: int, body: AIDraftIn, me=Depends(current_member)):
     return dict(row)
 
 
+# ------------------------------------------------------------------ AI content briefs (local model)
+class BriefIn(BaseModel):
+    url: str = Field(max_length=2000)
+
+
+class SectionIn(BaseModel):
+    text: str = Field(max_length=20000)
+
+
+async def _brief_row(pool, brief_id: int, me) -> Dict[str, Any]:
+    b = await pool.fetchrow("""SELECT b.*, s.base_url, s.primary_host, s.access_token, s.settings AS site_settings FROM content_briefs b
+                               JOIN sites s ON s.id = b.site_id WHERE b.id = $1 AND s.workspace_id = $2""", brief_id, me["workspace_id"])
+    if b is None:
+        raise problem(404, "Brief not found")
+    return dict(b)
+
+
+def _brief_out(b: Dict[str, Any]) -> Dict[str, Any]:
+    from qc6 import briefs
+    return {k: b[k] for k in ("id", "site_id", "url", "model", "sections", "status", "created_at", "updated_at")} | {
+        "order": list(briefs.SECTIONS), "labels": briefs.LABELS}
+
+
+async def _page_text(site: Dict[str, Any], url: str) -> str:
+    from qc6.linkgraph import main_text_words
+    from qc6.workers.extras import fetch_html
+    try:
+        return " ".join(main_text_words(await fetch_html(url, site) or ""))[:2500]
+    except httpx.HTTPError:
+        return ""
+
+
+@app.post("/api/v2/sites/{site_id}/briefs", status_code=201)
+async def make_brief(site_id: int, body: BriefIn, me=Depends(current_member)):
+    """Write a content brief for one page with the local model. Saved as a draft; every section can be edited."""
+    from qc6 import ai, briefs
+    can_edit(me)
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    try:
+        ev = await briefs.evidence(pool, site_id, body.url, await _page_text(s, body.url))
+    except LookupError:
+        raise problem(404, "QC hasn't checked that page", "Briefs are written for pages from a check of this site.")
+    try:
+        written = await briefs.write(ev)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    secs = {k: {"text": v, "edited": False, "written_at": briefs.now()} for k, v in written.items()}
+    row = await pool.fetchrow("""INSERT INTO content_briefs (site_id, url, model, sections, evidence, created_by)
+                                 VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""", site_id, body.url, ai.config()["model"], secs, ev, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "brief.create", f"brief:{row['id']}", {"url": body.url})
+    return _brief_out(dict(row))
+
+
+@app.get("/api/v2/sites/{site_id}/briefs")
+async def list_briefs(site_id: int, url: str = "", me=Depends(current_member)):
+    await site_for(site_id, me)
+    rows = await (await get_pool()).fetch(
+        "SELECT * FROM content_briefs WHERE site_id = $1 AND ($2 = '' OR url = $2) ORDER BY id DESC LIMIT 100", site_id, url)
+    return {"briefs": [_brief_out(dict(r)) for r in rows]}
+
+
+@app.get("/api/v2/briefs/{brief_id}")
+async def get_brief(brief_id: int, me=Depends(current_member)):
+    return _brief_out(await _brief_row(await get_pool(), brief_id, me))
+
+
+@app.get("/api/v2/briefs/{brief_id}/brief.md")
+async def brief_markdown(brief_id: int, me=Depends(current_member)):
+    from fastapi import Response
+    from qc6 import briefs
+    b = await _brief_row(await get_pool(), brief_id, me)
+    return Response(briefs.markdown(b), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="content-brief-{brief_id}.md"'})
+
+
+@app.put("/api/v2/briefs/{brief_id}/sections/{name}")
+async def edit_brief_section(brief_id: int, name: str, body: SectionIn, me=Depends(current_member)):
+    """A person's edit. Marked as edited, so writing other sections again never touches it."""
+    from qc6 import briefs
+    can_edit(me)
+    if name not in briefs.SECTIONS:
+        raise problem(404, "No such section")
+    pool = await get_pool()
+    await _brief_row(pool, brief_id, me)
+    row = await pool.fetchrow("UPDATE content_briefs SET sections = jsonb_set(sections, ARRAY[$2], $3::jsonb), updated_at = now() "
+                              "WHERE id = $1 RETURNING *", brief_id, name,
+                              {"text": body.text.strip(), "edited": True, "written_at": briefs.now(), "edited_by": me.get("name") or me["email"]})
+    return _brief_out(dict(row))
+
+
+@app.post("/api/v2/briefs/{brief_id}/sections/{name}/rewrite")
+async def rewrite_brief_section(brief_id: int, name: str, me=Depends(current_member)):
+    """Write one section again with the local model; the other sections (and their hand edits) stay as they are."""
+    from qc6 import ai, briefs
+    can_edit(me)
+    if name not in briefs.SECTIONS:
+        raise problem(404, "No such section")
+    pool = await get_pool()
+    b = await _brief_row(pool, brief_id, me)
+    keep = {k: v.get("text", "") for k, v in (b["sections"] or {}).items() if k != name}
+    try:
+        out = await briefs.write(dict(b["evidence"] or {}), only=name, keep=keep)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    row = await pool.fetchrow("UPDATE content_briefs SET sections = jsonb_set(sections, ARRAY[$2], $3::jsonb), updated_at = now() "
+                              "WHERE id = $1 RETURNING *", brief_id, name,
+                              {"text": out.get(name, ""), "edited": False, "written_at": briefs.now()})
+    return _brief_out(dict(row))
+
+
+@app.delete("/api/v2/briefs/{brief_id}")
+async def delete_brief(brief_id: int, me=Depends(current_member)):
+    can_edit(me)
+    pool = await get_pool()
+    await _brief_row(pool, brief_id, me)
+    await pool.execute("DELETE FROM content_briefs WHERE id = $1", brief_id)
+    return {"ok": True}
+
+
 @app.get("/api/v2/fixes/{fix_id}/ai")
 async def ai_list(fix_id: int, me=Depends(current_member)):
     pool = await get_pool()
@@ -1456,6 +1576,51 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
     name = re.sub(r"[^a-z0-9.-]+", "-", s["primary_host"].lower())
     return StreamingResponse(csv_rows(pool, site_id, rid, f), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
+
+
+@app.get("/api/v2/runs/{run_id}/anchors")
+async def run_anchors(run_id: int, me=Depends(current_member)):
+    """Internal anchor text: generic anchors ("click here"), links without text, most used anchors, and pages every
+    link names the same way (or never the same way twice)."""
+    from qc6 import facts
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    try:
+        return await asyncio.to_thread(facts.anchors, run_id)
+    except FileNotFoundError:
+        raise problem(404, "No link data for this check", "It is made when a page check finishes.")
+
+
+@app.get("/api/v2/runs/{run_id}/html")
+async def run_html(run_id: int, url: str, download: bool = False, me=Depends(current_member)):
+    """The HTML QC received for one page in this check (kept only when QC6_KEEP_HTML=true). Sent as plain text,
+    never as a page, so nothing in it runs in QC's own window."""
+    import gzip
+    import hashlib
+    from fastapi import Response
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    hdir = os.path.join(settings.data_dir, "runs", str(run_id), "html")
+    path = os.path.join(hdir, hashlib.sha256(url.encode()).hexdigest()[:40] + ".html.gz")
+    if not os.path.exists(path):
+        from qc6 import html_store
+        raise problem(404, "No saved HTML for this page",
+                      "QC keeps page HTML only when QC6_KEEP_HTML=true is set on the server; checks made after that have it."
+                      if not html_store.enabled() else "This page wasn't fetched in this check, or the check was made before HTML was kept.")
+    def read() -> bytes:
+        with gzip.open(path, "rb") as f:
+            return f.read(8 * 1024 * 1024 + 1)
+    data = await asyncio.to_thread(read)
+    truncated = len(data) > 8 * 1024 * 1024
+    headers = {"X-Truncated": "1" if truncated else "0", "Content-Security-Policy": "default-src 'none'; sandbox"}
+    if download:
+        host = re.sub(r"[^a-z0-9.-]+", "-", urllib.parse.urlsplit(url).netloc.lower())
+        headers["Content-Disposition"] = f'attachment; filename="{host}-check-{run_id}.html.txt"'
+    return Response(data[:8 * 1024 * 1024], media_type="text/plain; charset=utf-8", headers=headers)
 
 
 @app.get("/api/v2/runs/{run_id}/package.zip")

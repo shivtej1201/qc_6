@@ -323,7 +323,8 @@ function ImpactSection({ fixId }: { fixId: number }) {
               {w.ready && w.change ? (<>
                 <b className={w.change.clicks >= 0 ? "up" : "down"}>{signed(w.change.clicks_pct, "%")}</b>
                 <span className="stat-sub">clicks {w.before.clicks.toLocaleString("en-IN")} → {w.after!.clicks.toLocaleString("en-IN")}</span>
-                <span className="stat-sub">impressions {signed(w.change.impressions_pct, "%")} · position {w.change.position == null ? "–" : signed(-w.change.position)}</span>
+                <span className="stat-sub">impressions {signed(w.change.impressions_pct, "%")} · {w.change.position == null || w.change.position === 0 ? "same average rank"
+                  : w.change.position < 0 ? `up ${Math.abs(w.change.position)} places` : `down ${w.change.position} places`}</span>
               </>) : (<><b className="muted">…</b><span className="stat-sub">{w.text}</span></>)}
             </div>
           ))}
