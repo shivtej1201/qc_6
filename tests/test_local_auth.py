@@ -13,7 +13,7 @@ from qc6 import services  # noqa: E402
 
 def test_password_hashing():
     h = A.hash_password("correct horse battery")
-    assert h.startswith("scrypt$15$8$1$") and A.check_password("correct horse battery", h)
+    assert h.startswith("$argon2id$") and A.check_password("correct horse battery", h)
     assert not A.check_password("wrong horse battery", h) and not A.check_password("x", None)
     assert A.hash_password("correct horse battery") != h                       # salted
     with pytest.raises(A.AuthFailed):
@@ -135,3 +135,74 @@ def test_lockout_and_password_change(client):
 def test_endpoints_off_outside_local(client, monkeypatch):
     monkeypatch.setenv("QC6_AUTH", "dev")
     assert client.post("/api/v2/auth/login", json={"email": "x", "password": "y"}).status_code == 404
+
+
+
+def _db(sql, *args):
+    import asyncio as aio
+
+    async def go():
+        import asyncpg
+        from qc6.settings import settings
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await conn.fetchval(sql, *args)
+        finally:
+            await conn.close()
+    return aio.run(go())
+
+
+def test_old_scrypt_password_is_upgraded_to_argon2id_at_sign_in(client):
+    import base64
+    import hashlib
+    c = client
+    A._ip_hits.clear()
+    salt = b"s" * 16
+    old = "scrypt$15$8$1$" + base64.b64encode(salt).decode() + "$" + base64.b64encode(
+        hashlib.scrypt(b"an old style password", salt=salt, n=2 ** 15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)).decode()
+    _db("UPDATE members SET password_hash = $1, totp_secret = NULL WHERE email = 'omar@local.test'", old)
+    assert _login(c, "omar@local.test", "an old style password").status_code == 200
+    assert _db("SELECT password_hash FROM members WHERE email = 'omar@local.test'").startswith("$argon2id$")
+    assert _login(c, "omar@local.test", "an old style password").status_code == 200       # still the same password
+
+
+def test_forgot_and_reset_password_by_email(client, monkeypatch):
+    c = client
+    A._ip_hits.clear()
+    sent = []
+    monkeypatch.setattr(A, "_mail", lambda to, subject, text: sent.append((to, text)))
+    # without mail set up: same answer, nothing sent
+    r = c.post("/api/v2/auth/forgot", json={"email": "omar@local.test"}, headers=H)
+    assert r.status_code == 200 and r.json()["mail"] is False and sent == []
+    monkeypatch.setenv("QC6_SMTP_HOST", "smtp.example")
+    monkeypatch.setenv("QC6_PUBLIC_URL", "https://qc.example")
+    assert c.post("/api/v2/auth/forgot", json={"email": "nobody@local.test"}, headers=H).json() == {"ok": True, "mail": True}
+    assert sent == []                                                                 # unknown address: no mail, same answer
+    assert c.post("/api/v2/auth/forgot", json={"email": "OMAR@local.test"}, headers=H).status_code == 200
+    to, text = sent[0]
+    assert to == "omar@local.test" and "https://qc.example/#/reset?token=" in text
+    import urllib.parse
+    token = urllib.parse.unquote(text.split("token=")[1].split()[0])
+    assert c.post("/api/v2/auth/reset", json={"token": token, "password": "short"}, headers=H).status_code == 400
+    assert c.post("/api/v2/auth/reset", json={"token": token, "password": "a brand new password"}, headers=H).status_code == 200
+    again = c.post("/api/v2/auth/reset", json={"token": token, "password": "another new password"}, headers=H)
+    assert again.status_code == 400 and "can't be used" in again.json()["title"]       # one-time
+    A._ip_hits.clear()
+    assert _login(c, "omar@local.test", "a brand new password").status_code == 200
+    assert _db("SELECT count(*) FROM password_resets") == 0
+
+
+def test_secrets_are_sealed_with_aes_gcm_and_old_ones_still_open(monkeypatch):
+    from qc6 import site_access as S
+    monkeypatch.setenv("QC6_SECRET_KEY", "a long random test key")
+    t = S.seal({"user": "u", "password": "p"})
+    assert t.startswith("v2:") and S.unseal(t) == {"user": "u", "password": "p"}
+    assert S.seal({"a": 1}) != S.seal({"a": 1})                                        # random nonce
+    legacy = S._fernet().encrypt(b'{"user": "old"}').decode()
+    assert S.unseal(legacy) == {"user": "old"}
+    tampered = t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB")
+    with pytest.raises(S.AccessError):
+        S.unseal(tampered)
+    monkeypatch.setenv("QC6_SECRET_KEY", "another key")
+    with pytest.raises(S.AccessError):
+        S.unseal(t)

@@ -13,7 +13,7 @@ import { FixesView } from "./views/Fixes";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
 import { LinksView } from "./views/Links";
-import { AccountView, SignIn } from "./views/Account";
+import { AccountView, ResetPassword, SignIn } from "./views/Account";
 import { StartView } from "./views/Start";
 
 export type Route = { view: string; params: URLSearchParams };
@@ -167,6 +167,8 @@ function Root() {
   if (mode.error) return <main id="main" className="signin"><ErrorBox text={mode.error} onRetry={mode.reload} /></main>;
   if (!mode.data) return null;
   const local = mode.data.mode === "local";
+  const r = parseHash();
+  if (local && r.view === "reset" && r.params.get("token")) return <ResetPassword token={r.params.get("token")!} />;
   if (local && !mode.data.signed_in) return <SignIn onDone={() => window.location.reload()} />;
   return <App local={local} />;
 }

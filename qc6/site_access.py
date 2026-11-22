@@ -55,23 +55,44 @@ def is_site_url(url: str, primary: str) -> bool:
 
 
 # ------------------------------------------------------------------ encryption
-def _fernet():
-    from cryptography.fernet import Fernet
+def _secret() -> bytes:
     key = os.environ.get("QC6_SECRET_KEY", "")
     if not key:
         raise AccessError("Set QC6_SECRET_KEY on the server first (any long random text); QC encrypts staging logins with it.")
-    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(key.encode()).digest()))
+    return key.encode()
+
+
+def _fernet():
+    from cryptography.fernet import Fernet
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(_secret()).digest()))
+
+
+def _aes_key() -> bytes:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"qc6-seal", info=b"qc6 aes-256-gcm v2").derive(_secret())
 
 
 def seal(data: Dict[str, Any]) -> str:
-    return _fernet().encrypt(json.dumps(data).encode()).decode()
+    """AES-256-GCM (CrawlPulse system architecture §4.2) with a key derived from QC6_SECRET_KEY by HKDF-SHA256 and a
+    random 96-bit nonce. Stored as 'v2:' + base64(nonce + ciphertext + tag)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    ct = AESGCM(_aes_key()).encrypt(nonce, json.dumps(data).encode(), b"qc6")
+    return "v2:" + base64.urlsafe_b64encode(nonce + ct).decode()
 
 
 def unseal(token: str) -> Dict[str, Any]:
+    """AES-256-GCM tokens, and Fernet tokens saved by earlier versions (re-sealed the next time they're saved)."""
+    from cryptography.exceptions import InvalidTag
     from cryptography.fernet import InvalidToken
     try:
+        if token.startswith("v2:"):
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            raw = base64.urlsafe_b64decode(token[3:].encode())
+            return json.loads(AESGCM(_aes_key()).decrypt(raw[:12], raw[12:], b"qc6"))
         return json.loads(_fernet().decrypt(token.encode()))
-    except InvalidToken:
+    except (InvalidToken, InvalidTag, ValueError):
         raise AccessError("The staging login can't be read: QC6_SECRET_KEY changed since it was saved. Enter it again.")
 
 

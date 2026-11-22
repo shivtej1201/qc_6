@@ -3086,6 +3086,10 @@ class OnPageAuditEngine:
                         src_url = item["source_page_url"]
                         html = fetch_res.get("html") or ""
                         fetch_res["html"] = ""  # do not retain HTML beyond extraction+classification
+                        sink = getattr(self, "html_sink", None)
+                        if sink is not None and html:   # opt-in raw HTML archive (V6: QC6_KEEP_HTML); compressed off-loop
+                            await loop.run_in_executor(parse_pool, sink, src_url, fetch_res.get("final_url") or src_url,
+                                                       fetch_res.get("http_status"), html)
                         final_src_url = fetch_res["final_url"]
                         src_http = fetch_res["http_status"]
                         now_iso = utc_now_iso()

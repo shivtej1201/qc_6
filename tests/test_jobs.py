@@ -341,3 +341,58 @@ def test_sitemap_hreflang_sheet(tmp_path):
     out = list(workbook._alternates({"options": {"_alternates_file": str(f)}}, con, "RUN1"))
     assert [r[2] for r in out] == ["https://s.ex/hi/2", "https://s.ex/hi/3", "https://s.ex/hi/4"]
     assert "broken" in out[0][5] and "redirects" in out[1][5] and "not checked" in out[2][5]
+
+
+def test_nofollow_links_and_html_archive(env, monkeypatch):
+    """Per-link rel=nofollow is kept with every link; QC6_KEEP_HTML=true keeps each page's HTML, gzipped, with an index."""
+    import csv
+    import gzip
+    from qc6 import facts
+    from qc6.settings import settings
+    c, site, dsn = env
+    monkeypatch.setenv("QC6_KEEP_HTML", "true")
+    one = c.post("/api/v2/lists", json={"source": "single", "url": site.base + "/product/2"}, headers=H).json()
+    rid = c.post(f"/api/v2/lists/{one['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def go():
+        pool = await _pool(dsn)
+        await execute_run(pool, rid)
+        await pool.close()
+    asyncio.run(go())
+    got = facts.query(rid, "links", "", "", "", "page", False, 0, 500)
+    assert got["rows"] and all("rel" in r and "nofollow" in r for r in got["rows"])
+    # a page with a real nofollow link, on its own little server
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    class NF(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (b"<html><head><title>Nofollow test page for QC</title></head><body><h1>Hi</h1>"
+                    b'<a rel="nofollow sponsored" href="/paid">Paid</a> <a href="/free">Free</a></body></html>')
+            self.send_response(200 if self.path in ("/", "/paid", "/free") else 404)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.2", 0), NF)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.2:{srv.server_address[1]}"
+    lid = c.post("/api/v2/lists", json={"source": "single", "url": base + "/"}, headers=H).json()["id"]
+    rid2 = c.post(f"/api/v2/lists/{lid}/start", json={}, headers=H).json()["run_id"]
+
+    async def go2():
+        pool = await _pool(dsn)
+        await execute_run(pool, rid2)
+        await pool.close()
+    asyncio.run(go2())
+    srv.shutdown()
+    nf = facts.query(rid2, "links", "nofollow", "", "", "page", False, 0, 500)["rows"]
+    assert [r["url"] for r in nf] == [base + "/paid"] and nf[0]["rel"] == "nofollow sponsored"
+    hdir = os.path.join(settings.data_dir, "runs", str(rid), "html")
+    rows = list(csv.DictReader(open(os.path.join(hdir, "index.csv"))))
+    assert rows and rows[0]["url"].endswith("/product/2") and rows[0]["http_status"] == "200"
+    with gzip.open(os.path.join(hdir, rows[0]["file"]), "rt") as f:
+        assert "<html" in f.read().lower()

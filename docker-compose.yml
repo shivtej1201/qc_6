@@ -23,4 +23,14 @@ services:
     volumes: [ "data:/data" ]
     shm_size: "1gb"
     depends_on: { migrate: { condition: service_completed_successfully } }
-volumes: { pg: {}, data: {} }
+  # HTTPS in front (CrawlPulse system architecture: reverse proxy / TLS termination). Optional:
+  #   QC6_DOMAIN=qc.example.com docker compose --profile https up -d
+  # Caddy gets and renews the certificate itself (ports 80 and 443 must reach this machine).
+  https:
+    image: caddy:2.8
+    profiles: [ "https" ]
+    environment: { QC6_DOMAIN: "${QC6_DOMAIN:-localhost}" }
+    ports: [ "80:80", "443:443" ]
+    volumes: [ "./deploy/Caddyfile:/etc/caddy/Caddyfile:ro", "caddy:/data" ]
+    depends_on: [ api ]
+volumes: { pg: {}, data: {}, caddy: {} }

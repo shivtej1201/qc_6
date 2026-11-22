@@ -1,0 +1,11 @@
+# HTTPS in front of QC (docker compose --profile https). Caddy fetches and renews the certificate for QC6_DOMAIN.
+{$QC6_DOMAIN} {
+	encode zstd gzip
+	# one request id per request, passed to QC (it keeps a sane X-Request-ID and logs it)
+	request_header X-Request-ID {http.request.uuid}
+	reverse_proxy api:8003 {
+		header_up X-Forwarded-Proto {scheme}
+		# Server-Sent Events (live progress) must not be buffered
+		flush_interval -1
+	}
+}

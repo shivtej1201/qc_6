@@ -1115,6 +1115,38 @@ async def auth_password(body: PasswordIn, request: Request, me=Depends(current_m
     return {"ok": True, "other_sessions_ended": True}
 
 
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(max_length=200)
+    password: str = Field(max_length=500)
+
+
+@app.post("/api/v2/auth/forgot")
+async def auth_forgot(body: ForgotIn, request: Request):
+    """Send a reset link if the e-mail has an account and mail is set up. The answer is the same either way."""
+    from qc6 import local_auth
+    _local_only()
+    try:
+        await local_auth.request_reset(await get_pool(), body.email, request.client.host if request.client else "")
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    return {"ok": True, "mail": local_auth.mail_configured()}
+
+
+@app.post("/api/v2/auth/reset")
+async def auth_reset(body: ResetIn):
+    from qc6 import local_auth
+    _local_only()
+    try:
+        await local_auth.reset_password(await get_pool(), body.token, body.password)
+    except local_auth.AuthFailed as e:
+        raise problem(e.status, e.title, e.detail)
+    return {"ok": True}
+
+
 @app.post("/api/v2/auth/2fa/setup")
 async def auth_2fa_setup(me=Depends(current_member)):
     from qc6 import local_auth

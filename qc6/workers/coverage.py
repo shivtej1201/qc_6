@@ -154,6 +154,9 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         eng.load_fingerprints(fp_path)
     if control is not None:
         control["engine"] = eng
+    from qc6 import html_store
+    store = html_store.HtmlStore(run_dir) if html_store.enabled() else None
+    eng.html_sink = store
 
     last = {"done": None, "errors": 0, "ms": 0.0}
 
@@ -207,6 +210,8 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     finally:
         ticker.cancel()
         eng.close()
+        if store is not None:
+            store.close()
         if control is not None:
             control["engine"] = None
     if eng._stop_requested:                           # paused: keep the checkpoint, build nothing yet

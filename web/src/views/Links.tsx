@@ -5,7 +5,7 @@ import { useViewMotion } from "../motion";
 import { ErrorBox, count, useLoad } from "../ui";
 
 const FILTERS: Record<string, [string, string][]> = {
-  links: [["", "All"], ["broken", "Broken"], ["redirect", "Redirects"], ["external", "Other sites"]],
+  links: [["", "All"], ["broken", "Broken"], ["redirect", "Redirects"], ["external", "Other sites"], ["nofollow", "Nofollow"]],
   images: [["", "All"], ["broken", "Broken"], ["missing_alt", "No description (alt)"], ["external", "Other sites"]],
 };
 const PAGE = 100;
