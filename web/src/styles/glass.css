@@ -1,0 +1,158 @@
+/* QC V6 "glass" theme: a warm studio scene behind frosted panels, pill controls and a floating dock.
+   Layered on app.css: tokens first, then the surfaces that carry the glass. The scene is drawn in CSS (no outside
+   image, nothing to load in production). Plain solid surfaces come back for reduced transparency / high contrast. */
+
+:root {
+  --ground: #b39579; --surface: #f8efe6; --surface-2: #efe2d5; --line: rgb(74 49 33 / 17%);
+  --ink: #25201e; --ink-2: #423731; --ink-3: #5a4b42;
+  --measure: #09644f; --measure-ink: #fffaf5; --measure-soft: #dbe9e0; --marker: #996300; --marker-soft: #f4e4c4;
+  --critical: #a43c27; --high: #a7461c; --medium: #8a5a00; --low: #3d5e78; --good: #09644f;
+  --shadow: 0 22px 60px -20px rgb(35 21 14 / 40%);
+  --display: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --body: "Manrope", "Segoe UI", system-ui, sans-serif;
+  /* glass */
+  --g-rim: rgb(255 253 246 / 52%); --g-edge-light: rgb(255 254 247 / 84%); --g-edge-shade: rgb(57 40 28 / 19%);
+  --g-gloss: rgb(255 251 242 / 45%); --g-frame: rgb(247 234 219 / 30%); --g-rail: rgb(241 222 206 / 55%);
+  --g-card: rgb(250 242 232 / 58%); --g-card-light: rgb(255 251 245 / 38%); --g-raised: rgb(255 249 243 / 85%);
+  --g-inner: rgb(255 250 245 / 45%); --g-primary: #261e1b; --g-primary-ink: #fffaf5; --g-pick: #fff9f3; --g-pick-ink: #241b17;
+  --g-dark: 35 21 14; --g-frost: 14px;
+  --g-scene: radial-gradient(ellipse 70% 55% at 18% 12%, #e9d3bd 0%, transparent 60%),
+             radial-gradient(ellipse 55% 60% at 88% 20%, #c9a283 0%, transparent 62%),
+             radial-gradient(ellipse 80% 60% at 70% 95%, #8f6c52 0%, transparent 65%),
+             radial-gradient(ellipse 60% 50% at 10% 85%, #a98a6f 0%, transparent 60%),
+             linear-gradient(160deg, #cdb29a, #a9876c 55%, #8d6d55);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --ground: #3a2d27; --surface: #3b302c; --surface-2: #4a3c36; --line: rgb(243 221 198 / 19%);
+  --ink: #fff6e9; --ink-2: #e5d5c7; --ink-3: #cdbcae;
+  --measure: #75dac0; --measure-ink: #10251f; --measure-soft: #2b4a41; --marker: #f1be58; --marker-soft: #4a3a1d;
+  --critical: #ff9177; --high: #ff9f6e; --medium: #f1be58; --low: #9cc3e0; --good: #75dac0;
+  --g-rim: rgb(255 236 212 / 28%); --g-edge-light: rgb(255 242 225 / 40%); --g-edge-shade: rgb(11 6 5 / 30%);
+  --g-gloss: rgb(255 237 213 / 11%); --g-frame: rgb(42 31 29 / 56%); --g-rail: rgb(45 32 30 / 66%);
+  --g-card: rgb(52 40 37 / 66%); --g-card-light: rgb(106 88 81 / 28%); --g-raised: rgb(80 67 61 / 88%);
+  --g-inner: rgb(78 61 56 / 55%); --g-primary: #f3ddca; --g-primary-ink: #231a16; --g-pick: #f9eee0; --g-pick-ink: #241b17;
+  --g-dark: 10 4 3;
+  --g-scene: radial-gradient(ellipse 70% 55% at 18% 12%, #6b5040 0%, transparent 60%),
+             radial-gradient(ellipse 55% 60% at 88% 20%, #4f392d 0%, transparent 62%),
+             radial-gradient(ellipse 80% 60% at 70% 95%, #2a1e19 0%, transparent 65%),
+             linear-gradient(160deg, #4a382f, #33261f 60%, #241a15);
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --ground: #3a2d27; --surface: #3b302c; --surface-2: #4a3c36; --line: rgb(243 221 198 / 19%);
+  --ink: #fff6e9; --ink-2: #e5d5c7; --ink-3: #cdbcae;
+  --measure: #75dac0; --measure-ink: #10251f; --measure-soft: #2b4a41; --marker: #f1be58; --marker-soft: #4a3a1d;
+  --critical: #ff9177; --high: #ff9f6e; --medium: #f1be58; --low: #9cc3e0; --good: #75dac0;
+  --g-rim: rgb(255 236 212 / 28%); --g-edge-light: rgb(255 242 225 / 40%); --g-edge-shade: rgb(11 6 5 / 30%);
+  --g-gloss: rgb(255 237 213 / 11%); --g-frame: rgb(42 31 29 / 56%); --g-rail: rgb(45 32 30 / 66%);
+  --g-card: rgb(52 40 37 / 66%); --g-card-light: rgb(106 88 81 / 28%); --g-raised: rgb(80 67 61 / 88%);
+  --g-inner: rgb(78 61 56 / 55%); --g-primary: #f3ddca; --g-primary-ink: #231a16; --g-pick: #f9eee0; --g-pick-ink: #241b17;
+  --g-dark: 10 4 3;
+  --g-scene: radial-gradient(ellipse 70% 55% at 18% 12%, #6b5040 0%, transparent 60%),
+             radial-gradient(ellipse 55% 60% at 88% 20%, #4f392d 0%, transparent 62%),
+             radial-gradient(ellipse 80% 60% at 70% 95%, #2a1e19 0%, transparent 65%),
+             linear-gradient(160deg, #4a382f, #33261f 60%, #241a15);
+  color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------ scene + type */
+body { background: var(--ground); font-weight: 500; font-variant-numeric: tabular-nums; }
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--g-scene); pointer-events: none; }
+h1 { font: 780 clamp(28px, 3.2vw, 44px)/1.04 var(--display); letter-spacing: -0.05em; }
+h2, h3 { letter-spacing: -0.02em; }
+
+/* the glass recipe */
+.rail, main, .topbar, .tabbar {
+  border: 1px solid var(--g-rim);
+  box-shadow: inset 1px 1px 1px var(--g-edge-light), inset -1px -1px 1px var(--g-edge-shade),
+    inset 0 0 7px var(--g-gloss), 0 1px 3px rgb(var(--g-dark) / 17%), 0 22px 64px rgb(var(--g-dark) / 22%);
+  backdrop-filter: blur(var(--g-frost)) saturate(1.3);
+  -webkit-backdrop-filter: blur(var(--g-frost)) saturate(1.3);
+}
+
+/* ------------------------------------------------------------------ desktop frame: floating rail + stage */
+.app { grid-template-columns: 248px minmax(0, 1fr); gap: 14px; padding: 18px; }
+.rail { border-radius: 28px; top: 18px; height: calc(100vh - 36px); padding: 18px 12px;
+  background: linear-gradient(165deg, var(--g-gloss), transparent 32% 73%, var(--g-gloss)), var(--g-rail); }
+main { border-radius: 34px; padding: clamp(20px, 2.4vw, 38px) clamp(20px, 3vw, 48px) 56px;
+  background: linear-gradient(148deg, var(--g-gloss), transparent 19% 77%, color-mix(in srgb, var(--g-gloss) 48%, transparent)), var(--g-frame); }
+
+.logo-mark { border: 0; border-radius: 50%; width: 36px; height: 36px; background: var(--g-pick); color: var(--g-pick-ink);
+  box-shadow: inset 0 0 0 1px var(--g-gloss), 0 2px 7px rgb(var(--g-dark) / 14%); font: 800 12px var(--display); }
+.logo b { font: 800 13px var(--display); letter-spacing: 0.16em; text-transform: uppercase; }
+.site-now { margin: 0 6px 12px; padding: 7px 12px; border-radius: 999px; background: var(--g-inner); border: 1px solid var(--line); }
+.jump { border-radius: 999px !important; background: var(--g-inner) !important; border-color: var(--line) !important; }
+.nav-label { font: 800 10px var(--body); letter-spacing: 0.14em; color: var(--ink-2); }
+.nav { border-radius: 999px; color: var(--ink); font-weight: 650; }
+.nav:hover { background: var(--g-inner); }
+.nav[aria-current="page"] { background: var(--g-pick); color: var(--g-pick-ink); box-shadow: inset 0 1px 0 #fff, 0 2px 7px rgb(var(--g-dark) / 16%); }
+.nav .count { background: var(--g-raised); border-color: var(--g-rim); color: var(--ink); }
+.nav[aria-current="page"] .count { background: rgb(36 27 23 / 8%); border-color: rgb(36 27 23 / 18%); color: var(--g-pick-ink); }
+
+/* ------------------------------------------------------------------ cards, controls */
+.panel, .qc-tile, .sev-box, .stat, .card, .tile, .kpi {
+  border: 1px solid var(--g-rim); border-radius: 20px;
+  background: linear-gradient(144deg, var(--g-card-light), transparent 66%), var(--g-card);
+  box-shadow: inset 0 1px 1px var(--g-edge-light), inset 0 -1px 1px var(--g-edge-shade), 0 6px 18px rgb(var(--g-dark) / 9%);
+}
+.panel { padding: 18px 20px; }
+.btn { border-radius: 999px; min-height: 40px; padding: 8px 16px; font-weight: 750; background: var(--g-raised); border-color: var(--g-rim); }
+.btn:hover { background: var(--surface); border-color: var(--g-rim); }
+.btn.primary { background: var(--g-primary); border-color: transparent; color: var(--g-primary-ink); }
+.btn.primary:hover { filter: brightness(1.15); background: var(--g-primary); }
+.btn.quiet { background: none; border-color: transparent; }
+.btn.quiet:hover { background: var(--g-inner); }
+.btn.small { min-height: 30px; }
+.seg { border-radius: 999px; padding: 3px; gap: 2px; background: var(--g-inner); border: 1px solid var(--g-rim); box-shadow: inset 0 1px 0 var(--g-gloss); }
+.seg button { border-radius: 999px; font-weight: 700; min-height: 34px; }
+.seg button[aria-pressed="true"], .seg button[aria-checked="true"], .seg button[aria-selected="true"] {
+  background: var(--g-primary); color: var(--g-primary-ink); font-weight: 750; }
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+  border-radius: 14px; border: 1px solid var(--line); background: var(--g-raised); }
+.pill { border-radius: 999px; font-weight: 700; }
+
+/* tables: rounded header band, hairline rows */
+table { border-collapse: separate; border-spacing: 0; }
+th { background: var(--g-inner); font-weight: 800; color: var(--ink-2); }
+th:first-child { border-radius: 10px 0 0 10px; } th:last-child { border-radius: 0 10px 10px 0; }
+.table-wrap { border-radius: 16px; background: var(--g-inner); border: 1px solid var(--g-rim); }
+
+/* ------------------------------------------------------------------ the result: metric tiles */
+.qc-tiles { gap: 12px; }
+.qc-tile { border-top-width: 1px; padding: 14px 16px; min-height: 118px; align-content: space-between; }
+.qc-tile span { font-weight: 750; color: var(--ink-2); }
+.qc-tile b { font: 820 clamp(26px, 2.6vw, 38px)/1.05 var(--display); letter-spacing: -0.05em; }
+.qc-tile.bad { background: radial-gradient(ellipse at 5% -20%, color-mix(in srgb, var(--critical) 28%, transparent), transparent 68%), var(--g-card); }
+.qc-tile.bad b { color: var(--critical); }
+.qc-tile.warn b { color: var(--medium); }
+.qc-tile.good b { color: var(--good); }
+.big-num b { font-family: var(--display); font-weight: 820; letter-spacing: -0.05em; }
+.progress-line { border-radius: 999px; background: rgb(81 49 32 / 14%); }
+.progress-line i { border-radius: 999px; background: var(--measure); }
+.stepper li { font-weight: 700; }
+.good-note { background: var(--g-inner); border: 1px solid var(--g-rim); border-radius: 16px; }
+.ticket textarea, .ticket input { background: var(--g-raised); border-radius: 14px; }
+.error-box { border-radius: 16px; }
+
+/* ------------------------------------------------------------------ phone: glass top bar + floating dock */
+@media (max-width: 900px) {
+  .app { display: block; padding: 0; gap: 0; }
+  main { border-radius: 24px; margin: 8px 10px 96px; padding: 18px 14px 28px; }
+  .topbar { margin: 8px 10px 0; border-radius: 22px;
+    background: linear-gradient(165deg, var(--g-gloss), transparent 32% 73%, var(--g-gloss)), var(--g-rail); }
+  .tabbar { grid-template-columns: repeat(4, 1fr); left: 11px; right: 11px; bottom: calc(9px + env(safe-area-inset-bottom)); border-radius: 999px; padding: 4px;
+    background: linear-gradient(165deg, var(--g-gloss), transparent 32% 73%, var(--g-gloss)), var(--g-rail); }
+  .tabbar a, .tabbar button { border-radius: 999px; }
+  .tabbar [aria-current="page"] { background: var(--g-pick); color: var(--g-pick-ink); }
+  .rail { border-radius: 0 28px 28px 0; top: 0; height: 100vh; background: var(--surface); }
+  .qc-tile { min-height: 0; }
+}
+
+/* ------------------------------------------------------------------ comfort + access */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  .rail, main, .topbar, .tabbar, .panel, .qc-tile, .table-wrap { background: var(--surface) !important;
+    backdrop-filter: none; -webkit-backdrop-filter: none; }
+  body::before { display: none; }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .rail, main, .topbar, .tabbar { background: var(--surface); }
+}
