@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -616,6 +616,82 @@ async def create_ticket(fix_id: int, request: Request, me=Depends(current_member
     await pool.execute("UPDATE fixes SET ticket_key = $2 WHERE id = $1", fix_id, t["key"])
     await services.update_fix(pool, fix_id, me["id"], ticket_url=t["url"])
     return t
+
+
+# ------------------------------------------------------------------ internal tickets (one per issue, always)
+@app.get("/api/v2/sites/{site_id}/internal-tickets")
+async def internal_tickets(site_id: int, request: Request, view: str = "to_raise", q: str = "",
+                           limit: int = Query(200, le=1000), offset: int = 0, me=Depends(current_member)):
+    """Every issue as a ready-to-paste ticket written from the site's ticket template (QC-<number>)."""
+    from qc6 import internal_tickets as it
+    s = await site_for(site_id, me)
+    if view not in it.VIEWS:
+        raise problem(400, "Unknown view")
+    return await it.list_for_site(await get_pool(), s, view, q.strip()[:200], limit, offset, str(request.base_url).rstrip("/") + "/")
+
+
+@app.get("/api/v2/sites/{site_id}/internal-tickets.csv")
+async def internal_tickets_csv(site_id: int, request: Request, view: str = "to_raise", me=Depends(current_member)):
+    """The tickets as a sheet: one row per ticket with its full text, for raising many at once."""
+    import csv
+    import io
+    from qc6 import internal_tickets as it
+    s = await site_for(site_id, me)
+    if view not in it.VIEWS:
+        raise problem(400, "Unknown view")
+    data = await it.list_for_site(await get_pool(), s, view, "", 100_000, 0, str(request.base_url).rstrip("/") + "/")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Ticket", "Title", "Priority", "Type", "Pages", "Status in QC", "Raised as", "Ticket text"])
+    for t in data["tickets"]:
+        w.writerow([t["ticket_id"], t["title"], t["priority"], t["type"], t["pages"], t["qc_status_text"], t["raised_ref"] or "", t["text"]])
+    name = f"qc-tickets-{re.sub(r'[^a-z0-9.-]+', '-', s['primary_host'].lower())}-{view}.csv"
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+class TicketTemplateIn(BaseModel):
+    title: str = Field("", max_length=300)
+    body: str = Field("", max_length=20_000)
+
+
+@app.put("/api/v2/sites/{site_id}/ticket-template")
+async def put_ticket_template(site_id: int, body: TicketTemplateIn, me=Depends(current_member)):
+    """Save the site's ticket template; send both empty to go back to QC's own."""
+    from qc6 import internal_tickets as it
+    can_edit(me)
+    await site_for(site_id, me)
+    try:
+        it.check_template(body.title, body.body)
+    except ValueError as e:
+        raise problem(400, "Check the template", str(e))
+    pool = await get_pool()
+    await pool.execute("UPDATE sites SET settings = settings || jsonb_build_object('ticket_template', $2::jsonb) WHERE id = $1",
+                       site_id, {"title": body.title.strip(), "body": body.body.strip()})
+    await services.log(pool, me["workspace_id"], me["id"], "ticket_template.save", f"site:{site_id}", {"default": not (body.title or body.body)})
+    return it.template_of({"ticket_template": {"title": body.title, "body": body.body}})
+
+
+class RaisedIn(BaseModel):
+    ref: str = Field("", max_length=120)
+
+
+@app.post("/api/v2/fixes/{fix_id}/raised")
+async def mark_raised(fix_id: int, body: RaisedIn, me=Depends(current_member)):
+    """Record the number the Ops team's tool gave this ticket (empty: not raised after all)."""
+    can_edit(me)
+    pool = await get_pool()
+    ok = await pool.fetchval("SELECT 1 FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
+                             fix_id, me["workspace_id"])
+    if not ok:
+        raise problem(404, "Ticket not found")
+    ref = body.ref.strip() or None
+    await pool.execute("UPDATE fixes SET raised_ref = $2, raised_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END, "
+                       "raised_by = CASE WHEN $2::text IS NULL THEN NULL ELSE $3::bigint END, updated_at = now() WHERE id = $1",
+                       fix_id, ref, me["id"])
+    await pool.execute("INSERT INTO fix_events (fix_id, kind, actor_id, detail) VALUES ($1, 'ticket', $2, $3)",
+                       fix_id, me["id"], {"raised_as": ref, "internal": True})
+    return {"ok": True, "raised_ref": ref}
 
 
 @app.post("/api/v2/sites/{site_id}/tickets/sync")

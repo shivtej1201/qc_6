@@ -17,7 +17,7 @@ from qc6.settings import settings  # noqa: E402
 WEB_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist")
 AXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qc6", "assets", "axe.min.js")
 pytestmark = pytest.mark.skipif(not os.path.isdir(WEB_DIST), reason="web app not built (cd web && npm run build)")
-SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "fixes?layout=board", "pages", "links", "links?d=anchors", "journeys"]
+SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "fixes?layout=board", "pages", "links", "links?d=anchors", "journeys", "tickets"]
 
 
 @pytest.fixture(scope="module")
