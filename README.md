@@ -182,6 +182,13 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
+* **Tickets** (menu): every issue QC finds is an internal ticket, always, named QC-0001, QC-0002... and written
+  from the site's **ticket template** (title, priority P1-P4, type, page type, description, affected addresses,
+  affected pages, steps to reproduce, expected, actual, how to fix, how QC will check). Open one, **Copy the whole
+  ticket** into the Ops team's tool, then type the number it got there and **Mark raised**. Views: To raise, Raised,
+  Closed (QC closes a ticket when a check confirms the fix), All. **Ticket template** edits the template for the
+  site; {placeholders} are listed under it. **Download as sheet** gives every ticket with its full text, and the
+  Excel report has a **Tickets** sheet for the issues that check found.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:

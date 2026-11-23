@@ -11,6 +11,7 @@ import { TodayView } from "./views/Today";
 import { PagesView } from "./views/Pages";
 import { LiveView } from "./views/Live";
 import { FixesView } from "./views/Fixes";
+import { TicketsView } from "./views/Tickets";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
 import { LinksView } from "./views/Links";
@@ -30,6 +31,7 @@ export function go(view: string, params: Record<string, string | number> = {}) {
 
 const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, string, string][] }[] = [
   { label: "URL QC", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs results ticket"], ["fixes", "fix", "Problems", "issues problems fixes inbox"],
+    ["tickets", "page", "Tickets", "ticket raise ops jira template internal"],
     ["links", "link", "Links & images", "broken redirects images"]] },
   { label: "More tools", more: true, items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
     ["growth", "growth", "Growth", "opportunities search console queries"], ["pages", "layers", "All pages", "inventory urls compare"],
@@ -38,7 +40,7 @@ const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, strin
 const NAV = NAV_GROUPS.flatMap((g) => g.items);
 const SCREEN_VIEWS: Record<string, true> = Object.fromEntries([...NAV.map((n) => n[0]), "page"].map((v) => [v, true]));
 const SCREENS: Screen[] = NAV.map(([view, icon, label, words]) => ({ view, icon, label, words }));
-const TABS: [string, string, string][] = [["start", "play", "Check"], ["fixes", "fix", "Problems"], ["links", "link", "Links"]];
+const TABS: [string, string, string][] = [["start", "play", "Check"], ["fixes", "fix", "Problems"], ["tickets", "page", "Tickets"]];
 const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", account: "Your account" };
 
 function App({ local }: { local: boolean }) {
@@ -105,7 +107,7 @@ function App({ local }: { local: boolean }) {
   else {
     const p = { site, params: route.params };
     body = {
-      today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, page: <PageView {...p} />,
+      today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, tickets: <TicketsView {...p} />, page: <PageView {...p} />,
       journeys: <JourneysView {...p} />, links: <LinksView {...p} />,
     }[route.view] || <TodayView {...p} />;
   }

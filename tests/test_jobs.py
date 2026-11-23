@@ -348,6 +348,30 @@ def test_full_workbook_like_the_v5_sample(env):
     assert t["qc"]["broken_links"]["unique"] >= 1 and t["qc"]["pages"]["checked"] == 90
     assert t["ticket"]["priority"] and "/gone" in t["ticket"]["text"] and "STEPS TO REPRODUCE" in t["ticket"]["text"]
     assert c.get("/api/v2/runs/999999/ops-ticket").status_code == 404
+    # Tickets tab: every issue is an internal ticket from the site's template
+    assert "Tickets" in names
+    tk = rows("Tickets")
+    assert tk[0][0] == "Ticket" and tk[1][0].startswith("QC-") and "STEPS TO REPRODUCE" in tk[1][7]
+    sid = j["site_id"]
+    lst = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=to_raise").json()
+    assert lst["counts"]["to_raise"] >= 1 and lst["template"]["is_default"] and len(lst["tickets"]) == lst["counts"]["to_raise"]
+    gone = next(t for t in lst["tickets"] if "/gone" in t["text"])
+    assert gone["ticket_id"] == f"QC-{gone['fix_id']:04d}" and gone["priority"].startswith("P") and gone["type"] == "Links"
+    assert c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "{nope}", "body": ""}, headers=H).status_code == 400
+    r = c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "OPS | {priority} | {title}", "body": "Pages: {pages}\n{page_list}"}, headers=H)
+    assert r.status_code == 200 and not r.json()["is_default"]
+    again = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=to_raise&q={gone['ticket_id']}").json()["tickets"][0]
+    assert again["title"].startswith("OPS | P") and again["text"].startswith("Pages: ")
+    assert c.post(f"/api/v2/fixes/{gone['fix_id']}/raised", json={"ref": "OPS-1234"}, headers=H).json()["raised_ref"] == "OPS-1234"
+    raised = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=raised").json()
+    assert [t["raised_ref"] for t in raised["tickets"]] == ["OPS-1234"] and raised["counts"]["raised"] == 1
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all&q=ops-1234").json()["tickets"][0]["fix_id"] == gone["fix_id"]
+    csv_r = c.get(f"/api/v2/sites/{sid}/internal-tickets.csv?view=raised")
+    assert csv_r.status_code == 200 and "OPS-1234" in csv_r.text and "attachment" in csv_r.headers["content-disposition"]
+    c.post(f"/api/v2/fixes/{gone['fix_id']}/raised", json={"ref": ""}, headers=H)
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=raised").json()["counts"]["raised"] == 0
+    c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "", "body": ""}, headers=H)
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets").json()["template"]["is_default"]
     assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
     assert len(rows("QC Problem Pages")) > 1 and rows("QC Problem Pages")[1][7] in ("New",) or "Seen before" in rows("QC Problem Pages")[1][7]
     pkg = c.get(f"/api/v2/runs/{rid}/package.zip")
