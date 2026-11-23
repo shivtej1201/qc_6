@@ -44,12 +44,33 @@ To skip the password question, set it first (any characters work, including `@`)
 Or set the full address. PowerShell: `$env:QC6_DATABASE_URL = "postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6"`
 · Command Prompt: `set QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6`
 
-### Linux / macOS
+### macOS (Apple Silicon or Intel)
+
+1. Install Python 3.11+ and PostgreSQL 16 once. With [Homebrew](https://brew.sh):
+   ```bash
+   brew install python@3.12 postgresql@16
+   ```
+   ```bash
+   brew services start postgresql@16
+   ```
+   Or use [Postgres.app](https://postgresapp.com) (open it, press Initialize) and the python.org installer.
+   The `python3` that comes with macOS is too old.
+2. Unzip QC and **double-click `start.command`** (or run `./start.sh` in Terminal). The first start sets everything up
+   (a few minutes), finds your PostgreSQL by itself, creates the `qc6` database and opens QC in your browser.
+   Ctrl+C in that Terminal window stops QC.
+
+If macOS says the file can't be opened because it was downloaded, right-click `start.command` → Open once, or run:
+```bash
+xattr -dr com.apple.quarantine path/to/qc_6
+```
+
+### Linux
 
 ```bash
-export QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6     # the database is created for you
 ./start.sh
 ```
+It finds a local PostgreSQL (asking for the `postgres` password if it needs one) and creates the `qc6` database. To use
+another server: `export QC6_DATABASE_URL=postgresql://USER@HOST:5432/qc6` (password in `QC6_DB_PASSWORD`).
 
 ### Docker (any system)
 

@@ -27,3 +27,42 @@ jobs:
         working-directory: web
         run: npm ci && npm run build
       - run: python -m pytest -q
+
+  wheels:
+    # every package must install without compiling on macOS (Apple Silicon + Intel), Windows and Linux, Python 3.11-3.13
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install packaging && python scripts/check_wheels.py requirements.txt
+
+  macos:
+    # QC on a Mac the way people run it: Homebrew PostgreSQL (your own user, no password), Apple Silicon
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      QC6_TEST_DATABASE_URL: postgresql://runner@127.0.0.1:5432/qc6_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - name: More loopback addresses (tests serve stand-in sites on 127.0.0.2-9; Linux has the whole 127/8, macOS only 127.0.0.1)
+        run: for i in 2 3 4 5 6 7 8 9; do sudo ifconfig lo0 alias 127.0.0.$i up; done
+      - name: PostgreSQL 16 from Homebrew
+        run: |
+          brew install postgresql@16
+          brew services start postgresql@16
+          for i in $(seq 1 30); do "$(brew --prefix postgresql@16)/bin/pg_isready" -h 127.0.0.1 && break; sleep 2; done
+          "$(brew --prefix postgresql@16)/bin/createdb" -h 127.0.0.1 qc6_test
+      - run: pip install -r requirements.txt && python -m playwright install chromium
+      - name: start.sh finds the Mac's PostgreSQL by itself
+        run: |
+          url="$(python -m qc6.db.find_server)"
+          echo "$url"
+          test "$url" = "postgresql://$USER@127.0.0.1:5432/qc6"
+          bash -n start.sh && test -x start.sh && test -x start.command
+      - name: Web app (prebuilt dist is used)
+        run: test -f web/dist/index.html
+      - run: python -m pytest -q
