@@ -59,6 +59,13 @@ export interface OpsTicket { run_id: number; status: string;
     links: { unique: number }; images: { unique: number }; broken_links: QcBlock; redirects: QcBlock; broken_images: QcBlock };
   ticket: { title: string; priority: string; text: string } }
 
+export interface InternalTicket { id: number; ticket_id: string; group_key: string; issue: string; title: string; text: string;
+  priority: string; severity: Severity; type: string; urls: number; pages: number; affected: string; fixes: number;
+  state: "to_raise" | "raised" | "closed"; raised_ref: string | null; raised_at: string | null; regressed: boolean; attachment: string }
+export interface TicketTemplate { title: string; body: string; is_default: boolean }
+export interface InternalTickets { tickets: InternalTicket[]; counts: Record<string, number>; template: TicketTemplate;
+  placeholders: { name: string; means: string }[] }
+
 export type Severity = "critical" | "high" | "medium" | "low";
 export type FixStatus = "open" | "in_progress" | "fixed_pending_check" | "verified" | "wont_fix";
 export interface Site { id: number; name: string; base_url: string; primary_host: string; settings: Record<string, any>;
@@ -210,6 +217,11 @@ export const api = {
   editBrief: (id: number, name: string, text: string) => req<Brief>("PUT", `/api/v2/briefs/${id}/sections/${name}`, { text }),
   rewriteBrief: (id: number, name: string) => req<Brief>("POST", `/api/v2/briefs/${id}/sections/${name}/rewrite`),
   deleteBrief: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/briefs/${id}`),
+  internalTickets: (sid: number, view: string, q = "") =>
+    req<InternalTickets>("GET", `/api/v2/sites/${sid}/internal-tickets?view=${view}&q=${encodeURIComponent(q)}`),
+  saveTicketTemplate: (sid: number, title: string, body: string) => req<TicketTemplate>("PUT", `/api/v2/sites/${sid}/ticket-template`, { title, body }),
+  markRaised: (sid: number, tid: number, ref: string) =>
+    req<{ ok: boolean; raised_ref: string | null }>("POST", `/api/v2/sites/${sid}/internal-tickets/${tid}/raised`, { ref }),
   opsTicket: (runId: number) => req<OpsTicket>("GET", `/api/v2/runs/${runId}/ops-ticket`),
   anchors: (runId: number) => req<Anchors>("GET", `/api/v2/runs/${runId}/anchors`),
   pageHtml: (runId: number, url: string) => req<string>("GET", `/api/v2/runs/${runId}/html?${new URLSearchParams({ url })}`),

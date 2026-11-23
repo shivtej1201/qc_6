@@ -186,6 +186,15 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   QC is open, until you switch it off. Remembered on this computer. The browser lets go while QC's tab is hidden or
   minimised and QC takes it again when you come back. It works on https or when QC runs on the same computer
   (127.0.0.1 / localhost); on a plain http network address the switch says it can't.
+* **Tickets** (menu): **one ticket per issue type**, not per URL: all links that redirect (3xx) are one ticket, all
+  broken links another, each kind of page problem (soft 404, structured data missing...) another. Each is numbered
+  QC-0001, QC-0002... (the number stays with that issue on that site), written from the site's **ticket template**
+  (issue, priority P1-P4, "100 URLs on 10,000 pages", the first 20 addresses with their status, steps to reproduce,
+  expected, actual, how to fix), and has a **Download attachment (Excel)** with every affected address, its status,
+  where it redirects, on how many pages, example pages, and every page / address pair. Copy the ticket into the Ops
+  team's tool, attach the sheet, then type the number it got and **Mark raised**. Views: To raise, Raised, Closed (QC
+  closes a ticket when a check finds none of its addresses failing), All. **Download as sheet** lists every ticket
+  with its text; the Excel report has a **Tickets** sheet.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:

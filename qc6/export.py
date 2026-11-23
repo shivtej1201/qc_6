@@ -249,7 +249,9 @@ async def workbook_file(pool, site: Dict[str, Any], run_id: int) -> str:
                     if len(row) > 3 and row[3].isdigit():
                         row[3] = int(row[3])
                     yield row
-        extra = {"problems": await problem_rows(pool, run_id), "problem_header": PROBLEM_HEADER, "templates": templates,
+        from qc6 import internal_tickets
+        tickets = (await internal_tickets.list_for_site(pool, site, "all", "", "", run_id=run_id))["tickets"]
+        extra = {"tickets": tickets, "problems": await problem_rows(pool, run_id), "problem_header": PROBLEM_HEADER, "templates": templates,
                  "severity": sev, "score": (run.get("summary") or {}).get("score"),
                  "page_rows": page_rows, "page_header": DETAIL_HEADER}
         return await asyncio.to_thread(workbook.build, run, site, extra)
