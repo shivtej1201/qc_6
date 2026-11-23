@@ -244,14 +244,15 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
 
 
 def _tickets_sheet(book: "_Book", extra: Dict[str, Any]) -> None:
-    """One internal ticket per issue this check found (QC-<number>), written from the site's ticket template."""
+    """One internal ticket per issue type this check found (QC-<number>); each URL is in that ticket's attachment."""
     if "tickets" not in extra:
         return
     state = {"to_raise": "To raise", "raised": "Raised", "closed": "Closed"}
-    book.table("Tickets", ["Ticket", "Title", "Priority", "Type", "Pages", "State", "Raised as", "Ticket text (copy into the Ops tool)"],
-               ([t["ticket_id"], t["title"], t["priority"], t["type"], t["pages"], state.get(t["state"], t["state"]),
-                 t["raised_ref"] or "", t["text"]] for t in extra["tickets"]),
-               [11, 70, 14, 12, 9, 10, 14, 120], note_if_empty="No issues found, so no tickets.")
+    book.table("Tickets", ["Ticket", "Issue", "Priority", "Affected", "State", "Raised as", "Attachment (download in QC: Tickets)",
+                           "Ticket text (copy into the Ops tool)"],
+               ([t["ticket_id"], t["issue"], t["priority"], t["affected"], state.get(t["state"], t["state"]),
+                 t["raised_ref"] or "", t["attachment"], t["text"]] for t in extra["tickets"]),
+               [11, 40, 14, 26, 10, 14, 44, 120], note_if_empty="No issues found, so no tickets.")
 
 
 def _simple_sheets(book: "_Book", run: Dict[str, Any], site: Dict[str, Any]) -> None:

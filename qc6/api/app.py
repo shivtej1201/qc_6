@@ -618,33 +618,59 @@ async def create_ticket(fix_id: int, request: Request, me=Depends(current_member
     return t
 
 
-# ------------------------------------------------------------------ internal tickets (one per issue, always)
+# ------------------------------------------------------------------ internal tickets (one per issue type)
 @app.get("/api/v2/sites/{site_id}/internal-tickets")
-async def internal_tickets(site_id: int, request: Request, view: str = "to_raise", q: str = "",
-                           limit: int = Query(200, le=1000), offset: int = 0, me=Depends(current_member)):
-    """Every issue as a ready-to-paste ticket written from the site's ticket template (QC-<number>)."""
+async def internal_tickets(site_id: int, request: Request, view: str = "to_raise", q: str = "", me=Depends(current_member)):
+    """One ticket per issue type (all redirecting links, all broken links...), written from the site's ticket template."""
     from qc6 import internal_tickets as it
     s = await site_for(site_id, me)
     if view not in it.VIEWS:
         raise problem(400, "Unknown view")
-    return await it.list_for_site(await get_pool(), s, view, q.strip()[:200], limit, offset, str(request.base_url).rstrip("/") + "/")
+    return await it.list_for_site(await get_pool(), s, view, q.strip()[:200], str(request.base_url).rstrip("/") + "/")
+
+
+async def _issue_ticket(site_id: int, tid: int, me, request: Request):
+    from qc6 import internal_tickets as it
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    key = await pool.fetchval("SELECT group_key FROM issue_tickets WHERE id = $1 AND site_id = $2", tid, site_id)
+    if key is None:
+        raise problem(404, "Ticket not found")
+    data = await it.list_for_site(pool, s, "all", "", str(request.base_url).rstrip("/") + "/")
+    t = next((x for x in data["tickets"] if x["id"] == tid), None)
+    if t is None:
+        raise problem(404, "Ticket not found", "This issue is no longer reported.")
+    return s, pool, key, t
+
+
+@app.get("/api/v2/sites/{site_id}/internal-tickets/{tid}/attachment.xlsx")
+async def internal_ticket_attachment(site_id: int, tid: int, request: Request, me=Depends(current_member)):
+    """The sheet to attach to the Ops ticket: every affected address (or page), its status, and where it was found."""
+    from starlette.background import BackgroundTask
+    from qc6 import internal_tickets as it
+    s, pool, key, t = await _issue_ticket(site_id, tid, me, request)
+    addrs, pairs = await it.attachment_rows(pool, site_id, key)
+    path = await asyncio.to_thread(it.write_attachment, t, addrs, pairs)
+    return FileResponse(path, filename=t["attachment"], background=BackgroundTask(os.unlink, path),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/v2/sites/{site_id}/internal-tickets.csv")
 async def internal_tickets_csv(site_id: int, request: Request, view: str = "to_raise", me=Depends(current_member)):
-    """The tickets as a sheet: one row per ticket with its full text, for raising many at once."""
+    """The tickets as a sheet: one row per issue ticket with its full text."""
     import csv
     import io
     from qc6 import internal_tickets as it
     s = await site_for(site_id, me)
     if view not in it.VIEWS:
         raise problem(400, "Unknown view")
-    data = await it.list_for_site(await get_pool(), s, view, "", 100_000, 0, str(request.base_url).rstrip("/") + "/")
+    data = await it.list_for_site(await get_pool(), s, view, "", str(request.base_url).rstrip("/") + "/")
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Ticket", "Title", "Priority", "Type", "Pages", "Status in QC", "Raised as", "Ticket text"])
+    w.writerow(["Ticket", "Issue", "Title", "Priority", "Type", "Affected", "URLs", "Pages", "State", "Raised as", "Attachment", "Ticket text"])
     for t in data["tickets"]:
-        w.writerow([t["ticket_id"], t["title"], t["priority"], t["type"], t["pages"], t["qc_status_text"], t["raised_ref"] or "", t["text"]])
+        w.writerow([t["ticket_id"], t["issue"], t["title"], t["priority"], t["type"], t["affected"], t["urls"], t["pages"],
+                    t["state"], t["raised_ref"] or "", t["attachment"], t["text"]])
     name = f"qc-tickets-{re.sub(r'[^a-z0-9.-]+', '-', s['primary_host'].lower())}-{view}.csv"
     return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -676,21 +702,19 @@ class RaisedIn(BaseModel):
     ref: str = Field("", max_length=120)
 
 
-@app.post("/api/v2/fixes/{fix_id}/raised")
-async def mark_raised(fix_id: int, body: RaisedIn, me=Depends(current_member)):
+@app.post("/api/v2/sites/{site_id}/internal-tickets/{tid}/raised")
+async def mark_raised(site_id: int, tid: int, body: RaisedIn, me=Depends(current_member)):
     """Record the number the Ops team's tool gave this ticket (empty: not raised after all)."""
     can_edit(me)
+    await site_for(site_id, me)
     pool = await get_pool()
-    ok = await pool.fetchval("SELECT 1 FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
-                             fix_id, me["workspace_id"])
-    if not ok:
-        raise problem(404, "Ticket not found")
     ref = body.ref.strip() or None
-    await pool.execute("UPDATE fixes SET raised_ref = $2, raised_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END, "
-                       "raised_by = CASE WHEN $2::text IS NULL THEN NULL ELSE $3::bigint END, updated_at = now() WHERE id = $1",
-                       fix_id, ref, me["id"])
-    await pool.execute("INSERT INTO fix_events (fix_id, kind, actor_id, detail) VALUES ($1, 'ticket', $2, $3)",
-                       fix_id, me["id"], {"raised_as": ref, "internal": True})
+    done = await pool.execute("UPDATE issue_tickets SET raised_ref = $3, raised_at = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END, "
+                              "raised_by = CASE WHEN $3::text IS NULL THEN NULL ELSE $4::bigint END WHERE id = $1 AND site_id = $2",
+                              tid, site_id, ref, me["id"])
+    if done == "UPDATE 0":
+        raise problem(404, "Ticket not found")
+    await services.log(pool, me["workspace_id"], me["id"], "ticket.raised", f"issue_ticket:{tid}", {"raised_as": ref})
     return {"ok": True, "raised_ref": ref}
 
 

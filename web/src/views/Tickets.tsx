@@ -3,8 +3,9 @@ import { api, type InternalTicket, type InternalTickets, type Site } from "../ap
 import { useViewMotion } from "../motion";
 import { ErrorBox, Icon, Sev, count, day, useLoad, useToast } from "../ui";
 
-/* Tickets: every issue QC finds is a ticket (QC-0001...), written from the site's ticket template, ready to paste into
-   the Ops team's tool. Mark it raised with the number it got there; QC closes it when a check confirms the fix. */
+/* Tickets: one ticket per issue type (all redirecting links, all broken links, each kind of page problem), written from
+   the site's ticket template. Every affected URL is in the ticket's attachment (Excel). Mark it raised with the number
+   the Ops tool gave it; QC closes it when a check finds none of its addresses failing. */
 
 const VIEWS: [string, string][] = [["to_raise", "To raise"], ["raised", "Raised"], ["closed", "Closed"], ["all", "All"]];
 const STATE_TEXT: Record<InternalTicket["state"], string> = { to_raise: "To raise", raised: "Raised", closed: "Closed" };
@@ -30,8 +31,9 @@ export function TicketsView({ site, params }: { site: Site; params: URLSearchPar
       <div className="head">
         <div>
           <h1>Tickets</h1>
-          <p className="lede">Every issue QC finds is a ticket here, written from your ticket template. Copy it into the Ops team's tool,
-            then mark it raised with the number it got. QC closes it when a check confirms the fix.</p>
+          <p className="lede">One ticket per issue type, for example all links that redirect, with every affected URL in its attachment.
+            Copy the ticket into the Ops team's tool, attach the sheet, then mark it raised with the number it got.
+            QC closes it when a check finds the issue fixed.</p>
         </div>
         <div className="row">
           <a className="btn" href={`/api/v2/sites/${site.id}/internal-tickets.csv?view=${view}`} download><Icon name="page" />Download as sheet</a>
@@ -59,22 +61,21 @@ export function TicketsView({ site, params }: { site: Site; params: URLSearchPar
         : (
           <ul className="ticket-list">
             {d.tickets.map((t) => (
-              <TicketRow key={t.id} t={t} open={openId === t.id} onToggle={() => setOpenId(openId === t.id ? null : t.id)} onChanged={list.reload} />
+              <TicketRow key={t.id} siteId={site.id} t={t} open={openId === t.id} onToggle={() => setOpenId(openId === t.id ? null : t.id)} onChanged={list.reload} />
             ))}
           </ul>
         )}
-      {d && d.tickets.length >= 200 && <p className="faint">Showing the first 200. Download as sheet has all of them.</p>}
     </div>
   );
 }
 
-function TicketRow({ t, open, onToggle, onChanged }: { t: InternalTicket; open: boolean; onToggle: () => void; onChanged: () => void }) {
+function TicketRow({ siteId, t, open, onToggle, onChanged }: { siteId: number; t: InternalTicket; open: boolean; onToggle: () => void; onChanged: () => void }) {
   const toast = useToast();
   const [refText, setRefText] = useState(t.raised_ref || "");
   const [busy, setBusy] = useState(false);
   const save = async (value: string) => {
     setBusy(true);
-    try { await api.markRaised(t.fix_id, value); toast(value ? `${t.ticket_id} marked raised as ${value}.` : `${t.ticket_id} is back in To raise.`); onChanged(); }
+    try { await api.markRaised(siteId, t.id, value); toast(value ? `${t.ticket_id} marked raised as ${value}.` : `${t.ticket_id} is back in To raise.`); onChanged(); }
     catch (e: any) { toast(e.detail || e.title || e.message); }
     finally { setBusy(false); }
   };
@@ -84,14 +85,14 @@ function TicketRow({ t, open, onToggle, onChanged }: { t: InternalTicket; open: 
       <button className="ticket-head" aria-expanded={open} aria-controls={panel} onClick={onToggle}>
         <span className="mono ticket-id">{t.ticket_id}</span>
         <Sev s={t.severity} />
-        <span className="ticket-title">{t.issue}{t.address && <small className="mono">{t.address}</small>}</span>
-        <span className="faint hide-phone">{t.type} · {count(t.pages)} pages</span>
+        <span className="ticket-title">{t.issue}<small>{t.affected}</small></span>
+        <span className="faint hide-phone">{t.type}</span>
         <span className={`pill ${t.state === "closed" ? "good" : t.state === "raised" ? "new" : "warn"}`}>
           {STATE_TEXT[t.state]}{t.raised_ref ? `: ${t.raised_ref}` : ""}</span>
       </button>
       {open && (
         <div className="ticket-body ticket" id={panel}>
-          <p className="faint" style={{ margin: 0 }}>{t.priority} · {t.type} · {count(t.pages)} pages · in QC: {t.qc_status_text}
+          <p className="faint" style={{ margin: 0 }}>{t.priority} · {t.type} · {t.affected}
             {t.regressed ? " · came back after a fix" : ""}{t.raised_at ? ` · raised ${day(t.raised_at)}` : ""}</p>
           <label className="ticket-label" htmlFor={`${panel}-title`}>Title</label>
           <div className="ticket-title"><input id={`${panel}-title`} readOnly value={t.title} onFocus={(e) => e.target.select()} />
@@ -100,6 +101,8 @@ function TicketRow({ t, open, onToggle, onChanged }: { t: InternalTicket; open: 
           <textarea id={`${panel}-text`} readOnly rows={16} value={t.text} onFocus={(e) => e.target.select()} />
           <div className="row" style={{ flexWrap: "wrap" }}>
             <button className="btn primary" onClick={() => copyText(`${t.title}\n\n${t.text}`, "Ticket", toast)}><Icon name="page" />Copy the whole ticket</button>
+            <a className="btn" href={`/api/v2/sites/${siteId}/internal-tickets/${t.id}/attachment.xlsx`} download={t.attachment}>
+              <Icon name="page" />Download attachment (Excel)</a>
             {t.state !== "closed" && (
               <form className="raise-form" onSubmit={(e) => { e.preventDefault(); save(refText.trim()); }}>
                 <label htmlFor={`${panel}-ref`}>Ops ticket number</label>
