@@ -952,6 +952,7 @@ async def delete_list(lid: int, me=Depends(current_member)):
 
 class CrawlIn(BaseModel):
     browser: bool = False
+    preset: Optional[str] = None        # speed: conservative | target | max_tested | enterprise_150k; None = picked by list size
 
 
 @app.post("/api/v2/lists/{lid}/start", status_code=201)
@@ -962,7 +963,7 @@ async def start_list(lid: int, body: CrawlIn, me=Depends(current_member)):
     can_edit(me)
     pool = await get_pool()
     try:
-        rid = await jobs.start_crawl(pool, me, lid, body.browser)
+        rid = await jobs.start_crawl(pool, me, lid, body.browser, body.preset)
     except LookupError:
         raise problem(404, "URL list not found")
     except ListError as e:

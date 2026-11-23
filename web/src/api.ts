@@ -35,7 +35,8 @@ export interface Job { id: number; site_id: number; source: "sitemap" | "single"
   run_id: number | null; run_status: string | null; run_kind: string | null; run_error: string | null;
   run_progress: { stage?: string; pages_done?: number; pages_total?: number; visits_done?: number; visits_total?: number; stages_done?: string[] } | null;
   run_summary: { pages?: number; score?: number | null; visited?: number } | null; run_started: string | null; run_finished: string | null;
-  results?: Partial<Record<Severity, { problems: number; pages: number }>> }
+  results?: Partial<Record<Severity, { problems: number; pages: number }>>;
+  speeds?: { id: string; label: string; rps: number; max_rps: number; minutes: number }[]; speed_default?: string }
 
 export interface ImpactWindow { from: string; to: string; clicks: number; impressions: number; ctr: number | null; position: number | null }
 export interface FixImpact { state: "ok" | "not_verified" | "no_search_console"; text: string; verified_at?: string; pages?: number;
@@ -195,7 +196,7 @@ export const api = {
   uploadList: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("file", x)); return req<Job & { skipped_files?: string[] }>("POST", "/api/v2/lists/upload", f); },
   cancelList: (id: number) => req<{ ok: boolean }>("POST", `/api/v2/lists/${id}/cancel`),
   deleteList: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/lists/${id}`),
-  startList: (id: number, browser: boolean) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser }),
+  startList: (id: number, browser: boolean, preset?: string) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser, preset }),
   worker: () => req<{ alive: boolean; waiting: number }>("GET", "/api/v2/worker"),
   briefs: (sid: number, url = "") => req<{ briefs: Brief[] }>("GET", `/api/v2/sites/${sid}/briefs?${new URLSearchParams({ url })}`),
   makeBrief: (sid: number, url: string) => req<Brief>("POST", `/api/v2/sites/${sid}/briefs`, { url }),

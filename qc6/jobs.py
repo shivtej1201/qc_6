@@ -142,13 +142,20 @@ async def recover(pool) -> None:
                        "updated_at = now() WHERE status = 'extracting'")
 
 
-async def start_crawl(pool, me: Dict[str, Any], lid: int, browser: bool = False) -> int:
+async def start_crawl(pool, me: Dict[str, Any], lid: int, browser: bool = False, preset: Optional[str] = None) -> int:
     row = await pool.fetchrow("SELECT * FROM url_lists WHERE id = $1 AND workspace_id = $2", lid, me["workspace_id"])
     if row is None:
         raise LookupError("list")
     if row["status"] != "ready":
         raise ListError("The URL list isn't ready yet." if row["status"] == "extracting" else "This URL list can't be crawled. Make a new one.")
     opts: Dict[str, Any] = {"urls": list(row["urls"]), "max_pages": MAX_URLS, "from_list": lid}
+    from qc6.presets import PRESETS, speeds
+    site_settings = await pool.fetchval("SELECT settings FROM sites WHERE id = $1", row["site_id"]) or {}
+    p = preset or speeds(row["url_count"], site_settings)["speed_default"]
+    if p != "site" and p not in PRESETS:
+        raise ListError("Pick one of the speeds offered.")
+    if p != "site":     # the chosen speed wins over the site's stored rate, and an untouched preset may rise to its ceiling
+        opts["preset"], opts["rate_rps"] = p, PRESETS[p]["target_rps"]
     if row["sitemaps"]:                         # keep where each page came from, for the report's Sitemap Progress
         opts["_sitemaps"], opts["_sm_idx"] = list(row["sitemaps"]), list(row["sitemap_idx"])
     if row["alternates_file"]:
@@ -186,6 +193,9 @@ async def get(pool, workspace_id: int, lid: int) -> Optional[Dict[str, Any]]:
             sev = await pool.fetch("""SELECT f.severity, COUNT(DISTINCT f.id) AS problems, COUNT(DISTINCT fd.page_url) AS pages
                                       FROM findings fd JOIN fixes f ON f.id = fd.fix_id WHERE fd.run_id = $1 GROUP BY 1""", out["run_id"])
             out["results"] = {r["severity"]: {"problems": r["problems"], "pages": r["pages"]} for r in sev}
+        if out["status"] == "ready":
+            from qc6.presets import speeds
+            out.update(speeds(out["url_count"], await pool.fetchval("SELECT settings FROM sites WHERE id = $1", out["site_id"]) or {}))
         return out
     return None
 

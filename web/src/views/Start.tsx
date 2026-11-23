@@ -189,6 +189,8 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
   const [delSite, setDelSite] = useState(false);
   const ph = phase(j);
   const [browser, setBrowser] = useState(false);
+  const [pace, setPace] = useState<string | null>(null);
+  const chosen = pace || j.speed_default || "target";
   const [busy, setBusy] = useState(false);
   const [blocker, setBlocker] = useState<{ run: number; status: string; text: string } | null>(null);
   const [del, setDel] = useState(false);
@@ -201,7 +203,7 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       else toast(e.detail ? `${e.title}. ${e.detail}` : e.title || e.message);
     } finally { setBusy(false); }
   };
-  const start = () => act(() => api.startList(j.id, browser), "Crawling started.");
+  const start = () => act(() => api.startList(j.id, browser, chosen), "Crawling started.");
   const runCtl = (what: "pause" | "resume" | "cancel", id = j.run_id!) => act(
     () => (what === "pause" ? api.pauseRun(id) : what === "resume" ? api.resumeRun(id) : api.cancelRun(id)),
     what === "pause" ? "Pausing: finishing the pages in hand, then it stops. Nothing already checked is lost."
@@ -248,6 +250,20 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
 
       {ph === "ready" && (
         <div className="start-cta">
+          {j.speeds && (
+            <fieldset className="speed-pick">
+              <legend>Speed</legend>
+              <div className="seg" role="radiogroup" aria-label="Speed">
+                {j.speeds.map((s) => (
+                  <button key={s.id} type="button" role="radio" aria-checked={chosen === s.id}
+                    onClick={() => setPace(s.id)}>{s.label} · {s.rps === s.max_rps ? s.rps : `${s.rps}–${s.max_rps}`}/s</button>
+                ))}
+              </div>
+              {(() => { const s = j.speeds!.find((x) => x.id === chosen); return s && (
+                <p className="faint speed-note">{count(j.url_count)} pages: {duration(s.minutes * 60)} at {s.rps} requests a second to your site.
+                  {" "}QC slows down by itself if the site answers slowly or says "too many requests". Pick a faster speed only for a site that can take it.</p>); })()}
+            </fieldset>
+          )}
           <label className="check"><input type="checkbox" checked={browser} onChange={(e) => setBrowser(e.target.checked)} />
             Also open sample pages in a real browser (speed, layout, console errors). Slower.</label>
           <button className="btn primary big" disabled={busy} onClick={start}><Icon name="play" />Start crawling</button>
