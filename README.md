@@ -182,6 +182,10 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
+* **Keep screen awake** (switch at the bottom of the menu): stops the screen from turning off or locking while
+  QC is open, until you switch it off. Remembered on this computer. The browser lets go while QC's tab is hidden or
+  minimised and QC takes it again when you come back. It works on https or when QC runs on the same computer
+  (127.0.0.1 / localhost); on a plain http network address the switch says it can't.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:
