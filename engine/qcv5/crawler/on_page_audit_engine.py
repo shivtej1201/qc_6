@@ -58,6 +58,17 @@ NOT_REQUESTED_TYPES = frozenset({"FORM"})
 NAVIGATION_TYPES = frozenset({"ANCHOR", "AREA", "IFRAME", "META_REFRESH", "EMBED"})
 SEO_SIGNAL_TYPES = frozenset({"CANONICAL", "HREFLANG", "LINK_META", "SOCIAL_URL", "JSONLD_URL"})
 RESOURCE_TYPES = frozenset({"SCRIPT", "STYLESHEET", "LINK_RESOURCE", "CSS_RESOURCE", "MEDIA"})
+# Not checked at all: QC checks page URLs and image URLs only. Scripts, stylesheets, preloads, fonts and other
+# code files found on a page are neither recorded nor requested (they cost requests and say nothing about pages).
+SKIPPED_TYPES = frozenset({"SCRIPT", "STYLESHEET", "LINK_RESOURCE", "CSS_RESOURCE"})
+ASSET_EXT_RE = re.compile(r"\.(?:css|js|mjs|cjs|jsx|ts|map|woff2?|ttf|otf|eot)$", re.I)
+
+
+def is_skipped_asset(href: str, url_type: str) -> bool:
+    if url_type in SKIPPED_TYPES:
+        return True
+    path = urllib.parse.urlsplit(href.strip()).path if "://" in href or href.startswith("/") else href.split("?", 1)[0].split("#", 1)[0]
+    return bool(ASSET_EXT_RE.search(path or ""))
 
 
 RETRY_BASE_SEC = 0.5
@@ -209,7 +220,8 @@ def extract_on_page_urls(
         except Exception:
             pass
 
-    raw_elements = parser.get_all_on_page_urls()
+    raw_elements = [el for el in parser.get_all_on_page_urls()
+                     if not is_skipped_asset(el.get("href") or "", el.get("url_type", "ANCHOR"))]
     raw_count = len(raw_elements)
     source_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
 

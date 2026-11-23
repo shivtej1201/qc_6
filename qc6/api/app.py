@@ -1579,6 +1579,25 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
 
 
+@app.get("/api/v2/runs/{run_id}/ops-ticket")
+async def run_ops_ticket(run_id: int, me=Depends(current_member)):
+    """The check's URL QC in plain numbers (pages, broken links, redirects, broken images, each with the pages they are
+    on) and a ready-to-paste ticket for the Ops team."""
+    from qc6 import ops_ticket
+    pool = await get_pool()
+    run = await pool.fetchrow("SELECT r.id, r.status, r.started_at, r.finished_at, r.site_id FROM runs r JOIN sites s ON s.id = r.site_id "
+                              "WHERE r.id = $1 AND s.workspace_id = $2", run_id, me["workspace_id"])
+    if run is None:
+        raise problem(404, "Check not found")
+    site = dict(await pool.fetchrow("SELECT primary_host, settings FROM sites WHERE id = $1", run["site_id"]))
+    source = await pool.fetchval("SELECT label FROM url_lists WHERE run_id = $1 ORDER BY id DESC LIMIT 1", run_id) or ""
+    q = await asyncio.to_thread(ops_ticket.collect, run_id, ops_ticket.LIST_TOP)
+    if q is None:
+        raise problem(404, "No URL data for this check", "It is made when a page check runs.")
+    t = ops_ticket.ticket(q, dict(run), site, source)
+    return {"run_id": run_id, "status": run["status"], "qc": q, "ticket": t}
+
+
 @app.get("/api/v2/runs/{run_id}/anchors")
 async def run_anchors(run_id: int, me=Depends(current_member)):
     """Internal anchor text: generic anchors ("click here"), links without text, most used anchors, and pages every

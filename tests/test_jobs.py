@@ -335,6 +335,19 @@ def test_full_workbook_like_the_v5_sample(env):
     ic = {k: i for i, k in enumerate(IMG_HEAD)}
     assert all(x[ic["found_on_pages"]] >= 1 and x[ic["first_found_on"]] for x in img[1:])
     assert rows("Image Issues")[0][0] == "source_page_url"
+    # simple sheets first, readable in a minute; CSS / JS never checked
+    assert names[:6] == ["Summary", "Ops Ticket", "Broken Links", "Broken Images", "Redirects", "Pages Not OK"], names
+    bl = rows("Broken Links")
+    assert bl[0][:4] == ["Broken link", "Status", "Link goes to", "Found on (pages)"]
+    assert any(x[0].endswith("/gone") and x[1] == "404 Not Found" and x[3] >= 1 and x[5] for x in bl[1:])
+    assert rows("Ops Ticket")[0][0].startswith("Title: [Website QC]")
+    assert not [x[0] for x in uniq[1:] if x[0].split("?")[0].endswith((".css", ".js"))]
+    t = c.get(f"/api/v2/runs/{rid}/ops-ticket")
+    assert t.status_code == 200, t.text
+    t = t.json()
+    assert t["qc"]["broken_links"]["unique"] >= 1 and t["qc"]["pages"]["checked"] == 90
+    assert t["ticket"]["priority"] and "/gone" in t["ticket"]["text"] and "STEPS TO REPRODUCE" in t["ticket"]["text"]
+    assert c.get("/api/v2/runs/999999/ops-ticket").status_code == 404
     assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
     assert len(rows("QC Problem Pages")) > 1 and rows("QC Problem Pages")[1][7] in ("New",) or "Seen before" in rows("QC Problem Pages")[1][7]
     pkg = c.get(f"/api/v2/runs/{rid}/package.zip")

@@ -52,6 +52,13 @@ export interface Anchors { internal_links: number; generic_links: number; generi
   same_everywhere: { url: string; links: number; anchor: string; share: number }[];
   scattered: { url: string; links: number; variants: number; top_anchor: string; share: number }[] }
 
+export interface QcRow { url: string; status: string; pages: number; example: string; examples: string; scope?: string; final_url?: string; text?: string; detail?: string }
+export interface QcBlock { unique: number; pages: number; fix: string; rows: QcRow[] }
+export interface OpsTicket { run_id: number; status: string;
+  qc: { pages: { total: number; checked: number; ok: number; redirected: number; not_ok: number; rows: QcRow[]; fix: string };
+    links: { unique: number }; images: { unique: number }; broken_links: QcBlock; redirects: QcBlock; broken_images: QcBlock };
+  ticket: { title: string; priority: string; text: string } }
+
 export type Severity = "critical" | "high" | "medium" | "low";
 export type FixStatus = "open" | "in_progress" | "fixed_pending_check" | "verified" | "wont_fix";
 export interface Site { id: number; name: string; base_url: string; primary_host: string; settings: Record<string, any>;
@@ -203,6 +210,7 @@ export const api = {
   editBrief: (id: number, name: string, text: string) => req<Brief>("PUT", `/api/v2/briefs/${id}/sections/${name}`, { text }),
   rewriteBrief: (id: number, name: string) => req<Brief>("POST", `/api/v2/briefs/${id}/sections/${name}/rewrite`),
   deleteBrief: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/briefs/${id}`),
+  opsTicket: (runId: number) => req<OpsTicket>("GET", `/api/v2/runs/${runId}/ops-ticket`),
   anchors: (runId: number) => req<Anchors>("GET", `/api/v2/runs/${runId}/anchors`),
   pageHtml: (runId: number, url: string) => req<string>("GET", `/api/v2/runs/${runId}/html?${new URLSearchParams({ url })}`),
   pauseRun: (id: number) => req<{ status: string }>("POST", `/api/v2/runs/${id}/pause`),

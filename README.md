@@ -164,7 +164,10 @@ QC opens on **New check**:
    Every page is checked; the screen shows pages done, speed and time left, every second.
    **Pause**, **Resume** and **Cancel** work at any point (pause and cancel take effect within seconds; nothing already
    checked is lost).
-4. When it finishes: problems by severity and **Download report** (Excel one sheet, CSV, ZIP, PDF summary).
+4. When it finishes: four numbers (pages not OK, broken links, broken images, redirecting links, each with how many
+   pages have one), the top problems with what to do, and an **Ops ticket** tab: a ticket for the Ops team, filled in
+   from the check (title, suggested priority, summary, every broken link / image / redirect with the pages it is on,
+   steps to reproduce, expected and actual), with **Copy title** and **Copy the whole ticket**. Then **Download report** (Excel one sheet, CSV, ZIP, PDF summary).
 
 The site is created from the address the first time; there is nothing to configure and no site to pick: the
 screens show the site of the check you opened last. **Your checks** lists every
@@ -179,7 +182,12 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
-* **Full audit workbook** (Download report → Full audit workbook): the QC V5 layout, one sheet each for Executive
+* **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
+  preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
+* **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:
+  **Summary**, **Ops Ticket** (the same ticket, ready to copy), **Broken Links**, **Broken Images**, **Redirects** and
+  **Pages Not OK**, each listing every address, its status in words ("404 Not Found", "301 Moved Permanently -> 200
+  OK"), on how many pages it is, an example page and what to do. After them, the detailed QC V5 layout, one sheet each for Executive
   Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, **Status Codes**, Source Page Issues,
   Destination Issues, Broken / Redirect / External URLs, **All URLs (Unique)**, **Images (Unique)**, **Image Issues**,
   Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
