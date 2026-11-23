@@ -54,12 +54,13 @@ export function StartView({ params, onSite, onSitesChanged }: { params: URLSearc
   // the job on screen: refreshed every second while anything is moving
   useEffect(() => {
     if (!jobId) { setJob(null); return; }
-    let stop = false, timer = 0;
+    let stop = false, timer = 0, first = true;
     const tick = async () => {
       try {
         const j = await api.job(jobId);
         if (stop) return;
         setJob(j);
+        if (first) { first = false; jobs.reload(); }      // the open check changed state: the list below shows it too
         if (LIVE.includes(phase(j))) timer = window.setTimeout(tick, 1000);
         else { jobs.reload(); if (j.site_id) onSite(j.site_id); }
       } catch (e: any) { if (!stop) setErr(e.title || e.message); }

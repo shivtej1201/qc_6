@@ -4,7 +4,7 @@ import "./styles/app.css";
 import "./styles/glass.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
 import { WAKE_TEXT, useScreenAwake } from "./wakeLock";
-import { ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
+import { Confirm, ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
 import { Palette, type Screen } from "./palette";
 import { InsightsView } from "./views/Insights";
 import { GrowthView } from "./views/Growth";
@@ -58,6 +58,7 @@ function App({ local }: { local: boolean }) {
     return list.find((s) => s.id === siteId) || list[0];
   }, [sites.data, siteId]);
   const [theme, setTheme] = useState<string | null>(() => localStorageGet("qc6-theme"));
+  const [clearing, setClearing] = useState(false);
   const awake = useScreenAwake();
   useEffect(() => {
     if (theme) document.documentElement.dataset.theme = theme;
@@ -150,6 +151,8 @@ function App({ local }: { local: boolean }) {
         </nav>
         <div className="foot">
           {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}
+          <button className="btn quiet danger-text" onClick={() => setClearing(true)} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>
+            Clear all data…</button>
           <button className="awake-switch" role="switch" aria-checked={awake.wanted} onClick={awake.toggle}
             disabled={awake.state === "unsupported"} title={WAKE_TEXT[awake.state]}>
             <span className="awake-track" aria-hidden="true"><i /></span>
@@ -166,6 +169,21 @@ function App({ local }: { local: boolean }) {
         <button aria-expanded={menu} aria-controls="rail" onClick={() => setMenu(true)}><Icon name="more" /><span>More</span></button>
       </nav>
       {palette && <Palette site={site} screens={SCREENS} onClose={() => setPalette(false)} />}
+      {clearing && (
+        <Confirm title="Clear all data?" confirmText="Clear all data" typeToConfirm="DELETE" onClose={() => setClearing(false)}
+          onConfirm={async () => {
+            await api.clearAllData("DELETE");
+            try { Object.keys(localStorage).filter((k) => k.startsWith("qc6-") && k !== "qc6-theme").forEach((k) => localStorage.removeItem(k)); } catch { /* storage blocked */ }
+            try { sessionStorage.clear(); } catch { /* storage blocked */ }
+            try { if ("caches" in window) for (const k of await caches.keys()) await caches.delete(k); } catch { /* no cache storage */ }
+            window.location.hash = "#/start";
+            window.location.reload();
+          }}>
+          <p style={{ marginTop: 0 }}>This erases every site, check, URL list, report, problem and ticket from QC's database, the stored
+            files (crawl data, Excel reports, screenshots) from this computer, and QC's saved data in this browser.</p>
+          <p>Sign-in accounts stay. <b>It can't be undone.</b> A check that is running must be paused or cancelled first.</p>
+        </Confirm>
+      )}
     </div>
   );
 }

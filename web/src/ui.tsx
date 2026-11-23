@@ -187,7 +187,7 @@ export function Confirm({ title, children, confirmText, onConfirm, onClose, type
         <h2 id="confirm-title">{title}</h2>
         <div id="confirm-body" className="dim" style={{ margin: "8px 0 14px" }}>{children}</div>
         {typeToConfirm && (
-          <label className="grid" style={{ gap: 4, marginBottom: 14 }}>Type <b>{typeToConfirm}</b> to confirm
+          <label className="grid" style={{ gap: 4, marginBottom: 14 }}><span>Type <b>{typeToConfirm}</b> to confirm</span>
             <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" /></label>
         )}
         {err && <div className="error-box" style={{ marginBottom: 12 }}>{err}</div>}
