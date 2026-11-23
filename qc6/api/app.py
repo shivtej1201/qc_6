@@ -1448,6 +1448,28 @@ async def delete_site(site_id: int, body: SiteDelete, me=Depends(current_member)
     return out
 
 
+class ClearIn(BaseModel):
+    confirm: str = ""
+
+
+@app.post("/api/v2/workspace/clear-data")
+async def clear_data(body: ClearIn, me=Depends(current_member)):
+    """Clear all data: every site, check, list, problem and ticket of the workspace, and their files. Owners only;
+    type DELETE to confirm. Accounts and the audit log stay."""
+    from qc6 import deletion
+    if me["role"] != "owner":
+        raise problem(403, "Only an owner can clear all data")
+    if body.confirm.strip() != deletion.CLEAR_WORD:
+        raise problem(400, "Type DELETE to confirm", f'Type "{deletion.CLEAR_WORD}" in capitals.')
+    pool = await get_pool()
+    try:
+        out = await deletion.clear_workspace_data(pool, me["workspace_id"])
+    except deletion.Refused as e:
+        raise problem(409, "The data can't be cleared now", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "workspace.clear_data", f"workspace:{me['workspace_id']}", out)
+    return out
+
+
 @app.get("/api/v2/stream")
 async def stream(run: int, request: Request, me=Depends(current_member)):
     """Server-Sent Events for one run: progress, visitor steps, journeys, completion."""

@@ -151,6 +151,8 @@ export const api = {
   aiDecide: (id: number, status: "approved" | "rejected", final?: Partial<AIText>) => req<AIDraft>("PATCH", `/api/v2/ai/${id}`, { status, final }),
   deleteRun: (id: number) => req<{ pages: number; fixes_removed: number; screenshots_removed: number }>("DELETE", `/api/v2/runs/${id}`),
   deleteJourney: (id: number) => req<{ runs: number }>("DELETE", `/api/v2/journeys/${id}`),
+  clearAllData: (confirm: string) =>
+    req<{ sites: number; checks: number; url_lists: number; screenshots_removed: number }>("POST", "/api/v2/workspace/clear-data", { confirm }),
   deleteSite: (sid: number, confirm: string) => req<{ checks: number }>("DELETE", `/api/v2/sites/${sid}`, { confirm }),
   run: (id: number) => req<{ run: Run; recent_visits: any[]; found: { id: number; title: string; severity: Severity; pages: number }[] }>("GET", `/api/v2/runs/${id}`),
   authMode: () => req<{ mode: string; signed_in: boolean | null }>("GET", "/api/v2/auth/mode"),

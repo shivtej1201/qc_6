@@ -124,3 +124,38 @@ def _forget_caches() -> None:
     from qc6 import inventory, opportunity
     inventory._CHANGES.clear()
     opportunity._CACHE.clear()
+
+
+CLEAR_WORD = "DELETE"
+
+
+async def clear_workspace_data(pool, workspace_id: int) -> Dict[str, Any]:
+    """Clear all data: every site, check, URL list, problem, ticket, journey and their stored files (crawl databases,
+    reports, screenshots, sitemap files) of the workspace. Sign-in accounts, the workspace itself and the audit log stay,
+    so people can still sign in and see who cleared it. Refused while a check is running."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if await conn.fetchval("""SELECT EXISTS (SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id
+                                      WHERE s.workspace_id = $1 AND r.status IN ('running', 'pausing', 'cancelling'))""", workspace_id):
+                raise Refused("A check is running. Pause or cancel it first, then clear the data.")
+            site_ids = [r["id"] for r in await conn.fetch("SELECT id FROM sites WHERE workspace_id = $1 FOR UPDATE", workspace_id)]
+            run_ids = [r["id"] for r in await conn.fetch("SELECT id FROM runs WHERE site_id = ANY($1::bigint[])", site_ids)]
+            list_ids = [r["id"] for r in await conn.fetch("SELECT id FROM url_lists WHERE workspace_id = $1", workspace_id)]
+            shots = [r["k"] for r in await conn.fetch(
+                """SELECT v.screenshot AS k FROM visits v WHERE v.run_id = ANY($1::bigint[]) AND v.screenshot IS NOT NULL
+                   UNION SELECT s.screenshot FROM step_results s JOIN journey_runs jr ON jr.id = s.journey_run_id
+                   JOIN journeys j ON j.id = jr.journey_id WHERE j.site_id = ANY($2::bigint[]) AND s.screenshot IS NOT NULL""",
+                run_ids, site_ids)]
+            await conn.execute("DELETE FROM url_lists WHERE workspace_id = $1", workspace_id)
+            await conn.execute("DELETE FROM sites WHERE workspace_id = $1", workspace_id)    # checks, pages, problems, tickets... cascade
+            orphans = await _orphan_screens(conn, shots)
+    for rid in run_ids:
+        shutil.rmtree(_run_dir(rid), ignore_errors=True)
+    for lid in list_ids:
+        try:
+            os.unlink(os.path.join(settings.data_dir, "lists", f"{int(lid)}.alternates.json.gz"))
+        except OSError:
+            pass
+    files = _remove_objects(orphans)
+    _forget_caches()
+    return {"sites": len(site_ids), "checks": len(run_ids), "url_lists": len(list_ids), "screenshots_removed": files}

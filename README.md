@@ -182,6 +182,10 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   fix for pages it didn't see, and site-wide rules (orphan pages, duplicates across pages) wait for a full check.
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
+* **Clear all data** (bottom of the menu, owners only; type DELETE to confirm): erases every site, check, URL list,
+  report, problem and ticket from the database, their files on disk (crawl data, Excel reports, screenshots, sitemap
+  files) and QC's saved data in the browser, then reloads. Sign-in accounts and the audit log (which records the
+  clear) stay. Refused while a check is running: pause or cancel it first. It can't be undone.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:

@@ -432,3 +432,46 @@ def test_nofollow_links_and_html_archive(env, monkeypatch):
     assert rows and rows[0]["url"].endswith("/product/2") and rows[0]["http_status"] == "200"
     with gzip.open(os.path.join(hdir, rows[0]["file"]), "rt") as f:
         assert "<html" in f.read().lower()
+
+
+def test_clear_all_data(env):
+    """Clear all data: every site, check, list, problem, ticket and their files go; accounts and the audit log stay."""
+    from qc6.settings import settings
+    c, site, dsn = env
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+
+    async def run_it(status=None):
+        pool = await _pool(dsn)
+        if status:
+            await pool.execute("UPDATE runs SET status = $2 WHERE id = $1", rid, status)
+        else:
+            await pool.execute("UPDATE runs SET options = options || '{\"rate_rps\": 40}'::jsonb WHERE id = $1", rid)
+            await execute_run(pool, rid)
+        await pool.close()
+    asyncio.run(run_it())
+    run_dir = os.path.join(settings.data_dir, "runs", str(rid))
+    assert os.path.isdir(run_dir)
+    assert c.post("/api/v2/workspace/clear-data", json={"confirm": "delete"}, headers=H).status_code == 400
+    asyncio.run(run_it("running"))
+    r = c.post("/api/v2/workspace/clear-data", json={"confirm": "DELETE"}, headers=H)
+    assert r.status_code == 409 and "running" in r.text
+    asyncio.run(run_it("completed"))
+    r = c.post("/api/v2/workspace/clear-data", json={"confirm": "DELETE"}, headers=H)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["sites"] >= 1 and out["checks"] >= 1 and out["url_lists"] >= 1
+    assert not os.path.exists(run_dir)
+    assert c.get("/api/v2/sites").json()["sites"] == [] and c.get("/api/v2/lists").json()["jobs"] == []
+    assert c.get("/api/v2/me").status_code == 200                                      # still signed in
+
+    async def left():
+        pool = await _pool(dsn)
+        n = {t: await pool.fetchval(f"SELECT count(*) FROM {t}") for t in ("sites", "runs", "url_lists", "fixes", "findings", "pages")}
+        audit = await pool.fetchval("SELECT count(*) FROM audit_log WHERE action = 'workspace.clear_data'")
+        members = await pool.fetchval("SELECT count(*) FROM members")
+        await pool.close()
+        return n, audit, members
+    n, audit, members = asyncio.run(left())
+    assert all(v == 0 for v in n.values()), n
+    assert audit == 1 and members >= 1
