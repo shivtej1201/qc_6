@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles/app.css";
+import "./styles/glass.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
 import { ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
 import { Palette, type Screen } from "./palette";
