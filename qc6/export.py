@@ -250,7 +250,7 @@ async def workbook_file(pool, site: Dict[str, Any], run_id: int) -> str:
                         row[3] = int(row[3])
                     yield row
         from qc6 import internal_tickets
-        tickets = (await internal_tickets.list_for_site(pool, site, "all", "", 100_000, 0, "", run_id=run_id))["tickets"]
+        tickets = (await internal_tickets.list_for_site(pool, site, "all", "", "", run_id=run_id))["tickets"]
         extra = {"tickets": tickets, "problems": await problem_rows(pool, run_id), "problem_header": PROBLEM_HEADER, "templates": templates,
                  "severity": sev, "score": (run.get("summary") or {}).get("score"),
                  "page_rows": page_rows, "page_header": DETAIL_HEADER}

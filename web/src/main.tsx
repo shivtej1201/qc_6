@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/app.css";
 import "./styles/glass.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
+import { WAKE_TEXT, useScreenAwake } from "./wakeLock";
 import { ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
 import { Palette, type Screen } from "./palette";
 import { InsightsView } from "./views/Insights";
@@ -57,6 +58,7 @@ function App({ local }: { local: boolean }) {
     return list.find((s) => s.id === siteId) || list[0];
   }, [sites.data, siteId]);
   const [theme, setTheme] = useState<string | null>(() => localStorageGet("qc6-theme"));
+  const awake = useScreenAwake();
   useEffect(() => {
     if (theme) document.documentElement.dataset.theme = theme;
     else delete document.documentElement.dataset.theme;
@@ -148,6 +150,11 @@ function App({ local }: { local: boolean }) {
         </nav>
         <div className="foot">
           {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}
+          <button className="awake-switch" role="switch" aria-checked={awake.wanted} onClick={awake.toggle}
+            disabled={awake.state === "unsupported"} title={WAKE_TEXT[awake.state]}>
+            <span className="awake-track" aria-hidden="true"><i /></span>
+            <span><b>Keep screen awake</b><small>{WAKE_TEXT[awake.state]}</small></span>
+          </button>
           <button className="btn quiet" onClick={toggleTheme} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>Switch light / dark</button>
         </div>
       </aside>

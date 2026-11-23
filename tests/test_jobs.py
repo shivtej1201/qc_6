@@ -348,27 +348,47 @@ def test_full_workbook_like_the_v5_sample(env):
     assert t["qc"]["broken_links"]["unique"] >= 1 and t["qc"]["pages"]["checked"] == 90
     assert t["ticket"]["priority"] and "/gone" in t["ticket"]["text"] and "STEPS TO REPRODUCE" in t["ticket"]["text"]
     assert c.get("/api/v2/runs/999999/ops-ticket").status_code == 404
-    # Tickets tab: every issue is an internal ticket from the site's template
+    # Tickets tab: one ticket per issue type, every URL in its attachment
     assert "Tickets" in names
     tk = rows("Tickets")
-    assert tk[0][0] == "Ticket" and tk[1][0].startswith("QC-") and "STEPS TO REPRODUCE" in tk[1][7]
+    assert tk[0][:2] == ["Ticket", "Issue"] and tk[1][0].startswith("QC-") and "ATTACHMENT" in tk[1][7]
     sid = j["site_id"]
-    lst = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=to_raise").json()
-    assert lst["counts"]["to_raise"] >= 1 and lst["template"]["is_default"] and len(lst["tickets"]) == lst["counts"]["to_raise"]
-    gone = next(t for t in lst["tickets"] if "/gone" in t["text"])
-    assert gone["ticket_id"] == f"QC-{gone['fix_id']:04d}" and gone["priority"].startswith("P") and gone["type"] == "Links"
+    lst = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all").json()
+    issues = [t["issue"] for t in lst["tickets"]]
+    assert len(issues) == len(set(issues)), issues                          # never two tickets for one issue type
+    broken = next(t for t in lst["tickets"] if t["group_key"] == "BROKEN_LINK")
+    async def fix_count():
+        pool = await _pool(dsn)
+        n = await pool.fetchval("SELECT count(*) FROM fixes WHERE site_id = $1 AND rule = 'BROKEN_LINK'", sid)
+        await pool.close()
+        return n
+    assert broken["urls"] == asyncio.run(fix_count()) and broken["urls"] >= 1 and broken["pages"] >= 1
+    assert broken["ticket_id"] == f"QC-{broken['id']:04d}" and broken["type"] == "Links" and "/gone" in broken["text"]
+    assert broken["affected"].endswith("pages") and "URL" in broken["affected"]
+    att = c.get(f"/api/v2/sites/{sid}/internal-tickets/{broken['id']}/attachment.xlsx")
+    assert att.status_code == 200 and broken["attachment"] in att.headers["content-disposition"]
+    awb = openpyxl.load_workbook(io.BytesIO(att.content), read_only=True)
+    assert awb.sheetnames == ["About", "Affected addresses", "Where found"]
+    arows = [list(x) for x in awb["Affected addresses"].iter_rows(values_only=True)]
+    assert arows[0][:4] == ["#", "Address", "Status / detail", "Goes to"] and len(arows) - 1 == broken["urls"]
+    assert any(r[1].endswith("/gone") for r in arows[1:])
+    wrows = list(awb["Where found"].iter_rows(values_only=True))
+    assert len(wrows) - 1 >= broken["urls"]
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets/999999/attachment.xlsx").status_code == 404
+    # the number stays the same for the issue
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all").json()["tickets"][issues.index(broken["issue"])]["id"] == broken["id"]
     assert c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "{nope}", "body": ""}, headers=H).status_code == 400
-    r = c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "OPS | {priority} | {title}", "body": "Pages: {pages}\n{page_list}"}, headers=H)
+    r = c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "OPS | {priority} | {issue}", "body": "{affected}\n{url_list}\n{attachment}"}, headers=H)
     assert r.status_code == 200 and not r.json()["is_default"]
-    again = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=to_raise&q={gone['ticket_id']}").json()["tickets"][0]
-    assert again["title"].startswith("OPS | P") and again["text"].startswith("Pages: ")
-    assert c.post(f"/api/v2/fixes/{gone['fix_id']}/raised", json={"ref": "OPS-1234"}, headers=H).json()["raised_ref"] == "OPS-1234"
+    again = next(t for t in c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all").json()["tickets"] if t["id"] == broken["id"])
+    assert again["title"].startswith("OPS | P") and again["text"].startswith(broken["affected"]) and broken["attachment"] in again["text"]
+    assert c.post(f"/api/v2/sites/{sid}/internal-tickets/{broken['id']}/raised", json={"ref": "OPS-1234"}, headers=H).json()["raised_ref"] == "OPS-1234"
     raised = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=raised").json()
     assert [t["raised_ref"] for t in raised["tickets"]] == ["OPS-1234"] and raised["counts"]["raised"] == 1
-    assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all&q=ops-1234").json()["tickets"][0]["fix_id"] == gone["fix_id"]
+    assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all&q=ops-1234").json()["tickets"][0]["id"] == broken["id"]
     csv_r = c.get(f"/api/v2/sites/{sid}/internal-tickets.csv?view=raised")
-    assert csv_r.status_code == 200 and "OPS-1234" in csv_r.text and "attachment" in csv_r.headers["content-disposition"]
-    c.post(f"/api/v2/fixes/{gone['fix_id']}/raised", json={"ref": ""}, headers=H)
+    assert csv_r.status_code == 200 and "OPS-1234" in csv_r.text and broken["attachment"] in csv_r.text
+    c.post(f"/api/v2/sites/{sid}/internal-tickets/{broken['id']}/raised", json={"ref": ""}, headers=H)
     assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=raised").json()["counts"]["raised"] == 0
     c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "", "body": ""}, headers=H)
     assert c.get(f"/api/v2/sites/{sid}/internal-tickets").json()["template"]["is_default"]
