@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/app.css";
 import "./styles/glass.css";
 import { api, localStorageGet, localStorageSet, type Site } from "./api";
+import { WAKE_TEXT, useScreenAwake } from "./wakeLock";
 import { Confirm, ErrorBox, Icon, ToastProvider, useLoad } from "./ui";
 import { Palette, type Screen } from "./palette";
 import { InsightsView } from "./views/Insights";
@@ -11,6 +12,7 @@ import { TodayView } from "./views/Today";
 import { PagesView } from "./views/Pages";
 import { LiveView } from "./views/Live";
 import { FixesView } from "./views/Fixes";
+import { TicketsView } from "./views/Tickets";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
 import { LinksView } from "./views/Links";
@@ -30,6 +32,7 @@ export function go(view: string, params: Record<string, string | number> = {}) {
 
 const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, string, string][] }[] = [
   { label: "URL QC", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs results ticket"], ["fixes", "fix", "Problems", "issues problems fixes inbox"],
+    ["tickets", "page", "Tickets", "ticket raise ops jira template internal"],
     ["links", "link", "Links & images", "broken redirects images"]] },
   { label: "More tools", more: true, items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
     ["growth", "growth", "Growth", "opportunities search console queries"], ["pages", "layers", "All pages", "inventory urls compare"],
@@ -38,7 +41,7 @@ const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, strin
 const NAV = NAV_GROUPS.flatMap((g) => g.items);
 const SCREEN_VIEWS: Record<string, true> = Object.fromEntries([...NAV.map((n) => n[0]), "page"].map((v) => [v, true]));
 const SCREENS: Screen[] = NAV.map(([view, icon, label, words]) => ({ view, icon, label, words }));
-const TABS: [string, string, string][] = [["start", "play", "Check"], ["fixes", "fix", "Problems"], ["links", "link", "Links"]];
+const TABS: [string, string, string][] = [["start", "play", "Check"], ["fixes", "fix", "Problems"], ["tickets", "page", "Tickets"]];
 const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", account: "Your account" };
 
 function App({ local }: { local: boolean }) {
@@ -56,6 +59,7 @@ function App({ local }: { local: boolean }) {
   }, [sites.data, siteId]);
   const [theme, setTheme] = useState<string | null>(() => localStorageGet("qc6-theme"));
   const [clearing, setClearing] = useState(false);
+  const awake = useScreenAwake();
   useEffect(() => {
     if (theme) document.documentElement.dataset.theme = theme;
     else delete document.documentElement.dataset.theme;
@@ -106,7 +110,7 @@ function App({ local }: { local: boolean }) {
   else {
     const p = { site, params: route.params };
     body = {
-      today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, page: <PageView {...p} />,
+      today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, tickets: <TicketsView {...p} />, page: <PageView {...p} />,
       journeys: <JourneysView {...p} />, links: <LinksView {...p} />,
     }[route.view] || <TodayView {...p} />;
   }
@@ -149,6 +153,11 @@ function App({ local }: { local: boolean }) {
           {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}
           <button className="btn quiet danger-text" onClick={() => setClearing(true)} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>
             Clear all data…</button>
+          <button className="awake-switch" role="switch" aria-checked={awake.wanted} onClick={awake.toggle}
+            disabled={awake.state === "unsupported"} title={WAKE_TEXT[awake.state]}>
+            <span className="awake-track" aria-hidden="true"><i /></span>
+            <span><b>Keep screen awake</b><small>{WAKE_TEXT[awake.state]}</small></span>
+          </button>
           <button className="btn quiet" onClick={toggleTheme} style={{ justifyContent: "flex-start", padding: 0, minHeight: 0 }}>Switch light / dark</button>
         </div>
       </aside>

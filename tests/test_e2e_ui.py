@@ -17,7 +17,7 @@ from qc6.settings import settings  # noqa: E402
 WEB_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web", "dist")
 AXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "qc6", "assets", "axe.min.js")
 pytestmark = pytest.mark.skipif(not os.path.isdir(WEB_DIST), reason="web app not built (cd web && npm run build)")
-SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "fixes?layout=board", "pages", "links", "links?d=anchors", "journeys"]
+SCREENS = ["start", "today", "insights", "growth", "live", "fixes", "fixes?layout=board", "pages", "links", "links?d=anchors", "journeys", "tickets"]
 
 
 @pytest.fixture(scope="module")
@@ -212,3 +212,45 @@ def test_ui_end_to_end(app_url):
     assert errors == [], errors
     assert focused == "Close"                                   # focus moves into the fix drawer
     assert overflow <= 0, f"page scrolls sideways by {overflow}px at phone width"
+
+
+def test_keep_screen_awake_toggle(app_url):
+    """The toggle takes a screen wake lock, takes it again after the tab comes back, remembers the choice, and lets go."""
+    from playwright.async_api import async_playwright
+    fake = """window.__wl = { requests: 0, releases: 0, live: null };
+      Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request: async (type) => {
+        window.__wl.requests++;
+        const listeners = [];
+        const s = { type, released: false, addEventListener: (t, f) => listeners.push(f),
+          release: async () => { if (!s.released) { s.released = true; window.__wl.releases++; listeners.forEach((f) => f()); } } };
+        window.__wl.live = s; return s; } } });"""
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            ctx = await b.new_context(viewport={"width": 1280, "height": 900})
+            await ctx.add_init_script(fake)
+            page = await ctx.new_page()
+            await page.goto(f"{app_url}/#/start")
+            sw = page.get_by_role("switch", name="Keep screen awake")
+            await sw.wait_for()
+            assert await sw.get_attribute("aria-checked") == "false"
+            await sw.click()
+            await page.wait_for_selector("text=Screen stays on")
+            assert await sw.get_attribute("aria-checked") == "true"
+            assert await page.evaluate("window.__wl.requests") == 1
+            # the browser drops the lock when the tab is hidden; back in front, QC takes it again
+            await page.evaluate("window.__wl.live.release()")
+            await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            await page.wait_for_function("window.__wl.requests === 2")
+            # remembered on this computer
+            await page.reload()
+            await page.get_by_role("switch", name="Keep screen awake").wait_for()
+            await page.wait_for_selector("text=Screen stays on")
+            assert await page.evaluate("window.__wl.requests") >= 1
+            sw = page.get_by_role("switch", name="Keep screen awake")
+            await sw.click()
+            await page.wait_for_selector("text=Screen may sleep")
+            assert await page.evaluate("window.__wl.live.released") is True
+            await b.close()
+    asyncio.run(go())
