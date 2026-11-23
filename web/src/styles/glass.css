@@ -55,6 +55,7 @@
 }
 
 /* ------------------------------------------------------------------ scene + type */
+html { scroll-padding-bottom: 100px; }
 body { background: var(--ground); font-weight: 500; font-variant-numeric: tabular-nums; }
 body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--g-scene); pointer-events: none; }
 h1 { font: 780 clamp(28px, 3.2vw, 44px)/1.04 var(--display); letter-spacing: -0.05em; }
@@ -135,8 +136,8 @@ th:first-child { border-radius: 10px 0 0 10px; } th:last-child { border-radius: 
 
 /* ------------------------------------------------------------------ phone: glass top bar + floating dock */
 @media (max-width: 900px) {
-  .app { display: block; padding: 0; gap: 0; }
-  main { border-radius: 24px; margin: 8px 10px 96px; padding: 18px 14px 28px; }
+  .app { display: block; padding: 0 0 calc(92px + env(safe-area-inset-bottom)); gap: 0; }
+  main { border-radius: 24px; margin: 8px 10px 0; padding: 18px 14px 28px; }
   .topbar { margin: 8px 10px 0; border-radius: 22px;
     background: linear-gradient(165deg, var(--g-gloss), transparent 32% 73%, var(--g-gloss)), var(--g-rail); }
   .tabbar { grid-template-columns: repeat(4, 1fr); left: 11px; right: 11px; bottom: calc(9px + env(safe-area-inset-bottom)); border-radius: 999px; padding: 4px;
