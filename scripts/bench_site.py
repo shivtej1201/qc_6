@@ -8,6 +8,8 @@ Serves three hosts on 127.0.0.x so QC sees a main site, an image CDN and "other 
                   1 to a removed page (/gone/ -> 404), 3 images on the site itself
   127.0.0.2:PORT  image CDN: 3 more images per page
   127.0.0.3:PORT  "other sites": 3 outbound links per page
+  Every page also loads 5 shared CSS/JS files, 1 of 1,000 page-type CSS files, 1 of 1,000 JS chunks and a font
+  preload, like a real site build (QC does not check these).
 Pages answer in 60-140 ms, images and small responses in 15-35 ms, like a typical server behind a CDN.
 """
 from __future__ import annotations
@@ -32,6 +34,10 @@ def page(i: int, host: str) -> bytes:
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
             f'<title>Product {i} - Bench Store, prices and offers</title>'
             f'<meta name="description" content="Product {i} at the bench store: prices, offers, delivery and service details for this item.">'
+            f'<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/vendor.css">'
+            f'<link rel="stylesheet" href="/static/page-{i % 1000}.css"><link rel="preload" href="/fonts/main.woff2" as="font">'
+            f'<script src="/static/vendor.js"></script><script src="/static/app.js"></script><script src="/static/analytics.js"></script>'
+            f'<script src="/static/chunk-{(i * 7) % 1000}.js" defer></script>'
             f'<link rel="canonical" href="http://{host}/p/{i}"></head><body><header><a href="/">Home</a> {cats}</header>'
             f'<main><h1>Product {i}</h1><p>{words}</p>{imgs}{cdn}<ul>{links}</ul>'
             f'<p><a href="/old/{i % 100}">Old offer</a> <a href="/old/{(i + 50) % 100}">Archive</a> <a href="/gone/{i % 50}">Discontinued</a></p>'
@@ -70,6 +76,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 body, delay = b"<!doctype html><html><head><title>Listing</title></head><body><h1>Listing</h1></body></html>", random.uniform(0.06, 0.14)
             elif path.startswith("/old/"):
                 status, extra = 301, f"Location: /p/{int(path[5:] or 0) * 37 % N}\r\n"
+            elif path.startswith(("/static/", "/fonts/")):
+                body, ctype = b"/* asset */", ("text/css" if path.endswith(".css") else "application/javascript")
             elif path.startswith("/img/"):
                 body, ctype = PNG, ("image/webp" if path.endswith(".webp") else "image/jpeg")
             else:
