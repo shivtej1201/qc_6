@@ -22,7 +22,7 @@ export function FixesView({ site, params }: { site: Site; params: URLSearchParam
     <div className="view" ref={ref}>
       <div className="head">
         <div>
-          <h1>Fixes</h1>
+          <h1>Problems</h1>
           <p className="lede">Each row is one thing to fix, however many pages it touches. Worst first.</p>
         </div>
       </div>
