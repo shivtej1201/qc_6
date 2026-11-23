@@ -25,7 +25,8 @@ SELECT r.source_page_url, r.found_url, r.normalized_found_url AS url, r.found_ur
        COALESCE(r.anchor_text, '') AS anchor_text, r.occurrence_count AS occurrences, COALESCE(r.representative_location, '') AS location,
        c.http_status, c.initial_http_status, COALESCE(c.final_url, '') AS final_url, COALESCE(c.redirect_count, 0) AS redirects,
        COALESCE(c.status_bucket, '') AS status_bucket, COALESCE(c.response_time_ms, 0) AS response_ms,
-       COALESCE(r.rel, '') AS rel, CASE WHEN lower(COALESCE(r.rel, '')) LIKE '%nofollow%' THEN 1 ELSE 0 END AS nofollow
+       COALESCE(r.rel, '') AS rel, CASE WHEN lower(COALESCE(r.rel, '')) LIKE '%nofollow%' THEN 1 ELSE 0 END AS nofollow,
+       COALESCE(r.anchor_texts, '[]') AS anchor_texts
   FROM on_page_link_relationships r
   LEFT JOIN on_page_validation_cache c ON c.job_id = r.job_id AND c.normalized_url = r.normalized_found_url
  WHERE r.job_id = ? AND r.id > ? ORDER BY r.id LIMIT ?"""
@@ -42,7 +43,7 @@ LINK_SCHEMA = pa.schema([("source_page_url", pa.string()), ("found_url", pa.stri
                          ("scope", pa.string()), ("anchor_text", pa.string()), ("occurrences", pa.int32()), ("location", pa.string()),
                          ("http_status", pa.int32()), ("initial_http_status", pa.int32()), ("final_url", pa.string()),
                          ("redirects", pa.int32()), ("status_bucket", pa.string()), ("response_ms", pa.float64()),
-                         ("rel", pa.string()), ("nofollow", pa.int32())])
+                         ("rel", pa.string()), ("nofollow", pa.int32()), ("anchor_texts", pa.string())])
 IMAGE_SCHEMA = pa.schema([("source_page_url", pa.string()), ("image_url", pa.string()), ("url", pa.string()), ("kind", pa.string()),
                           ("scope", pa.string()), ("alt_present", pa.int32()), ("alt_text", pa.string()), ("width", pa.string()),
                           ("height", pa.string()), ("loading", pa.string()), ("occurrences", pa.int32()), ("http_status", pa.int32()),
@@ -186,3 +187,52 @@ def export_csv(run_id: int, dataset: str, dest: str, flt: str = "") -> int:
         return con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}') {w}").fetchone()[0]
     finally:
         con.close()
+
+
+# ------------------------------------------------------------------ anchor text (CrawlPulse 3 link intelligence)
+GENERIC_ANCHORS = ("click here", "here", "read more", "more", "learn more", "know more", "find out more", "this", "link",
+                   "click", "details", "more details", "view more", "see more", "view details", "continue", "continue reading",
+                   "go", "this page", "website", "page", "visit", "check it out", "explore", "discover more")
+
+
+def anchors(run_id: int, limit: int = 50) -> Dict[str, Any]:
+    """Internal anchor-text report: generic anchors ("click here"), links with no text, the most used anchors, and
+    pages that every link calls the same thing (or a different thing every time)."""
+    path = os.path.join(facts_dir(run_id), "links.parquet")
+    if not os.path.exists(path):
+        raise FileNotFoundError("links")
+    con = _db()
+    have = set(pq.read_schema(path).names)
+    # one row per (page, target, text): a page can link to the same target with several texts ("Page 1", "Read more")
+    texts = ("CASE WHEN json_array_length(anchor_texts) > 0 THEN from_json(anchor_texts, '[\"VARCHAR\"]') ELSE [anchor_text] END"
+             if "anchor_texts" in have else "[anchor_text]")
+    src = ("(SELECT url, source_page_url, lower(trim(regexp_replace(t, '\\s+', ' ', 'g'))) AS a, t AS anchor_text FROM "
+           f"(SELECT url, source_page_url, unnest({texts}) AS t FROM read_parquet(?) WHERE scope = 'INTERNAL' AND kind = 'ANCHOR'))")
+    gen = list(GENERIC_ANCHORS)
+    total = con.execute(f"SELECT count(*) FROM {src}", [path]).fetchone()[0]
+    generic = con.execute(f"""SELECT a, count(*) AS links, count(DISTINCT source_page_url) AS pages, any_value(url) AS example_target,
+                                     any_value(source_page_url) AS example_page
+                              FROM {src} WHERE a IN (SELECT unnest(?::VARCHAR[])) GROUP BY a ORDER BY links DESC""", [path, gen]).fetchall()
+    empty = con.execute(f"""SELECT count(*), count(DISTINCT source_page_url) FROM {src} WHERE a = ''""", [path]).fetchone()
+    empty_examples = con.execute(f"SELECT source_page_url, url FROM {src} WHERE a = '' LIMIT 10", [path]).fetchall()
+    top = con.execute(f"""SELECT any_value(anchor_text), count(*) AS links, count(DISTINCT url) AS targets FROM {src}
+                          WHERE a <> '' GROUP BY a ORDER BY links DESC LIMIT ?""", [path, limit]).fetchall()
+    per_target = con.execute(f"""WITH t AS (SELECT url, a, count(*) AS n FROM {src} WHERE a <> '' GROUP BY url, a),
+                                    s AS (SELECT url, sum(n) AS links, count(*) AS variants, max(n) AS top_n,
+                                                 arg_max(a, n) AS top_anchor FROM t GROUP BY url)
+                                 SELECT url, links, variants, top_anchor, round(100.0 * top_n / links, 1) AS top_share
+                                 FROM s WHERE links >= 10 ORDER BY links DESC LIMIT 500""", [path]).fetchall()
+    same = [r for r in per_target if r[4] >= 95 and r[3] not in gen]
+    scattered = [r for r in per_target if r[2] >= 8 and r[4] < 20]
+    gen_links = sum(r[1] for r in generic)
+    return {
+        "internal_links": total, "generic_links": gen_links, "generic_share": round(100.0 * gen_links / total, 1) if total else 0.0,
+        "generic": [{"anchor": r[0], "links": r[1], "pages": r[2], "example_target": r[3], "example_page": r[4]} for r in generic],
+        "empty": {"links": empty[0], "pages": empty[1], "examples": [{"page": a, "target": b} for a, b in empty_examples]},
+        "top": [{"anchor": r[0], "links": r[1], "targets": r[2]} for r in top],
+        "same_everywhere": [{"url": r[0], "links": r[1], "anchor": r[3], "share": r[4]} for r in same[:50]],
+        "scattered": [{"url": r[0], "links": r[1], "variants": r[2], "top_anchor": r[3], "share": r[4]} for r in scattered[:50]],
+        "basis": "Internal <a> links of this check; every different text a page uses for a target counts once, compared case- "
+                 "and space-insensitively. 'No text' counts targets a page links to only without any text (an image link "
+                 "with no alt text, an empty <a>).",
+    }

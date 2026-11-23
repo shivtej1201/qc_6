@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Site } from "../api";
+import { api, type Anchors, type Site } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
 import { ErrorBox, count, useLoad } from "../ui";
@@ -13,6 +13,7 @@ const PAGE = 100;
 export function LinksView({ site, params }: { site: Site; params: URLSearchParams }) {
   const runs = useLoad(() => api.runs(site.id), [site.id]);
   const dataset = params.get("d") === "images" ? "images" : "links";
+  const anchorsTab = params.get("d") === "anchors";
   const [filter, setFilter] = useState(params.get("f") || "");
   const [q, setQ] = useState("");
   const [query, setQuery] = useState("");
@@ -36,10 +37,12 @@ export function LinksView({ site, params }: { site: Site; params: URLSearchParam
             {s ? <> — <b>{count(s.rows)}</b> placements of <b>{count(s.unique_urls)}</b> different addresses, <b>{count(s.broken)}</b> broken.</> : "."}</p>
         </div>
         <div className="seg" role="group" aria-label="Show">
-          <button aria-pressed={dataset === "links"} onClick={() => go("links", { d: "links" })}>Links</button>
+          <button aria-pressed={dataset === "links" && !anchorsTab} onClick={() => go("links", { d: "links" })}>Links</button>
           <button aria-pressed={dataset === "images"} onClick={() => go("links", { d: "images" })}>Images</button>
+          <button aria-pressed={anchorsTab} onClick={() => go("links", { d: "anchors" })}>Anchor text</button>
         </div>
       </div>
+      {anchorsTab && run ? <AnchorReport runId={run.id} /> : <>
       <div className="toolbar" data-reveal>
         <div className="seg" role="group" aria-label="Filter">
           {FILTERS[dataset].map(([k, label]) => <button key={k} aria-pressed={filter === k} onClick={() => setFilter(k)}>{label}</button>)}
@@ -67,7 +70,7 @@ export function LinksView({ site, params }: { site: Site; params: URLSearchParam
           </table>
         </div>
       )}
-      {data.data && data.data.total > PAGE && (
+      {!anchorsTab && data.data && data.data.total > PAGE && (
         <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
           <span className="faint">{count(offset + 1)}–{count(Math.min(offset + PAGE, data.data.total))} of {count(data.data.total)}</span>
           <div className="row">
@@ -76,6 +79,58 @@ export function LinksView({ site, params }: { site: Site; params: URLSearchParam
           </div>
         </div>
       )}
+      </>}
+    </div>
+  );
+}
+
+/* Internal anchor text: generic anchors, links with no text, most used anchors, and pages named the same / differently. */
+function AnchorReport({ runId }: { runId: number }) {
+  const a = useLoad(() => api.anchors(runId), [runId]);
+  if (a.error) return <ErrorBox text={a.error} onRetry={a.reload} />;
+  const x: Anchors | null = a.data;
+  if (!x) return <p className="faint">Loading…</p>;
+  return (
+    <div className="grid" style={{ gap: 16 }} data-reveal>
+      <div className="stat-row">
+        <div className="stat"><b>{count(x.internal_links)}</b><span className="stat-label">Internal links</span></div>
+        <div className="stat"><b className={x.generic_share >= 5 ? "down" : ""}>{x.generic_share}%</b><span className="stat-label">Generic text</span>
+          <span className="stat-sub">{count(x.generic_links)} links like "click here"</span></div>
+        <div className="stat"><b className={x.empty.links ? "down" : ""}>{count(x.empty.links)}</b><span className="stat-label">No text at all</span>
+          <span className="stat-sub">on {count(x.empty.pages)} pages</span></div>
+        <div className="stat"><b>{count(x.same_everywhere.length)}</b><span className="stat-label">Always the same text</span>
+          <span className="stat-sub">pages with 10+ links</span></div>
+      </div>
+      <div className="grid g-2">
+        <div className="panel">
+          <div className="panel-head"><h2>Generic anchor text</h2><span className="faint" style={{ fontSize: 13 }}>says nothing about the target</span></div>
+          {x.generic.length === 0 ? <p className="empty">None. Every link says where it goes.</p> : (
+            <div className="table-wrap flat"><table><thead><tr><th>Text</th><th className="num">Links</th><th className="num">Pages</th><th>For example</th></tr></thead>
+              <tbody>{x.generic.map((g) => <tr key={g.anchor}><td>"{g.anchor}"</td><td className="num">{count(g.links)}</td><td className="num">{count(g.pages)}</td>
+                <td className="mono" style={{ maxWidth: 260, overflowWrap: "anywhere" }}><a href={`#/page?url=${encodeURIComponent(g.example_page)}`}>{path(g.example_page)}</a> → {path(g.example_target)}</td></tr>)}</tbody></table></div>
+          )}
+        </div>
+        <div className="panel">
+          <div className="panel-head"><h2>Most used anchor text</h2></div>
+          <div className="table-wrap flat"><table><thead><tr><th>Text</th><th className="num">Links</th><th className="num">Pages linked</th></tr></thead>
+            <tbody>{x.top.slice(0, 15).map((t) => <tr key={t.anchor}><td>{t.anchor}</td><td className="num">{count(t.links)}</td><td className="num">{count(t.targets)}</td></tr>)}</tbody></table></div>
+        </div>
+      </div>
+      {(x.same_everywhere.length > 0 || x.scattered.length > 0) && (
+        <div className="grid g-2">
+          <div className="panel">
+            <div className="panel-head"><h2>Same text every time</h2><span className="faint" style={{ fontSize: 13 }}>95%+ of links: fine for menus, odd for content</span></div>
+            {x.same_everywhere.length === 0 ? <p className="empty">None.</p> : <ul className="plain">{x.same_everywhere.slice(0, 12).map((r) =>
+              <li key={r.url}><span className="mono">{path(r.url)}</span> <span className="faint">"{r.anchor}", {r.share}% of {count(r.links)} links</span></li>)}</ul>}
+          </div>
+          <div className="panel">
+            <div className="panel-head"><h2>Different text almost every time</h2><span className="faint" style={{ fontSize: 13 }}>no clear name for the page</span></div>
+            {x.scattered.length === 0 ? <p className="empty">None.</p> : <ul className="plain">{x.scattered.slice(0, 12).map((r) =>
+              <li key={r.url}><span className="mono">{path(r.url)}</span> <span className="faint">{r.variants} different texts across {count(r.links)} links</span></li>)}</ul>}
+          </div>
+        </div>
+      )}
+      <p className="basis">{x.basis}</p>
     </div>
   );
 }

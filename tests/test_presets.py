@@ -55,3 +55,21 @@ def test_page_type_label():
     assert page_type_label("NEEDS_REVIEW", "NEEDS_REVIEW") is None
     assert page_type_label("Ambiguous (Conflicting data-pageType: a, b)", None) is None
     assert page_type_label("PLP", "NEEDS_REVIEW") == "PLP"
+
+
+def test_speed_picked_at_start_wins_over_the_sites_stored_rate():
+    """Start crawling with a speed: the site's stored 12/s (Standard) doesn't hold a big list back."""
+    from qc6.presets import BIG_LIST, preset_for
+    assert preset_for(10_000) == "target" and preset_for(BIG_LIST) == "enterprise_150k" and preset_for(300_000) == "enterprise_150k"
+    site = {"preset": "target", "rate_rps": 12}
+    e = engine_options(site, {"preset": "enterprise_150k", "rate_rps": PRESETS["enterprise_150k"]["target_rps"]})
+    assert (e["target_rps"], e["max_rps"], e["source_concurrency"]) == (16.0, 18.0, 35)
+    assert estimate(10_000, 12)["minutes"] <= 16 and estimate(300_000, 16)["minutes"] < estimate(300_000, 12)["minutes"] * 0.8
+
+
+def test_a_sites_own_limit_is_offered_first_and_kept():
+    from qc6.presets import speeds
+    assert speeds(10_000, {"preset": "target", "rate_rps": 12})["speed_default"] == "target"       # untouched
+    assert speeds(300_000, {})["speed_default"] == "enterprise_150k"
+    s = speeds(300_000, {"preset": "target", "rate_rps": 5})
+    assert s["speed_default"] == "site" and s["speeds"][0]["rps"] == 5

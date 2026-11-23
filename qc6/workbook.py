@@ -206,6 +206,8 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         book.table("Destination Status", ["Status Bucket", "Unique HTTP Destinations", "Share %"],
                    ([b, counts.get(b, 0), round(100.0 * counts.get(b, 0) / uniq, 4) if uniq else 0.0] for b in order
                     if b in counts or b in BUCKET_ORDER[:10]), [18, 26, 10])
+        book.table("Status Codes", STATUS_HEAD, _status_codes(c, job), [16, 12, 12, 30, 14, 18, 80],
+                   note_if_empty="Nothing checked yet.")
         book.table("Source Page Issues", SRC_COLS, q(
             f"SELECT {', '.join(SRC_COLS)} FROM on_page_source_pages WHERE job_id = ? AND (crawl_state NOT IN ('COMPLETED','PENDING') "
             "OR COALESCE(http_status, 0) >= 400) ORDER BY source_page_id", job),
@@ -223,6 +225,7 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         book.table("External URLs (Unique)", DEST_COLS, q(
             f"SELECT {', '.join(DEST_COLS)} FROM on_page_validation_cache WHERE job_id = ? AND url_scope = 'EXTERNAL' "
             "ORDER BY normalized_url", job), [70, 10, 14, 10, 10, 60, 9, 30, 12, 20, 14, 18, 12, 10, 16, 60, 10, 40, 22])
+        _unique_sheets(book, c, job)
         book.table("Validation Cache Reuse", ["Metric", "Count"], [
             ["Unique HTTP Destinations", uniq], ["NEW_CHECK Relationships", new_check], ["REUSED Relationships", reused],
             ["Total HTTP Relationships", http_rel], ["Reuse Rate %", pct(reused, http_rel)],
@@ -236,6 +239,119 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         c.close()
     _problems_sheet(book, extra)
     return book.save()
+
+
+STATUS_HEAD = ["What", "First Status", "Final Status", "Meaning", "Unique URLs", "Found On (links / uses)", "Example URL"]
+UNIQ_HEAD = ["url", "scope", "first_status", "final_status", "status_bucket", "meaning", "final_url", "redirect_hops",
+             "redirect_chain", "response_time_ms", "content_type", "found_on_pages", "occurrences", "first_found_on",
+             "example_found_on", "remark", "checked_at"]
+IMG_HEAD = ["image_url", "image_type", "internal_external", "first_status", "final_status", "status_bucket", "meaning",
+            "final_url", "redirect_hops", "content_type", "size_bytes", "image_issue", "found_on_pages", "occurrences",
+            "pages_missing_alt", "first_found_on", "example_found_on", "remark", "checked_at"]
+BROKEN_IMG_HEAD = ["source_page_url", "source_page_status", "image_url", "image_type", "internal_external", "first_status",
+                   "final_status", "status_bucket", "final_url", "alt_text", "remark"]
+# issues first: anything that did not answer 200 straight away, then the healthy ones
+_ISSUES_FIRST = "(COALESCE(c.initial_http_status, 0) = 200 AND COALESCE(c.http_status, 0) = 200), c.http_status, c.normalized_url"
+
+
+def _meaning(code: Any, bucket: Any = None) -> str:
+    from http import HTTPStatus
+    if code is None:
+        return {"Timeout": "No answer in time", "DNS/Network": "Address not found / network error", "SSL": "Certificate problem",
+                "Robots blocked": "Not checked: robots.txt disallows it", "WAF blocked": "Blocked by the site's firewall / CDN",
+                "PENDING": "Not checked yet"}.get(bucket or "", bucket or "No answer")
+    try:
+        return HTTPStatus(int(code)).phrase
+    except ValueError:
+        return "Non-standard status"
+
+
+def _status_codes(c: sqlite3.Connection, job: str):
+    """Every exact status code seen (200, 301, 302, 404, 410, 500...), for the pages checked, the links found on them and
+    the images, with how many unique addresses answered it, how many times they are used, and an example."""
+    _found_on(c, job)
+    parts = [
+        ("Pages checked", "SELECT initial_http_status, http_status, NULL, COUNT(*), COUNT(*), MIN(source_page_url) "
+                          "FROM on_page_source_pages WHERE job_id = ? AND crawl_state != 'PENDING' GROUP BY 1, 2, 3"),
+        ("Links found", "SELECT c.initial_http_status, c.http_status, CASE WHEN c.http_status IS NULL THEN c.status_bucket END, "
+                        "COUNT(*), COALESCE(SUM(f.occ), 0), MIN(c.normalized_url) FROM on_page_validation_cache c "
+                        "LEFT JOIN temp.qc_found f ON f.u = c.normalized_url WHERE c.job_id = ? "
+                        "AND c.url_scope IN ('INTERNAL','EXTERNAL') GROUP BY 1, 2, 3"),
+        ("Images", "SELECT c.initial_http_status, c.http_status, CASE WHEN c.http_status IS NULL THEN c.status_bucket END, "
+                   "COUNT(*), COALESCE(SUM(f.occ), 0), MIN(c.normalized_url) FROM on_page_image_validation_cache c "
+                   "LEFT JOIN temp.qc_img_found f ON f.u = c.normalized_url WHERE c.job_id = ? GROUP BY 1, 2, 3"),
+    ]
+    for what, sql in parts:
+        try:
+            rows = c.execute(sql, (job,)).fetchall()
+        except sqlite3.OperationalError:           # a check made before images were recorded
+            continue
+        for first, final, bucket, n, uses, example in sorted(rows, key=lambda r: (r[0] is None, r[0] or 0, r[1] or 0)):
+            code = first if first is not None else final
+            meaning = _meaning(code, bucket)
+            if first is not None and final is not None and first != final:
+                meaning += f" -> {_meaning(final)}"
+            yield [what, first if first is not None else (bucket or "no answer"), final, meaning, n, uses, example]
+
+
+def _found_on(c: sqlite3.Connection, job: str) -> None:
+    """Per unique address: on how many pages it is found, how often, the first page and up to three example pages.
+    Temporary tables of this read-only connection; built once and shared by the sheets."""
+    if c.execute("SELECT 1 FROM temp.sqlite_master WHERE name = 'qc_found'").fetchone():
+        return
+    specs = [("qc_found", "on_page_link_relationships", "normalized_found_url", "AND found_url_scope IN ('INTERNAL','EXTERNAL')", "0"),
+             ("qc_img_found", "on_page_image_relationships", "normalized_image_url", "", "SUM(alt_present = 0)")]
+    for name, table, col, where, alt in specs:
+        try:
+            c.execute(f"""CREATE TEMP TABLE {name} AS
+                SELECT {col} AS u, COUNT(DISTINCT source_page_url) AS pages, SUM(occurrence_count) AS occ, {alt} AS no_alt,
+                       MIN(CASE WHEN rn = 1 THEN source_page_url END) AS first_on,
+                       GROUP_CONCAT(CASE WHEN rn <= 3 THEN source_page_url END, ' | ') AS examples
+                FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {col} ORDER BY id) AS rn FROM {table} WHERE job_id = ? {where})
+                GROUP BY {col}""", (job,))
+            c.execute(f"CREATE INDEX temp.{name}_u ON {name}(u)")
+        except sqlite3.OperationalError:
+            c.execute(f"CREATE TEMP TABLE IF NOT EXISTS {name} (u TEXT, pages INT, occ INT, no_alt INT, first_on TEXT, examples TEXT)")
+
+
+def _unique_sheets(book: "_Book", c: sqlite3.Connection, job: str) -> None:
+    """Every unique link and image address found on the checked pages, whatever it answered, with where it was found."""
+    _found_on(c, job)
+    rows = c.execute(f"""SELECT c.normalized_url, c.url_scope, c.initial_http_status, c.http_status, c.status_bucket, NULL, c.final_url,
+                 c.redirect_count, c.redirect_chain, c.response_time_ms, c.content_type, COALESCE(f.pages, 0), COALESCE(f.occ, 0),
+                 COALESCE(f.first_on, c.first_seen_source_url), f.examples, c.remark, c.checked_at
+          FROM on_page_validation_cache c LEFT JOIN temp.qc_found f ON f.u = c.normalized_url
+          WHERE c.job_id = ? AND c.url_scope IN ('INTERNAL','EXTERNAL') ORDER BY {_ISSUES_FIRST}""", (job,))
+    book.table("All URLs (Unique)", UNIQ_HEAD, (_with_meaning(r, 2, 3, 4, 5) for r in rows),
+               [70, 10, 11, 11, 13, 26, 60, 9, 40, 12, 20, 12, 11, 60, 90, 40, 20],
+               note_if_empty="No links were found on the checked pages.")
+    try:
+        rows = c.execute(f"""SELECT c.normalized_url, c.image_type, c.internal_external, c.initial_http_status, c.http_status, c.status_bucket,
+                 NULL, c.final_url, c.redirect_count, c.content_type, c.content_length, c.image_issue, COALESCE(f.pages, 0),
+                 COALESCE(f.occ, 0), COALESCE(f.no_alt, 0), COALESCE(f.first_on, c.first_seen_source_url), f.examples, c.remark, c.checked_at
+              FROM on_page_image_validation_cache c LEFT JOIN temp.qc_img_found f ON f.u = c.normalized_url
+              WHERE c.job_id = ? ORDER BY {_ISSUES_FIRST}""", (job,)).fetchall()
+        broken = c.execute(f"""SELECT r.source_page_url, r.source_page_status, r.image_url, r.image_type, r.internal_external,
+                 c.initial_http_status, c.http_status, c.status_bucket, c.final_url, r.alt_text, c.remark
+              FROM on_page_image_relationships r JOIN on_page_image_validation_cache c
+                ON c.job_id = r.job_id AND c.normalized_url = r.normalized_image_url
+              WHERE r.job_id = ? AND ({BROKEN_SQL} OR COALESCE(c.redirect_count, 0) > 0) ORDER BY r.id""", (job,))
+    except sqlite3.OperationalError:
+        return
+    book.table("Images (Unique)", IMG_HEAD, (_with_meaning(r, 3, 4, 5, 6) for r in rows),
+               [70, 10, 12, 11, 11, 13, 26, 60, 9, 18, 11, 22, 12, 11, 14, 60, 90, 40, 20],
+               note_if_empty="No images were found on the checked pages.")
+    book.table("Image Issues", BROKEN_IMG_HEAD, broken, [70, 11, 70, 10, 12, 11, 11, 13, 60, 30, 40],
+               note_if_empty="Every image on the checked pages answers 200 directly.")
+
+
+def _with_meaning(r: Sequence[Any], first: int, final: int, bucket: int, at: int) -> List[Any]:
+    r = list(r)
+    code = r[first] if r[first] is not None else r[final]
+    r[at] = _meaning(code, r[bucket])
+    if r[first] is not None and r[final] is not None and r[first] != r[final]:
+        r[at] += f" -> {_meaning(r[final])}"
+    return r
 
 
 def _head(run: Dict[str, Any], state: Optional[str] = None) -> List[Tuple[str, Any]]:

@@ -284,6 +284,8 @@ def test_full_workbook_like_the_v5_sample(env):
     import openpyxl
     c, site, dsn = env
     j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    assert {x["id"] for x in j["speeds"]} >= {"target", "enterprise_150k"} and all(x["minutes"] > 0 for x in j["speeds"])
+    assert c.post(f"/api/v2/lists/{j['id']}/start", json={"preset": "warp"}, headers=H).status_code == 409
     rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
 
     async def go():
@@ -312,6 +314,27 @@ def test_full_workbook_like_the_v5_sample(env):
     dest = rows("Destination Status")
     assert dest[0] == ["Status Bucket", "Unique HTTP Destinations", "Share %"] and dest[1][0] == "2xx"
     assert rows("Destination Issues")[0][:3] == ["normalized_url", "url_scope", "validation_state"]
+    # every exact status code, every unique URL and image whatever it answered, with the pages it is found on
+    from qc6.workbook import IMG_HEAD, STATUS_HEAD, UNIQ_HEAD
+    sc = rows("Status Codes")
+    assert sc[0] == STATUS_HEAD
+    assert ["Pages checked", 200, 200, "OK"] == sc[1][:4]
+    gone = [x for x in sc if x[0] == "Links found" and x[1] == 404]
+    assert gone and gone[0][3] == "Not Found" and gone[0][4] >= 1 and gone[0][5] >= 1
+    assert any(x[0] == "Images" and x[1] == 200 for x in sc)
+    uniq = rows("All URLs (Unique)")
+    assert uniq[0] == UNIQ_HEAD
+    col = {k: i for i, k in enumerate(UNIQ_HEAD)}
+    assert uniq[1][col["first_status"]] != 200                                    # problems first
+    g = next(x for x in uniq if x[0].endswith("/gone"))
+    assert g[col["final_status"]] == 404 and g[col["meaning"]] == "Not Found" and g[col["found_on_pages"]] >= 1
+    assert g[col["first_found_on"]].startswith(site.base) and g[col["example_found_on"]]
+    assert any(x[col["first_status"]] == 200 for x in uniq[1:])                   # healthy addresses are listed too
+    img = rows("Images (Unique)")
+    assert img[0] == IMG_HEAD and len(img) > 1
+    ic = {k: i for i, k in enumerate(IMG_HEAD)}
+    assert all(x[ic["found_on_pages"]] >= 1 and x[ic["first_found_on"]] for x in img[1:])
+    assert rows("Image Issues")[0][0] == "source_page_url"
     assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
     assert len(rows("QC Problem Pages")) > 1 and rows("QC Problem Pages")[1][7] in ("New",) or "Seen before" in rows("QC Problem Pages")[1][7]
     pkg = c.get(f"/api/v2/runs/{rid}/package.zip")

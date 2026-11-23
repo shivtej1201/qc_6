@@ -88,6 +88,7 @@ class Parser(HTMLParser):
         self.html_lang = None              # None = no <html lang>, '' = empty attribute
         self.has_viewport = False
         self.has_charset = False
+        self.doc_tags: set = set()          # which of <html> <head> <body> the source actually has
         self.meta_robots: List[str] = []   # content of <meta name=robots|googlebot>
         self.meta_refresh = ""
         self.meta_props: Dict[str, str] = {}   # og:* / twitter:* (first value wins)
@@ -121,6 +122,8 @@ class Parser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attr_dict = {k.lower(): (v.lower() if k.lower() in ('class', 'id', 'name', 'rel') and isinstance(v, str) else (v if v is not None else "")) for k, v in attrs if k}
         self.path.append((tag, attr_dict))
+        if tag in ('html', 'head', 'body'):
+            self.doc_tags.add(tag)
         
         if tag == 'head':
             self.in_head = True

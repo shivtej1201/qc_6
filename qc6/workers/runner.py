@@ -193,8 +193,9 @@ async def journey_stage(pool, browser, run_id: int, site: Dict[str, Any], fast: 
                             "ORDER BY id", site["id"], ids)
     from qc6.crawl.budget import HostBudget
     from qc6.presets import engine_options
-    rate = engine_options(site.get("settings") or {}, opts or {})["target_rps"]
-    await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(2.0, rate))
+    from qc6.robots_delay import paced_rate
+    rate = paced_rate(engine_options(site.get("settings") or {}, opts or {})["target_rps"], (opts or {}).get("_crawl_delay"))
+    await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(1.0, min(2.0, rate)))
     budget = HostBudget(pool, site["primary_host"], share=0.1)       # journeys take a small share of the site's rate
     runner = JourneyRunner(browser, site, settings.objects_dir, fast=fast, budget=budget)
     items, passed = [], 0
@@ -283,6 +284,15 @@ async def execute_run(pool, run_id: int, browser=None, fast_journeys: bool = Fal
                             kind=kind, stages_done=done_stages)
         async with pool.acquire() as conn:
             await notify(conn, run_id, "started", kind=kind, resumed=bool(done_stages))
+        if "_crawl_delay" not in opts:                   # the site's robots.txt Crawl-delay, read once per check
+            from qc6 import robots_delay
+            d = await robots_delay.fetch(site, settings.allow_private_targets)
+            opts["_crawl_delay"] = d or 0.0
+            await pool.execute("UPDATE runs SET options = options || $2::jsonb WHERE id = $1", run_id, {"_crawl_delay": opts["_crawl_delay"]})
+            if d:
+                await events.record(pool, run_id, "crawl_delay",
+                                    f"The site's robots.txt asks for {d:g} s between requests; QC waits at least that long "
+                                    f"(about {3600 / d:,.0f} pages an hour)", seconds=d)
         need_browser = kind in ("visit", "journey", "full")
         if need_browser and browser is None:
             from playwright.async_api import async_playwright

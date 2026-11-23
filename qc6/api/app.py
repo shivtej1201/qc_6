@@ -952,6 +952,7 @@ async def delete_list(lid: int, me=Depends(current_member)):
 
 class CrawlIn(BaseModel):
     browser: bool = False
+    preset: Optional[str] = None        # speed: conservative | target | max_tested | enterprise_150k; None = picked by list size
 
 
 @app.post("/api/v2/lists/{lid}/start", status_code=201)
@@ -962,7 +963,7 @@ async def start_list(lid: int, body: CrawlIn, me=Depends(current_member)):
     can_edit(me)
     pool = await get_pool()
     try:
-        rid = await jobs.start_crawl(pool, me, lid, body.browser)
+        rid = await jobs.start_crawl(pool, me, lid, body.browser, body.preset)
     except LookupError:
         raise problem(404, "URL list not found")
     except ListError as e:
@@ -1235,6 +1236,126 @@ async def ai_draft(fix_id: int, body: AIDraftIn, me=Depends(current_member)):
     return dict(row)
 
 
+# ------------------------------------------------------------------ AI content briefs (local model)
+class BriefIn(BaseModel):
+    url: str = Field(max_length=2000)
+
+
+class SectionIn(BaseModel):
+    text: str = Field(max_length=20000)
+
+
+async def _brief_row(pool, brief_id: int, me) -> Dict[str, Any]:
+    b = await pool.fetchrow("""SELECT b.*, s.base_url, s.primary_host, s.access_token, s.settings AS site_settings FROM content_briefs b
+                               JOIN sites s ON s.id = b.site_id WHERE b.id = $1 AND s.workspace_id = $2""", brief_id, me["workspace_id"])
+    if b is None:
+        raise problem(404, "Brief not found")
+    return dict(b)
+
+
+def _brief_out(b: Dict[str, Any]) -> Dict[str, Any]:
+    from qc6 import briefs
+    return {k: b[k] for k in ("id", "site_id", "url", "model", "sections", "status", "created_at", "updated_at")} | {
+        "order": list(briefs.SECTIONS), "labels": briefs.LABELS}
+
+
+async def _page_text(site: Dict[str, Any], url: str) -> str:
+    from qc6.linkgraph import main_text_words
+    from qc6.workers.extras import fetch_html
+    try:
+        return " ".join(main_text_words(await fetch_html(url, site) or ""))[:2500]
+    except httpx.HTTPError:
+        return ""
+
+
+@app.post("/api/v2/sites/{site_id}/briefs", status_code=201)
+async def make_brief(site_id: int, body: BriefIn, me=Depends(current_member)):
+    """Write a content brief for one page with the local model. Saved as a draft; every section can be edited."""
+    from qc6 import ai, briefs
+    can_edit(me)
+    s = await site_for(site_id, me)
+    pool = await get_pool()
+    try:
+        ev = await briefs.evidence(pool, site_id, body.url, await _page_text(s, body.url))
+    except LookupError:
+        raise problem(404, "QC hasn't checked that page", "Briefs are written for pages from a check of this site.")
+    try:
+        written = await briefs.write(ev)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    secs = {k: {"text": v, "edited": False, "written_at": briefs.now()} for k, v in written.items()}
+    row = await pool.fetchrow("""INSERT INTO content_briefs (site_id, url, model, sections, evidence, created_by)
+                                 VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""", site_id, body.url, ai.config()["model"], secs, ev, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], "brief.create", f"brief:{row['id']}", {"url": body.url})
+    return _brief_out(dict(row))
+
+
+@app.get("/api/v2/sites/{site_id}/briefs")
+async def list_briefs(site_id: int, url: str = "", me=Depends(current_member)):
+    await site_for(site_id, me)
+    rows = await (await get_pool()).fetch(
+        "SELECT * FROM content_briefs WHERE site_id = $1 AND ($2 = '' OR url = $2) ORDER BY id DESC LIMIT 100", site_id, url)
+    return {"briefs": [_brief_out(dict(r)) for r in rows]}
+
+
+@app.get("/api/v2/briefs/{brief_id}")
+async def get_brief(brief_id: int, me=Depends(current_member)):
+    return _brief_out(await _brief_row(await get_pool(), brief_id, me))
+
+
+@app.get("/api/v2/briefs/{brief_id}/brief.md")
+async def brief_markdown(brief_id: int, me=Depends(current_member)):
+    from fastapi import Response
+    from qc6 import briefs
+    b = await _brief_row(await get_pool(), brief_id, me)
+    return Response(briefs.markdown(b), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="content-brief-{brief_id}.md"'})
+
+
+@app.put("/api/v2/briefs/{brief_id}/sections/{name}")
+async def edit_brief_section(brief_id: int, name: str, body: SectionIn, me=Depends(current_member)):
+    """A person's edit. Marked as edited, so writing other sections again never touches it."""
+    from qc6 import briefs
+    can_edit(me)
+    if name not in briefs.SECTIONS:
+        raise problem(404, "No such section")
+    pool = await get_pool()
+    await _brief_row(pool, brief_id, me)
+    row = await pool.fetchrow("UPDATE content_briefs SET sections = jsonb_set(sections, ARRAY[$2], $3::jsonb), updated_at = now() "
+                              "WHERE id = $1 RETURNING *", brief_id, name,
+                              {"text": body.text.strip(), "edited": True, "written_at": briefs.now(), "edited_by": me.get("name") or me["email"]})
+    return _brief_out(dict(row))
+
+
+@app.post("/api/v2/briefs/{brief_id}/sections/{name}/rewrite")
+async def rewrite_brief_section(brief_id: int, name: str, me=Depends(current_member)):
+    """Write one section again with the local model; the other sections (and their hand edits) stay as they are."""
+    from qc6 import ai, briefs
+    can_edit(me)
+    if name not in briefs.SECTIONS:
+        raise problem(404, "No such section")
+    pool = await get_pool()
+    b = await _brief_row(pool, brief_id, me)
+    keep = {k: v.get("text", "") for k, v in (b["sections"] or {}).items() if k != name}
+    try:
+        out = await briefs.write(dict(b["evidence"] or {}), only=name, keep=keep)
+    except ai.AIUnavailable as e:
+        raise problem(503, "The local AI isn't available", str(e))
+    row = await pool.fetchrow("UPDATE content_briefs SET sections = jsonb_set(sections, ARRAY[$2], $3::jsonb), updated_at = now() "
+                              "WHERE id = $1 RETURNING *", brief_id, name,
+                              {"text": out.get(name, ""), "edited": False, "written_at": briefs.now()})
+    return _brief_out(dict(row))
+
+
+@app.delete("/api/v2/briefs/{brief_id}")
+async def delete_brief(brief_id: int, me=Depends(current_member)):
+    can_edit(me)
+    pool = await get_pool()
+    await _brief_row(pool, brief_id, me)
+    await pool.execute("DELETE FROM content_briefs WHERE id = $1", brief_id)
+    return {"ok": True}
+
+
 @app.get("/api/v2/fixes/{fix_id}/ai")
 async def ai_list(fix_id: int, me=Depends(current_member)):
     pool = await get_pool()
@@ -1458,6 +1579,51 @@ async def inventory_csv(site_id: int, request: Request, run: Optional[int] = Non
                              headers={"Content-Disposition": f'attachment; filename="pages-{name}-check-{rid}.csv"'})
 
 
+@app.get("/api/v2/runs/{run_id}/anchors")
+async def run_anchors(run_id: int, me=Depends(current_member)):
+    """Internal anchor text: generic anchors ("click here"), links without text, most used anchors, and pages every
+    link names the same way (or never the same way twice)."""
+    from qc6 import facts
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    try:
+        return await asyncio.to_thread(facts.anchors, run_id)
+    except FileNotFoundError:
+        raise problem(404, "No link data for this check", "It is made when a page check finishes.")
+
+
+@app.get("/api/v2/runs/{run_id}/html")
+async def run_html(run_id: int, url: str, download: bool = False, me=Depends(current_member)):
+    """The HTML QC received for one page in this check (kept only when QC6_KEEP_HTML=true). Sent as plain text,
+    never as a page, so nothing in it runs in QC's own window."""
+    import gzip
+    import hashlib
+    from fastapi import Response
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                               run_id, me["workspace_id"]):
+        raise problem(404, "Check not found")
+    hdir = os.path.join(settings.data_dir, "runs", str(run_id), "html")
+    path = os.path.join(hdir, hashlib.sha256(url.encode()).hexdigest()[:40] + ".html.gz")
+    if not os.path.exists(path):
+        from qc6 import html_store
+        raise problem(404, "No saved HTML for this page",
+                      "QC keeps page HTML only when QC6_KEEP_HTML=true is set on the server; checks made after that have it."
+                      if not html_store.enabled() else "This page wasn't fetched in this check, or the check was made before HTML was kept.")
+    def read() -> bytes:
+        with gzip.open(path, "rb") as f:
+            return f.read(8 * 1024 * 1024 + 1)
+    data = await asyncio.to_thread(read)
+    truncated = len(data) > 8 * 1024 * 1024
+    headers = {"X-Truncated": "1" if truncated else "0", "Content-Security-Policy": "default-src 'none'; sandbox"}
+    if download:
+        host = re.sub(r"[^a-z0-9.-]+", "-", urllib.parse.urlsplit(url).netloc.lower())
+        headers["Content-Disposition"] = f'attachment; filename="{host}-check-{run_id}.html.txt"'
+    return Response(data[:8 * 1024 * 1024], media_type="text/plain; charset=utf-8", headers=headers)
+
+
 @app.get("/api/v2/runs/{run_id}/package.zip")
 async def run_package(run_id: int, me=Depends(current_member)):
     """Every data file of a check as CSV, in one ZIP (the V5 package: all link relationships, unique URLs, broken,
@@ -1517,7 +1683,7 @@ async def compare_checks(site_id: int, a: int, b: int, me=Depends(current_member
 
 
 @app.get("/api/v2/sites/{site_id}/growth/opportunities")
-async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+async def opportunities(site_id: int, bucket: str = "", review: str = "", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
                         min_impressions: int = Query(2500, ge=1), me=Depends(current_member)):
     """Pages ranked by QC's opportunity score, with the reasons in words and an action bucket (CrawlPulse FEAT-15)."""
     from qc6.opportunity import explain, page_opportunities
@@ -1525,9 +1691,83 @@ async def opportunities(site_id: int, bucket: str = "", limit: int = Query(50, g
     pool = await get_pool()
     rid = await _inventory_run(site_id, None, pool)
     d = await page_opportunities(pool, site_id, rid, min_impressions, with_reasons=0)
-    rows = [p for p in d["pages"] if not bucket or p["bucket"] == bucket]
-    return {**{k: v for k, v in d.items() if k not in ("pages", "_explain")}, "total": len(rows),
-            "pages": explain(d, rows[offset:offset + limit])}
+    reviews = {r["url"]: dict(r) for r in await pool.fetch(
+        """SELECT DISTINCT ON (o.url) o.url, o.status, o.note, o.created_at, m.name AS by FROM opportunity_reviews o
+           LEFT JOIN members m ON m.id = o.member_id WHERE o.site_id = $1 ORDER BY o.url, o.id DESC""", site_id)}
+    rows = [p for p in d["pages"] if (not bucket or p["bucket"] == bucket)
+            and (not review or (reviews.get(p["url"], {}).get("status") or "open") == review)]
+    page = explain(d, rows[offset:offset + limit])
+    for p in page:
+        p["review"] = reviews.get(p["url"])
+    counts: Dict[str, int] = {}
+    for p in d["pages"]:
+        k = (reviews.get(p["url"], {}).get("status") or "open")
+        counts[k] = counts.get(k, 0) + 1
+    return {**{k: v for k, v in d.items() if k not in ("pages", "_explain")}, "total": len(rows), "review_counts": counts,
+            "parts_labels": OPP_PARTS, "pages": page}
+
+
+OPP_PARTS = {"T": "Problems on the page", "P": "Search demand close to page 1", "C": "Clicks below what its position earns",
+             "R": "Visits (GA4)", "Q": "Content quality", "L": "Hard to reach by links"}
+
+
+class ReviewIn(BaseModel):
+    url: str = Field(max_length=2000)
+    status: str = Field(pattern="^(accepted|dismissed|done|open)$")
+    note: str = Field(default="", max_length=2000)
+    score: Optional[float] = None
+
+
+@app.post("/api/v2/sites/{site_id}/growth/opportunities/review", status_code=201)
+async def review_opportunity(site_id: int, body: ReviewIn, me=Depends(current_member)):
+    """Accept, dismiss or mark done an opportunity; every decision is kept (history), the latest one counts."""
+    can_edit(me)
+    await site_for(site_id, me)
+    pool = await get_pool()
+    rid = await pool.fetchval("INSERT INTO opportunity_reviews (site_id, url, status, note, score, member_id) "
+                              "VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", site_id, body.url, body.status, body.note.strip(),
+                              body.score, me["id"])
+    await services.log(pool, me["workspace_id"], me["id"], f"opportunity.{body.status}", f"site:{site_id}", {"url": body.url})
+    return {"id": rid, "status": body.status}
+
+
+@app.get("/api/v2/sites/{site_id}/growth/opportunities/review")
+async def opportunity_history(site_id: int, url: str, me=Depends(current_member)):
+    await site_for(site_id, me)
+    rows = await (await get_pool()).fetch(
+        """SELECT o.status, o.note, o.score, o.created_at, m.name AS by FROM opportunity_reviews o
+           LEFT JOIN members m ON m.id = o.member_id WHERE o.site_id = $1 AND o.url = $2 ORDER BY o.id DESC LIMIT 100""", site_id, url)
+    return {"history": [dict(r) for r in rows]}
+
+
+# ------------------------------------------------------------------ fix tools: check now, impact
+@app.post("/api/v2/fixes/{fix_id}/recheck", status_code=201)
+async def recheck_fix(fix_id: int, me=Depends(current_member)):
+    """Check just this fix's pages now (a spot check). It confirms the fix when every page is clean."""
+    from qc6 import fix_tools
+    can_edit(me)
+    pool = await get_pool()
+    f = await pool.fetchrow("SELECT f.* FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
+                            fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    try:
+        return await fix_tools.recheck(pool, dict(f), me["id"])
+    except services.Busy as e:
+        raise _start_problem(e)
+    except services.NotAllowed as e:
+        raise problem(409, "This fix can't be checked on its own", str(e))
+
+
+@app.get("/api/v2/fixes/{fix_id}/impact")
+async def fix_impact(fix_id: int, me=Depends(current_member)):
+    from qc6 import fix_tools
+    pool = await get_pool()
+    f = await pool.fetchrow("SELECT f.* FROM fixes f JOIN sites s ON s.id = f.site_id WHERE f.id = $1 AND s.workspace_id = $2",
+                            fix_id, me["workspace_id"])
+    if f is None:
+        raise problem(404, "Fix not found")
+    return await fix_tools.impact(pool, dict(f))
 
 
 @app.get("/api/v2/sites/{site_id}/growth/search")

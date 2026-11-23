@@ -38,6 +38,7 @@ SEO_COLUMNS = [
     "og_description", "og_image", "twitter_card", "word_count", "content_hash", "hreflang_count", "hreflang_json",
     "hreflang_x_default", "insecure_resources", "insecure_examples", "internal_links", "external_links",
     "internal_nofollow_links", "url_length", "checked_at", "script_count", "js_rendering_suspected",
+    "has_html_tag", "has_body_tag", "jsonld_no_context", "jsonld_no_type", "canonical_href", "header_charset",
 ]
 JS_SHELL_MAX_WORDS = 50
 
@@ -61,6 +62,25 @@ def _robots_tokens(values: Iterable[str]) -> set:
     if "none" in toks:
         toks |= {"noindex", "nofollow"}
     return toks
+
+
+def jsonld_shape(blocks: List[str]) -> Tuple[int, int]:
+    """(top-level JSON-LD objects without @context, without @type). An @graph container needs @context, and each of
+    its items needs @type; blocks that don't parse are counted by _schema_types instead."""
+    no_ctx = no_type = 0
+    for b in blocks:
+        try:
+            data = json.loads((b or "").strip() or "x")
+        except ValueError:
+            continue
+        for node in (data if isinstance(data, list) else [data]):
+            if not isinstance(node, dict):
+                continue
+            if "@context" not in node:
+                no_ctx += 1
+            items = node["@graph"] if isinstance(node.get("@graph"), list) else [node]
+            no_type += sum(1 for it in items if isinstance(it, dict) and not it.get("@type"))
+    return no_ctx, no_type
 
 
 def _schema_types(blocks: List[str]) -> Tuple[List[str], int, str]:
@@ -97,7 +117,7 @@ def _schema_types(blocks: List[str]) -> Tuple[List[str], int, str]:
 
 
 def page_facts(job_id: str, src_url: str, final_url: str, parser: Any, rels: List[Dict[str, Any]],
-               x_robots_tag: str, checked_at: str) -> Dict[str, Any]:
+               x_robots_tag: str, checked_at: str, content_type: str = "") -> Dict[str, Any]:
     """One SEO row for a parsed 2xx HTML page. Uses only what the single parse already produced."""
     title = " ".join((parser.title or "").split())
     desc = " ".join((parser.meta_desc or "").split())
@@ -147,6 +167,11 @@ def page_facts(job_id: str, src_url: str, final_url: str, parser: Any, rels: Lis
         "meta_refresh": parser.meta_refresh, "canonical_outside_head": parser.canonical_outside_head,
         "jsonld_blocks": len(parser.jsonld_blocks), "jsonld_invalid": invalid,
         "schema_types": ",".join(types) + ((" | error: " + jerr) if jerr else ""),
+        "has_html_tag": int("html" in getattr(parser, "doc_tags", {"html"})),
+        "has_body_tag": int("body" in getattr(parser, "doc_tags", {"body"})),
+        "jsonld_no_context": jsonld_shape(parser.jsonld_blocks)[0], "jsonld_no_type": jsonld_shape(parser.jsonld_blocks)[1],
+        "canonical_href": (getattr(parser, "canonical", "") or "")[:500],
+        "header_charset": int("charset=" in (content_type or "").lower()),
         "og_title": mp.get("og:title", ""), "og_description": mp.get("og:description", ""),
         "og_image": mp.get("og:image", ""), "twitter_card": mp.get("twitter:card", ""),
         "word_count": parser.word_count, "content_hash": parser.content_hash,
@@ -176,6 +201,17 @@ def url_structure_issues(url: str) -> List[Tuple[str, str, str, str]]:
     if len(url) > URL_MAX_LEN:
         out.append(("URL_STRUCTURE", "URL_TOO_LONG", "LOW", f"{len(url)} characters (> {URL_MAX_LEN})"))
     return out
+
+
+def _bare_host(url: str) -> str:
+    import urllib.parse as up
+    h = (up.urlsplit(url).hostname or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _same_url(a: str, others) -> bool:
+    norm = lambda u: (u or "").strip().rstrip("/").lower()          # noqa: E731
+    return norm(a) in {norm(o) for o in others if o}
 
 
 def page_issues(f: Dict[str, Any], self_urls: Iterable[str]) -> List[Tuple[str, str, str, str]]:
@@ -238,6 +274,36 @@ def page_issues(f: Dict[str, Any], self_urls: Iterable[str]) -> List[Tuple[str, 
     if int(f.get("internal_nofollow_links") or 0):
         out.append(("TECH_SEO", "INTERNAL_NOFOLLOW_LINKS", "LOW",
                     f"{f['internal_nofollow_links']} internal link(s) with rel=nofollow"))
+
+    # CrawlPulse 3 page rules (TECH-HTML-*, TECH-SCHEMA-MISSING-*, TECH-INDEX-CONFLICT, TECH-CANON-CROSS-DOMAIN)
+    if not int(f.get("has_charset") or 0) and not int(f.get("header_charset") or 0) and f.get("has_charset") is not None:
+        out.append(("TECH_SEO", "CHARSET_MISSING", "LOW", "No <meta charset> and no charset in the Content-Type header"))
+    if int(f.get("jsonld_no_context") or 0):
+        out.append(("TECH_SEO", "STRUCTURED_DATA_NO_CONTEXT", "MEDIUM",
+                    f"{f['jsonld_no_context']} JSON-LD object(s) without @context (usually \"https://schema.org\")"))
+    if int(f.get("jsonld_no_type") or 0):
+        out.append(("TECH_SEO", "STRUCTURED_DATA_NO_TYPE", "MEDIUM", f"{f['jsonld_no_type']} JSON-LD item(s) without @type"))
+    js_shell = int(f.get("js_rendering_suspected") or 0)
+    if (not int(f.get("word_count") or 0) and not int(f.get("title_count") or 0) and not int(f.get("h1_count") or 0)
+            and not int(f.get("h2_count") or 0) and not js_shell):
+        out.append(("CONTENT", "HTML_EMPTY", "HIGH", "The page answers but has no text, title or headings"))
+    elif f.get("has_html_tag") is not None and (not int(f.get("has_html_tag") or 0) or not int(f.get("has_body_tag") or 0)):
+        miss = [t for t, k in (("<html>", "has_html_tag"), ("<body>", "has_body_tag")) if not int(f.get(k) or 0)]
+        out.append(("TECH_SEO", "HTML_STRUCTURE_INCOMPLETE", "LOW", "Missing " + " and ".join(miss)))
+    meta_toks = _robots_tokens([f.get("meta_robots") or ""])
+    header_toks = _robots_tokens([f.get("x_robots_tag") or ""])
+    canon = str(f.get("canonical_href") or "").strip()
+    conflicts = []
+    if "index" in meta_toks and "noindex" in header_toks:
+        conflicts.append("meta robots says index, X-Robots-Tag header says noindex")
+    if int(f.get("noindex") or 0) and canon and _same_url(canon, [f.get("source_page_url"), f.get("final_url"), *self_urls]):
+        conflicts.append("noindex, yet the canonical points to this page itself")
+    if conflicts:
+        out.append(("TECH_SEO", "INDEX_SIGNALS_CONFLICT", "MEDIUM", "; ".join(conflicts)))
+    if canon.lower().startswith(("http://", "https://")):
+        ch, ph = _bare_host(canon), _bare_host(f.get("final_url") or f.get("source_page_url") or "")
+        if ch and ph and ch != ph:
+            out.append(("TECH_SEO", "CANONICAL_CROSS_DOMAIN", "MEDIUM", f"Canonical points to another domain: {canon[:200]}"))
 
     if int(f.get("js_rendering_suspected") or 0):
         out.append(("TECH_SEO", "JS_RENDERING_SUSPECTED", "MEDIUM",

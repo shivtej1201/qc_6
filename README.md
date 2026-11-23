@@ -44,12 +44,33 @@ To skip the password question, set it first (any characters work, including `@`)
 Or set the full address. PowerShell: `$env:QC6_DATABASE_URL = "postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6"`
 · Command Prompt: `set QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6`
 
-### Linux / macOS
+### macOS (Apple Silicon or Intel)
+
+1. Install Python 3.11+ and PostgreSQL 16 once. With [Homebrew](https://brew.sh):
+   ```bash
+   brew install python@3.12 postgresql@16
+   ```
+   ```bash
+   brew services start postgresql@16
+   ```
+   Or use [Postgres.app](https://postgresapp.com) (open it, press Initialize) and the python.org installer.
+   The `python3` that comes with macOS is too old.
+2. Unzip QC and **double-click `start.command`** (or run `./start.sh` in Terminal). The first start sets everything up
+   (a few minutes), finds your PostgreSQL by itself, creates the `qc6` database and opens QC in your browser.
+   Ctrl+C in that Terminal window stops QC.
+
+If macOS says the file can't be opened because it was downloaded, right-click `start.command` → Open once, or run:
+```bash
+xattr -dr com.apple.quarantine path/to/qc_6
+```
+
+### Linux
 
 ```bash
-export QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6     # the database is created for you
 ./start.sh
 ```
+It finds a local PostgreSQL (asking for the `postgres` password if it needs one) and creates the `qc6` database. To use
+another server: `export QC6_DATABASE_URL=postgresql://USER@HOST:5432/qc6` (password in `QC6_DB_PASSWORD`).
 
 ### Docker (any system)
 
@@ -136,12 +157,17 @@ QC opens on **New check**:
 1. Choose **Sitemap** and paste its address (a sitemap index is followed to every sitemap it lists), or **One page**,
    or **Upload a sheet** (CSV, TSV, TXT or Excel .xlsx, addresses in any column).
 2. QC lists the page addresses, live as it reads them. **Download URLs** as Excel or CSV.
-3. **Start crawling.** Every page is checked; the screen shows pages done, speed and time left, every second.
+3. Pick a **Speed** (each says how long this list will take) and **Start crawling.** Standard (12 requests a second)
+   is picked for lists under 50,000 pages: 10,000 pages in about 16 minutes. Large site (16, rising to 18 while the
+   site keeps up) is picked from 50,000: 3 lakh pages in about 5–6 hours instead of 7½. A limit set for the site
+   stays its limit. QC slows down by itself when the site answers slowly or says "too many requests".
+   Every page is checked; the screen shows pages done, speed and time left, every second.
    **Pause**, **Resume** and **Cancel** work at any point (pause and cancel take effect within seconds; nothing already
    checked is lost).
 4. When it finishes: problems by severity and **Download report** (Excel one sheet, CSV, ZIP, PDF summary).
 
-The site is created from the address the first time; there is nothing to configure. **Your checks** lists every
+The site is created from the address the first time; there is nothing to configure and no site to pick: the
+screens show the site of the check you opened last. **Your checks** lists every
 check with its status. If another check of the same site is still going, the screen says which and offers to
 pause or cancel it. If the worker isn't running (for example its window was closed), the screen says so, and a
 check left "pausing" by a closed worker becomes "paused" by itself instead of blocking new checks.
@@ -154,8 +180,16 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Seen before**: every issue URL says when it was first found and on which earlier checks ("Also found on 20 Nov,
   21 Nov (first seen 20 Nov, 3 earlier checks)"). In the fix drawer, on the page screen and in the report.
 * **Full audit workbook** (Download report → Full audit workbook): the QC V5 layout, one sheet each for Executive
-  Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, Source Page Issues, Destination
-  Issues, Broken / Redirect / External URLs, Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
+  Summary, Sitemap Progress, Business / Language / Page Type, Destination Status, **Status Codes**, Source Page Issues,
+  Destination Issues, Broken / Redirect / External URLs, **All URLs (Unique)**, **Images (Unique)**, **Image Issues**,
+  Validation Cache Reuse, Sitemap Hreflang, QC Problems and QC Problem Pages.
+  * *Status Codes*: every exact code seen (200, 301, 302, 304, 404, 410, 500, 503, timeouts...) for the pages
+    checked, the links found on them and the images, with how many unique addresses answered it, how many times
+    they're used, and an example. A redirect shows both ends: "301 Moved Permanently -> 200 OK".
+  * *All URLs (Unique)* / *Images (Unique)*: each unique address found on the pages is checked once and listed once,
+    whatever it answered: first and final status, meaning, final URL, redirect hops and chain, on how many pages it
+    is found, the first page and three example pages (images also: pages missing alt text). Problems come first.
+  * *Image Issues*: every page -> image pair where the image is broken or redirects.
   "All data as CSVs (ZIP)" has every link-level file.
 * **Download report** (Insights, All pages, New check): one file, one sheet: the summary at the top, then one row per problem and
   page with severity, what to do, owner, status and the seen-before remark. CSV, Excel (`.xlsx`) or ZIP (the CSV,
@@ -164,6 +198,22 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   checks, Delete … and all its checks; type the site's name). Fixes that have comments or a ticket are kept. Cannot be undone.
 * **Product pages**: name, price, currency, availability, identifier (SKU/GTIN/MPN) and image in the page's
   Product data (JSON-LD or microdata), and product pages with no Product data at all.
+
+## Polite crawling, fixes and content (from the CrawlPulse 3 comparison)
+
+* **Crawl-delay**: when a site's robots.txt asks for N seconds between requests (for `QC-Audit` or `*`), QC waits at
+  least that long between page fetches, link checks on its own hosts and real-browser visits. The check's timeline says so.
+* **More page rules**: missing charset, JSON-LD without `@context` / `@type`, empty pages, pages without `<html>` /
+  `<body>`, contradicting index signals, canonicals to another domain.
+* **Check this fix now** (in a fix): re-checks just that fix's pages; it's confirmed when every one is clean.
+* **Impact** (in a verified fix): Search Console clicks, impressions and rank for the fix's pages 14, 28 and 60 days
+  before and after it was confirmed. Needs Search Console; read it as a signal, not proof.
+* **Fixes → Board**: drag fixes between Open, In progress, Fixed and Won't fix (or use each card's Move-to menu).
+* **Growth**: accept, dismiss or mark done each opportunity (kept as a history); click a score to see how it's made.
+* **Content brief** (on a page): intent, audience, target queries, outline, title and description, questions,
+  structured data and pages that should link here, written by the local AI. Edit any part or write one part again.
+* **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
+* **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
 
 ## AI drafts (free, on your own machine)
 
@@ -227,6 +277,8 @@ checks (FEAT-08-02).
 |---|---|
 | Coverage, 2,000 pages | 78 s end to end in V6 (crawl, page types, V5 report package, Parquet facts, fixes): 73,503 links, 50,061 images, trust gate PASS |
 | Full, 2,000 pages | 224 s: coverage, then 25 real-browser visits at human pace (6 visitors), then journeys |
+| **10,000 pages at the default speed (Standard, 12 req/s)**, `scripts/bench_site.py` | **15 min 53 s** end to end (sitemap to report): 429,970 links, 60,000 images, 10,651 unique URLs and 2,000 unique images each checked once (100 x 301 -> 200, 50 x 404 found and placed on their pages); full workbook 11 s |
+| Large site speed (16 -> 18 req/s), same stand-in site | held 16.0 req/s steady, no slow-downs; 3 lakh pages at that rate is about 5¾ h (Standard: about 7½ h) |
 | V5 engine alone, 300,000 pages | 3 h 22 min end to end (V5 benchmark) |
 
 ## Status against the delivery plan (blueprint §16)

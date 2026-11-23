@@ -157,8 +157,9 @@ async def run_visit_stage(pool, browser, run_id: int, site: Dict[str, Any], opts
         "SELECT page_url, device FROM visits WHERE run_id = $1 AND status IN ('ok','failed')", run_id)}
     targets = [t for t in targets if (t.url, t.device) not in already]      # resume: skip pages already visited
     from qc6.presets import engine_options
-    rate = engine_options(site.get("settings") or {}, opts)["target_rps"]
-    await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(2.0, rate))
+    from qc6.robots_delay import paced_rate
+    rate = paced_rate(engine_options(site.get("settings") or {}, opts)["target_rps"], opts.get("_crawl_delay"))
+    await HostBudget.ensure(pool, site["primary_host"], rate_rps=rate, burst=max(1.0, min(2.0, rate)))
     budget = HostBudget(pool, site["primary_host"], share=settings.visit_share)
     done = {"n": 0}
 

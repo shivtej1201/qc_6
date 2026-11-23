@@ -34,6 +34,31 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 DEFAULT_PRESET = "target"
+BIG_LIST = 50_000            # from this many pages the crawl starts at the Large-site speed unless another is picked
+
+
+def site_rate(site_settings: Dict[str, Any]) -> Optional[float]:
+    """A speed someone set for this site (typed in, or brought from V5): a hard limit, unlike an untouched preset."""
+    st = site_settings or {}
+    p = PRESETS.get(st.get("preset") or DEFAULT_PRESET, PRESETS[DEFAULT_PRESET])
+    r = st.get("rate_rps")
+    return float(r) if r and float(r) != p["target_rps"] else None
+
+
+def speeds(pages: int, site_settings: Dict[str, Any]) -> Dict[str, Any]:
+    """The speeds offered when crawling starts, each with how long this many pages would take, and the one picked first."""
+    out = [{"id": k, "label": v["label"], "rps": v["target_rps"], "max_rps": v["max_rps"],
+            "minutes": estimate(pages, v["target_rps"])["minutes"]} for k, v in PRESETS.items()]
+    own = site_rate(site_settings)
+    if own:
+        out.insert(0, {"id": "site", "label": "This site's limit", "rps": own, "max_rps": own, "minutes": estimate(pages, own)["minutes"]})
+    return {"speeds": out, "speed_default": "site" if own else preset_for(pages)}
+
+
+def preset_for(pages: int) -> str:
+    """The starting speed for a list of this size: Standard keeps 10,000 pages within about 16 minutes; a big list
+    gets the Large-site rate (16, rising to 18 while the site keeps up), still slowing down whenever the site pushes back."""
+    return "enterprise_150k" if int(pages or 0) >= BIG_LIST else DEFAULT_PRESET
 
 # per-site crawl settings (V5 config names in brackets) with their allowed range
 LIMITS = {
