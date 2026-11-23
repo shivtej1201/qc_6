@@ -27,17 +27,17 @@ export function go(view: string, params: Record<string, string | number> = {}) {
   window.location.hash = `/${view}${q ? "?" + q : ""}`;
 }
 
-const NAV_GROUPS: { label: string; items: [string, string, string, string][] }[] = [
-  { label: "Overview", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs"], ["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
-    ["growth", "growth", "Growth", "opportunities search console queries"]] },
-  { label: "Work", items: [["fixes", "fix", "Fixes", "issues problems inbox"], ["journeys", "journey", "Journeys", "flows paths"],
-    ["live", "live", "Live run", "check running progress"]] },
-  { label: "Explore", items: [["pages", "layers", "All pages", "inventory urls compare"], ["links", "link", "Links & images", "broken redirects"]] },
+const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, string, string][] }[] = [
+  { label: "URL QC", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs results ticket"], ["fixes", "fix", "Problems", "issues problems fixes inbox"],
+    ["links", "link", "Links & images", "broken redirects images"]] },
+  { label: "More tools", more: true, items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
+    ["growth", "growth", "Growth", "opportunities search console queries"], ["pages", "layers", "All pages", "inventory urls compare"],
+    ["journeys", "journey", "Journeys", "flows paths"], ["live", "live", "Live run", "check running progress"]] },
 ];
 const NAV = NAV_GROUPS.flatMap((g) => g.items);
 const SCREEN_VIEWS: Record<string, true> = Object.fromEntries([...NAV.map((n) => n[0]), "page"].map((v) => [v, true]));
 const SCREENS: Screen[] = NAV.map(([view, icon, label, words]) => ({ view, icon, label, words }));
-const TABS: [string, string, string][] = [["start", "play", "Check"], ["today", "today", "Today"], ["growth", "growth", "Growth"], ["fixes", "fix", "Fixes"]];
+const TABS: [string, string, string][] = [["start", "play", "Check"], ["fixes", "fix", "Problems"], ["links", "link", "Links"]];
 const TITLES: Record<string, string> = { ...Object.fromEntries(NAV.map((n) => [n[0], n[2]])), page: "Page", account: "Your account" };
 
 function App({ local }: { local: boolean }) {
@@ -125,17 +125,23 @@ function App({ local }: { local: boolean }) {
         {site && <p className="site-now" title="Shown for the check you opened last. Start a new check from a sitemap, a sheet or one URL.">Showing <b>{site.primary_host}</b></p>}
         <button className="jump" onClick={() => setPalette(true)}><Icon name="search" /><span>Jump to…</span><kbd>Ctrl K</kbd></button>
         <nav aria-label="Sections">
-          {NAV_GROUPS.map((g) => (
-            <div className="nav-group" key={g.label} role="group" aria-labelledby={`ng-${g.label}`}>
-              <p className="nav-label" id={`ng-${g.label}`}>{g.label}</p>
-              {g.items.map(([v, icon, label]) => (
-                <a key={v} className="nav" href={`#/${v}`} aria-current={current === v ? "page" : undefined}>
-                  <Icon name={icon} />{label}
-                  {v === "fixes" && site?.open_fixes ? <span className="count" aria-label={`${site.open_fixes} open`}>{site.open_fixes}</span> : null}
-                </a>
-              ))}
-            </div>
-          ))}
+          {NAV_GROUPS.map((g) => {
+            const items = g.items.map(([v, icon, label]) => (
+              <a key={v} className="nav" href={`#/${v}`} aria-current={current === v ? "page" : undefined}>
+                <Icon name={icon} />{label}
+                {v === "fixes" && site?.open_fixes ? <span className="count" aria-label={`${site.open_fixes} open`}>{site.open_fixes}</span> : null}
+              </a>
+            ));
+            return g.more ? (
+              <details className="nav-group nav-more" key={g.label} open={g.items.some(([v]) => v === current) || undefined}>
+                <summary className="nav-label">{g.label}</summary>{items}
+              </details>
+            ) : (
+              <div className="nav-group" key={g.label} role="group" aria-labelledby={`ng-${g.label.replace(/\W/g, "")}`}>
+                <p className="nav-label" id={`ng-${g.label.replace(/\W/g, "")}`}>{g.label}</p>{items}
+              </div>
+            );
+          })}
         </nav>
         <div className="foot">
           {local && <a className="nav" href="#/account" style={{ padding: "4px 0" }} aria-current={current === "account" ? "page" : undefined}>Your account</a>}

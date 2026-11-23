@@ -145,6 +145,7 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         book.key_values("Executive Summary", f"QC V6 — {host} on-page URL audit", _head(run), _qc_metrics(run, extra))
         _problems_sheet(book, extra)
         return book.save()
+    _simple_sheets(book, run, site)
     c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         q = lambda sql, *a: c.execute(sql, a)                                           # noqa: E731
@@ -239,6 +240,49 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         c.close()
     _problems_sheet(book, extra)
     return book.save()
+
+
+def _simple_sheets(book: "_Book", run: Dict[str, Any], site: Dict[str, Any]) -> None:
+    """The first sheets, readable in a minute: Summary, Ops Ticket, then one plain list per kind of problem with every
+    address, the pages it is on and what to do. The detailed V5 sheets follow them."""
+    from qc6 import ops_ticket
+    q = ops_ticket.collect(run["id"])
+    if q is None:
+        return
+    p, bl, rd, bi = q["pages"], q["broken_links"], q["redirects"], q["broken_images"]
+    t = ops_ticket.ticket(q, run, site)
+    book.key_values("Summary", f"URL QC - {site['primary_host']} - check #{run['id']}", [
+        ("Suggested priority", t["priority"] or "Nothing to fix"),
+        ("What QC checked", "Every page in the list, and every link and image on those pages (each unique address once). "
+                            "CSS and JavaScript files are not checked."),
+    ], [
+        ("Pages", None), ("Pages checked", p["checked"]), ("Pages answering 200", p["ok"]),
+        ("Pages not answering 200  -> sheet Pages Not OK", p["not_ok"]),
+        ("Links", None), ("Unique links checked", q["links"]["unique"]),
+        ("Broken links (4xx, 5xx, no answer)  -> sheet Broken Links", bl["unique"]), ("  ...pages that have one", bl["pages"]),
+        ("Links that redirect  -> sheet Redirects", rd["unique"]), ("  ...pages that have one", rd["pages"]),
+        ("Images", None), ("Unique images checked", q["images"]["unique"]),
+        ("Broken images  -> sheet Broken Images", bi["unique"]), ("  ...pages that have one", bi["pages"]),
+        ("Next", None), ("Raise a ticket", "Copy the Ops Ticket sheet (or the Ops ticket tab in QC) into the ticket."),
+        ("Every status code", "Sheet Status Codes; every address with its status: All URLs (Unique), Images (Unique)."),
+    ])
+    ws = book.wb.create_sheet("Ops Ticket")
+    ws.column_dimensions["A"].width = 160
+    for line in t["text"].split("\n"):
+        ws.append(book._cells(ws, [line], book.bold if line.isupper() or line.startswith("Title:") else None))
+    book.table("Broken Links", ["Broken link", "Status", "Link goes to", "Found on (pages)", "Link text", "Example page",
+                                "More example pages", "What to do"],
+               ([r["url"], r["status"], r["scope"], r["pages"], r["text"], r["example"], r["examples"], bl["fix"]] for r in bl["rows"]),
+               [70, 26, 14, 14, 30, 60, 90, 50], note_if_empty="No broken links.")
+    book.table("Broken Images", ["Broken image", "Status", "Found on (pages)", "Example page", "More example pages", "What to do"],
+               ([r["url"], r["status"], r["pages"], r["example"], r["examples"], bi["fix"]] for r in bi["rows"]),
+               [70, 26, 14, 60, 90, 50], note_if_empty="No broken images.")
+    book.table("Redirects", ["Link", "Status", "Goes to", "Found on (pages)", "Example page", "What to do"],
+               ([r["url"], r["status"], r["final_url"], r["pages"], r["example"], rd["fix"]] for r in rd["rows"]),
+               [70, 34, 70, 14, 60, 50], note_if_empty="No link redirects.")
+    book.table("Pages Not OK", ["Page", "Status", "Detail", "What to do"],
+               ([r["url"], r["status"], r["detail"], p["fix"]] for r in p["rows"]), [80, 30, 50, 50],
+               note_if_empty="Every page answers 200.")
 
 
 STATUS_HEAD = ["What", "First Status", "Final Status", "Meaning", "Unique URLs", "Found On (links / uses)", "Example URL"]

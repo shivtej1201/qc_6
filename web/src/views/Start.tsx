@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Job, type Severity } from "../api";
+import { api, type Job, type QcBlock } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
 import { Confirm, DownloadMenu, ErrorBox, Icon, ago, count, useLoad, useToast } from "../ui";
@@ -13,8 +13,6 @@ const SOURCES: [Source, string, string][] = [
   ["single", "One page", "Check a single page."],
   ["sheet", "Upload a file", "A sheet (CSV, Excel .xlsx, text) with page addresses in any column, or sitemap files saved from your browser (.xml, .xml.gz). You can pick several files."],
 ];
-const SEV: Severity[] = ["critical", "high", "medium", "low"];
-const SEV_TEXT: Record<Severity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
 
 function phase(j: Job): string {
   if (j.status !== "ready") return j.status;                            // extracting | failed | cancelled (list)
@@ -300,15 +298,10 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       {ph === "completed" && (<>
         <div className="big-num"><b>{count(j.run_summary?.pages ?? j.url_count)}</b> pages checked
           <span>finished {ago(j.run_finished)}{j.run_summary?.score != null ? ` · health score ${Math.round(j.run_summary.score)}` : ""}</span></div>
-        <div className="sev-row">
-          {SEV.map((s) => (
-            <div key={s} className={`sev-box ${s}`}><span>{SEV_TEXT[s]}</span><b>{count(j.results?.[s]?.problems || 0)}</b>
-              <small>{j.results?.[s] ? `on ${count(j.results[s]!.pages)} pages` : "none"}</small></div>
-          ))}
-        </div>
+        {j.run_id && <QcResult runId={j.run_id} toast={toast} />}
         <div className="row" style={{ flexWrap: "wrap" }}>
           <DownloadMenu siteId={j.site_id} run={j.run_id} />
-          <button className="btn" onClick={() => go("fixes")}>See the problems</button>
+          <button className="btn quiet" onClick={() => go("fixes")}>All problems</button>
           <button className="btn quiet" onClick={start} disabled={busy}>Check again</button>
         </div>
       </>)}
@@ -378,5 +371,80 @@ function AllowRule({ siteId, toast }: { siteId: number; toast: (m: string) => vo
         ))}
       </>)}
     </div>
+  );
+}
+
+/* The URL QC in four numbers, the problem lists, and a ticket for the Ops team ready to copy. */
+function QcResult({ runId, toast }: { runId: number; toast: (m: string) => void }) {
+  const r = useLoad(() => api.opsTicket(runId), [runId]);
+  const [tab, setTab] = useState<"problems" | "ticket">("problems");
+  if (r.error) return <p className="faint">URL results aren't available for this check: {r.error}</p>;
+  if (!r.data) return <p className="faint">Loading the results…</p>;
+  const { qc, ticket } = r.data;
+  const copy = async (text: string, what: string) => {
+    try { await navigator.clipboard.writeText(text); toast(`${what} copied.`); }
+    catch { toast("Couldn't copy: select the text and press Ctrl+C."); }
+  };
+  const tiles: [string, number, string, string][] = [
+    ["Pages not OK", qc.pages.not_ok, `of ${count(qc.pages.checked)} pages checked`, qc.pages.not_ok ? "bad" : "good"],
+    ["Broken links", qc.broken_links.unique, `on ${count(qc.broken_links.pages)} pages · ${count(qc.links.unique)} links checked`, qc.broken_links.unique ? "bad" : "good"],
+    ["Broken images", qc.broken_images.unique, `on ${count(qc.broken_images.pages)} pages · ${count(qc.images.unique)} images checked`, qc.broken_images.unique ? "bad" : "good"],
+    ["Redirecting links", qc.redirects.unique, `on ${count(qc.redirects.pages)} pages`, qc.redirects.unique ? "warn" : "good"],
+  ];
+  return (
+    <div className="qc-result">
+      <div className="qc-tiles">
+        {tiles.map(([name, n, sub, tone]) => (
+          <div key={name} className={`qc-tile ${tone}`}><span>{name}</span><b>{count(n)}</b><small>{sub}</small></div>
+        ))}
+      </div>
+      <div className="seg qc-tabs" role="tablist" aria-label="Results">
+        <button role="tab" id="qt-p" aria-controls="qp-p" aria-selected={tab === "problems"} onClick={() => setTab("problems")}>Problems</button>
+        <button role="tab" id="qt-t" aria-controls="qp-t" aria-selected={tab === "ticket"} onClick={() => setTab("ticket")}>Ops ticket</button>
+      </div>
+      {tab === "problems" ? (
+        <div role="tabpanel" id="qp-p" aria-labelledby="qt-p">
+          {qc.pages.not_ok + qc.broken_links.unique + qc.broken_images.unique + qc.redirects.unique === 0
+            ? <p className="good-note">Every page, link and image answers 200. Nothing to fix.</p> : (<>
+            <QcList title="Pages not answering 200" block={{ unique: qc.pages.not_ok, pages: qc.pages.not_ok, fix: qc.pages.fix, rows: qc.pages.rows }} kind="page" />
+            <QcList title="Broken links" block={qc.broken_links} kind="link" />
+            <QcList title="Broken images" block={qc.broken_images} kind="image" />
+            <QcList title="Links that redirect" block={qc.redirects} kind="redirect" />
+            <p className="faint" style={{ fontSize: 13 }}>Each list shows the 10 used on most pages. The Excel report (Download report → Full audit workbook) lists every one, with every page it is on.</p>
+          </>)}
+        </div>
+      ) : (
+        <div role="tabpanel" id="qp-t" aria-labelledby="qt-t" className="ticket">
+          <p className="faint" style={{ margin: "0 0 8px" }}>Ready to paste into the Ops team's ticket. Suggested priority: <b>{ticket.priority || "none, nothing to fix"}</b>.</p>
+          <label className="ticket-label" htmlFor="ticket-title">Title</label>
+          <div className="ticket-title"><input id="ticket-title" readOnly value={ticket.title} onFocus={(e) => e.target.select()} />
+            <button className="btn" onClick={() => copy(ticket.title, "Title")}>Copy title</button></div>
+          <label className="ticket-label" htmlFor="ticket-text">Ticket</label>
+          <textarea id="ticket-text" readOnly value={ticket.text} rows={18} onFocus={(e) => e.target.select()} />
+          <div className="row"><button className="btn primary" onClick={() => copy(ticket.text, "Ticket")}><Icon name="page" />Copy the whole ticket</button></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QcList({ title, block, kind }: { title: string; block: QcBlock; kind: "page" | "link" | "image" | "redirect" }) {
+  if (!block.unique) return null;
+  const rows = block.rows.slice(0, 10);
+  return (
+    <section className="qc-list">
+      <h3>{title} <span className="faint">{count(block.unique)}</span></h3>
+      <div className="table-wrap"><table>
+        <thead><tr><th>{kind === "page" ? "Page" : kind === "image" ? "Image" : "Link"}</th><th>Status</th>
+          {kind !== "page" && <th className="num">On pages</th>}{kind !== "page" && <th className="hide-phone">For example on</th>}</tr></thead>
+        <tbody>{rows.map((x) => (
+          <tr key={x.url}><td className="mono url-cell">{x.url}{x.final_url ? <small>goes to {x.final_url}</small> : null}{x.text ? <small>link text “{x.text}”</small> : null}</td>
+            <td>{x.status}</td>
+            {kind !== "page" && <td className="num">{count(x.pages)}</td>}
+            {kind !== "page" && <td className="mono url-cell hide-phone">{x.example}</td>}</tr>
+        ))}</tbody>
+      </table></div>
+      <p className="fix-line">What to do: {block.fix}</p>
+    </section>
   );
 }
