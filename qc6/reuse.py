@@ -17,6 +17,7 @@ import os
 import sqlite3
 from typing import Any, Dict, Optional
 
+from qc6.sqlite_ro import ro_uri
 from qc6.settings import settings
 
 log = logging.getLogger("qc6.reuse")
@@ -74,7 +75,7 @@ def seed(db_path: str, job: str, prev_run: int, window_h: float) -> int:
 def reused_count(db_path: str, job: str) -> int:
     """How many links of the finished check took an earlier check's result (were linked to, not fetched)."""
     try:
-        c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+        c = sqlite3.connect(ro_uri(db_path), uri=True, timeout=10)
         try:
             return int(c.execute("SELECT COUNT(*) FROM on_page_validation_cache WHERE job_id = ? AND referenced = 1 "
                                  "AND seeded_by = 'PREVIOUS_CHECK'", (job,)).fetchone()[0])

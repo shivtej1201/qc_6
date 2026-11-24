@@ -22,6 +22,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from qc6.sqlite_ro import ro_uri
 from qc6.workbook import db_path
 
 PROBLEM_LINKS_MAX = 50_000          # page -> link rows written; the attachments / ZIP have every pair
@@ -66,7 +67,7 @@ def _conn(run_id: int) -> Optional[sqlite3.Connection]:
     p = db_path(run_id)
     if not os.path.exists(p):
         return None
-    c = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    c = sqlite3.connect(ro_uri(p), uri=True)
     c.execute("PRAGMA temp_store = MEMORY")
     return c
 

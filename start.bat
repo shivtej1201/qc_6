@@ -1,30 +1,26 @@
 @echo off
 setlocal
 REM QC V6 - start on Windows (double-click, or run .\start.bat in PowerShell / Command Prompt).
+REM Same steps as start.sh on macOS / Linux: this file only finds Python and installs packages; the rest
+REM (PostgreSQL, data folder, encryption key, database tables, worker + web app) is qc6\launcher.py, shared by both.
 REM Needs: Python 3.11+ (python.org, tick "Add python.exe to PATH") and PostgreSQL 16 (postgresql.org/download/windows).
-REM Node is NOT needed: the web app is already built.
+REM Node is NOT needed: the web app is already built. Another port: set PORT=8004 before start.bat.
 cd /d "%~dp0"
 
-REM ---- find Python
+REM ---- 1. Python 3.11 or newer (python.exe on PATH, or the py launcher)
 set "PY="
-where python >nul 2>nul && set "PY=python"
-if not defined PY ( where py >nul 2>nul && set "PY=py -3" )
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul && set "PY=python"
+if not defined PY ( py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul && set "PY=py -3" )
 if not defined PY (
-  echo Python was not found. Install Python 3.11 or newer from https://www.python.org/downloads/
+  echo Python 3.11 or newer was not found. Install it from https://www.python.org/downloads/
   echo and tick "Add python.exe to PATH" during installation. Then run start.bat again.
   pause & exit /b 1
 )
 
-REM ---- database address (the database itself is created automatically)
-if not "%QC6_DATABASE_URL%"=="" goto have_db
-echo.
-echo QC V6 keeps its data in PostgreSQL. Enter the password you chose for the "postgres" user
-echo when you installed PostgreSQL. The "qc6" database is created for you.
-set /p "QC6_DB_PASSWORD=PostgreSQL password: "
-set "QC6_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/qc6"
-:have_db
-
-REM ---- first start: virtual environment, packages, Chromium
+REM ---- 2. first start: virtual environment and packages (a venv from an older Python is made again)
+if exist .venv\Scripts\python.exe (
+  .venv\Scripts\python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul || rmdir /s /q .venv
+)
 if exist .venv\Scripts\python.exe goto have_venv
 echo Setting up QC V6 for the first time - this takes a few minutes...
 %PY% -m venv .venv
@@ -34,7 +30,8 @@ if errorlevel 1 (echo Could not create the virtual environment. & pause & exit /
 if errorlevel 1 (echo Installing packages failed. Check your internet connection. & rmdir /s /q .venv & pause & exit /b 1)
 copy /y requirements.txt .venv\requirements.installed >nul
 :have_venv
-REM ---- an update added or changed packages (requirements.txt differs from what was installed): install them
+
+REM ---- 3. packages added or changed by an update
 fc /b requirements.txt .venv\requirements.installed >nul 2>nul
 if errorlevel 1 (
   echo Updating QC V6 packages - a minute or two...
@@ -42,22 +39,13 @@ if errorlevel 1 (
   if errorlevel 1 (echo Installing packages failed. Check your internet connection, then run start.bat again. & pause & exit /b 1)
   copy /y requirements.txt .venv\requirements.installed >nul
 )
+
+REM ---- 4. Chromium for real-visitor checks (once)
 if exist .venv\.chromium-ok goto have_chromium
 .venv\Scripts\python -m playwright install chromium
 if errorlevel 1 (echo WARNING: Chromium could not be downloaded. Page checks work; real-visitor checks and journeys need it.) else (type nul > .venv\.chromium-ok)
 :have_chromium
 
-if "%QC6_DATA_DIR%"=="" set "QC6_DATA_DIR=%CD%\var"
-.venv\Scripts\python -m qc6.db.migrate
-if errorlevel 1 (
-  echo.
-  echo Could not reach PostgreSQL. Check that PostgreSQL is running and the password is right,
-  echo then run start.bat again.
-  pause & exit /b 1
-)
-
-start "QC V6 worker" .venv\Scripts\python -m qc6.workers.runner
-echo.
-echo QC V6 is running: open http://127.0.0.1:8003 in your browser. Close this window to stop it.
-start "" http://127.0.0.1:8003
-.venv\Scripts\python -m uvicorn qc6.api.app:app --host 127.0.0.1 --port 8003
+REM ---- 5. the rest, the same as on macOS / Linux
+.venv\Scripts\python -m qc6.launcher
+if errorlevel 1 pause

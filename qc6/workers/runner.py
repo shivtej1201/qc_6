@@ -410,11 +410,19 @@ async def worker_loop(poll_s: float = 2.0) -> None:
                 state["handed_back"] = rid if done != "UPDATE 0" else None
             asyncio.get_running_loop().create_task(pause_for_shutdown(state["run"]))
     import signal
-    for sig in (signal.SIGTERM, signal.SIGINT):
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGBREAK", None)):
+        if sig is None:
+            continue
         try:
-            asyncio.get_running_loop().add_signal_handler(sig, drain)
-        except (NotImplementedError, RuntimeError, ValueError):   # Windows: Ctrl+C still stops it; recovery hands the check on
-            pass
+            loop.add_signal_handler(sig, drain)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Windows: no loop signal handlers; a plain handler hands over to the loop, so Ctrl+C / Ctrl+Break / closing
+            # the window drains the same way as on macOS and Linux (the check goes back to the queue)
+            try:
+                signal.signal(sig, lambda *_: loop.call_soon_threadsafe(drain))
+            except (OSError, ValueError, RuntimeError):
+                pass
     while not state["draining"]:
         if time.monotonic() - last_tick >= 60:
             last_tick = time.monotonic()

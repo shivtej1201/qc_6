@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QC V6 — start everything on this machine: macOS (Apple Silicon or Intel) or Linux.
 #   ./start.sh                 (on a Mac you can also double-click start.command in Finder)
-# Needs: Python 3.11 or newer, and PostgreSQL running on this machine. Node is NOT needed (the web app is pre-built).
+# Needs: Python 3.11 or newer, and PostgreSQL running on this machine (same as start.bat on Windows). Node is NOT needed (the web app is pre-built).
 #   macOS:  brew install python@3.12 postgresql@16 && brew services start postgresql@16      (or Postgres.app)
 #   Linux:  your distribution's python3 (3.11+) and postgresql packages
 # The database "qc6" is created on the first start. Set QC6_DATABASE_URL yourself to use another server.
@@ -61,51 +61,8 @@ if [ ! -f .venv/.chromium-ok ]; then
        say "         Retry later with: .venv/bin/python -m playwright install chromium" >&2; fi
 fi
 
-# ---- 4. the database: QC6_DATABASE_URL if set, else find the local PostgreSQL
-if [ -z "${QC6_DATABASE_URL:-}" ]; then
-  set +e
-  URL="$(.venv/bin/python -m qc6.db.find_server)"; RC=$?
-  set -e
-  if [ "$RC" = "3" ] && [ -z "${QC6_DB_PASSWORD:-}" ]; then
-    say ""
-    say "PostgreSQL is running but wants a password. Enter the password of the \"postgres\" user"
-    say "(the one you chose when you installed PostgreSQL). It is used for this run only, not saved."
-    printf 'PostgreSQL password: '
-    stty -echo 2>/dev/null || true
-    IFS= read -r QC6_DB_PASSWORD || true
-    stty echo 2>/dev/null || true
-    printf '\n'
-    export QC6_DB_PASSWORD
-    set +e
-    URL="$(.venv/bin/python -m qc6.db.find_server)"; RC=$?
-    set -e
-  fi
-  case "$RC" in
-    0) export QC6_DATABASE_URL="$URL" ;;
-    2) if [ "$OS" = "Darwin" ]; then
-         fail "PostgreSQL isn't running on this Mac. Either:
-  brew install postgresql@16 && brew services start postgresql@16
-or install Postgres.app (https://postgresapp.com), open it and press Initialize. Then run ./start.sh again."
-       else
-         fail "PostgreSQL isn't running. Install and start it (e.g. sudo apt install postgresql && sudo systemctl start postgresql),
-or set QC6_DATABASE_URL to your server. Then run ./start.sh again."
-       fi ;;
-    3) fail "PostgreSQL didn't accept that password. Run ./start.sh again, or set QC6_DATABASE_URL,
-e.g. export QC6_DATABASE_URL=postgresql://USER@127.0.0.1:5432/qc6 and QC6_DB_PASSWORD=..." ;;
-    *) fail "Looking for PostgreSQL stopped with an error (see above). Run ./start.sh again; if it repeats, set QC6_DATABASE_URL." ;;
-  esac
-fi
-
-export QC6_DATA_DIR="${QC6_DATA_DIR:-$PWD/var}"
-.venv/bin/python -m qc6.db.migrate || fail "Could not set up the database. Check that PostgreSQL is running and the address is right."
-
-# ---- 5. worker + web app; Ctrl+C stops both (the worker hands its check back to the queue)
-.venv/bin/python -m qc6.workers.runner & WORKER=$!
-cleanup() { kill -TERM "$WORKER" 2>/dev/null || true; wait "$WORKER" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
-say ""
-say "QC V6 is running: http://127.0.0.1:$PORT   (Ctrl+C to stop)"
-( sleep 2
-  if [ "$OS" = "Darwin" ]; then open "http://127.0.0.1:$PORT" >/dev/null 2>&1 || true
-  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "http://127.0.0.1:$PORT" >/dev/null 2>&1 || true; fi ) &
-.venv/bin/python -m uvicorn qc6.api.app:app --host 127.0.0.1 --port "$PORT"
+# ---- 4. everything else is the same on every system (qc6/launcher.py, also used by start.bat on Windows):
+#      find PostgreSQL (asks for the password if it needs one), data folder + encryption key, database tables,
+#      the worker and the web app on http://127.0.0.1:$PORT. Ctrl+C stops both.
+export PORT
+exec .venv/bin/python -m qc6.launcher

@@ -207,12 +207,15 @@ async def read_sheet(intake: Intake, path: str, filename: str, source: str,
                      progress: Optional[Callable[[Dict[str, Any]], Any]] = None) -> None:
     """Read a sheet in chunks off the event loop, reporting progress after each chunk."""
     rows = sheet_rows(path, filename)
-    while True:
-        got = await asyncio.to_thread(feed_sheet_chunk, intake, rows, source, filename)
-        if progress is not None:
-            await progress(intake.summary())
-        if got == 0:
-            break
+    try:
+        while True:
+            got = await asyncio.to_thread(feed_sheet_chunk, intake, rows, source, filename)
+            if progress is not None:
+                await progress(intake.summary())
+            if got == 0:
+                break
+    finally:
+        rows.close()                     # the file is closed now (Windows can't delete an open file)
 
 
 def feed_text(intake: Intake, text: str, source: str = "Manual entry") -> None:
