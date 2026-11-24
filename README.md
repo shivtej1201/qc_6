@@ -240,6 +240,19 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
 * **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
 
+## Speed on slow sites and honest network remarks
+
+* **Requests in flight follow the site's answer time.** Each host's limit is sized as agreed rate x answer time
+  (Little's law), so a site that takes 3-6 s per page still gets its full agreed rate instead of about 5 pages a second.
+  The rate itself (req/s, Crawl-delay, slow-down on 429/5xx) is unchanged: a slow site is not hit harder.
+* **Network failures are retried, then checked a second time.** Connection, DNS and timeout errors are retried at least
+  twice with back-off. At the end of the crawl every link or image that still failed for a network reason (or a 502-504)
+  is checked again, calmly (8 at a time, longer timeouts). The remark then says *worked on a second check* (with the
+  first error) or *confirmed on a second check*. A busy moment no longer shows a working URL as "DNS / network issue".
+* **Precise remarks**: DNS temporary failure vs host name not found, connection timeout vs response timeout, connection
+  refused, connection reset, SSL certificate vs handshake. When QC's own connection pool is full, the request waits and
+  is not counted against the website.
+
 ## AI drafts (free, on your own machine)
 
 1. Install Ollama from https://ollama.com and start it.
@@ -304,6 +317,7 @@ checks (FEAT-08-02).
 | Full, 2,000 pages | 224 s: coverage, then 25 real-browser visits at human pace (6 visitors), then journeys |
 | **10,000 pages at the default speed (Standard, 12 req/s)**, `scripts/bench_site.py` | **15 min 53 s** end to end (sitemap to report): 429,970 links, 60,000 images, 10,651 unique URLs and 2,000 unique images each checked once (100 x 301 -> 200, 50 x 404 found and placed on their pages); full workbook 11 s |
 | Large site speed (16 -> 18 req/s), same stand-in site | held 16.0 req/s steady, no slow-downs; 3 lakh pages at that rate is about 5¾ h (Standard: about 7½ h) |
+| **Slow site (every page 3-6 s), 1,000 pages, Standard 12 req/s**, `scripts/bench_site.py --slow 3,6` | before: 5 min 12 s (3.2 pages/s, 7.3 of 12 req/s used); now: **2 min 55 s** (11.7 of 12 req/s), identical results (42,970 links, 6,000 images, 7,196 findings) |
 | V5 engine alone, 300,000 pages | 3 h 22 min end to end (V5 benchmark) |
 
 ## Status against the delivery plan (blueprint §16)
