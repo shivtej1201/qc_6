@@ -23,6 +23,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from typing import Any, Dict, List, Optional, Tuple
 
+from qc6.sqlite_ro import ro_uri
 from qc6.settings import settings
 
 log = logging.getLogger("qc6.mailer")
@@ -236,7 +237,7 @@ def crawl_numbers(run_id: int) -> Optional[Dict[str, Any]]:
     path = os.path.join(settings.data_dir, "runs", str(int(run_id)), "coverage.db")
     if not os.path.exists(path):
         return None
-    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    c = sqlite3.connect(ro_uri(path), uri=True, timeout=10)
     job = f"RUN{run_id}"
     one = lambda sql: c.execute(sql, (job,)).fetchone()                                    # noqa: E731
     try:

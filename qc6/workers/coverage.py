@@ -22,6 +22,7 @@ from qcv5.audit.on_page_issue_rules import ACTIONS
 from qcv5.crawler.on_page_audit_engine import OnPageAuditEngine
 from qcv5.reports.on_page_csv_packager import build_on_page_csv_package
 
+from qc6.sqlite_ro import ro_uri
 from qc6.domain import templates as T
 from qc6.linkgraph import text_simhash
 from qc6.product import extract as product_extract
@@ -203,7 +204,7 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
                 except OSError:
                     log.warning("could not checkpoint fingerprints for run %s", run_id)
             try:
-                c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
+                c = sqlite3.connect(ro_uri(db_path), uri=True, timeout=1)
                 done, errs, ms = c.execute(
                     "SELECT COUNT(*), COALESCE(SUM(CASE WHEN COALESCE(error_type, '') != '' OR COALESCE(http_status, 0) >= 400 "
                     "THEN 1 ELSE 0 END), 0), COALESCE(SUM(response_time_ms), 0) FROM on_page_source_pages "

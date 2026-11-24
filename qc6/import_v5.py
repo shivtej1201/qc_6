@@ -24,11 +24,12 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from qc6.sqlite_ro import ro_uri
 from qc6.domain import templates as T
 
 
 def _ro(db: str) -> sqlite3.Connection:
-    c = sqlite3.connect(f"file:{os.path.abspath(db)}?mode=ro", uri=True)
+    c = sqlite3.connect(ro_uri(db), uri=True)
     c.row_factory = sqlite3.Row
     return c
 

@@ -16,6 +16,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from qc6.sqlite_ro import ro_uri
 from qc6.settings import settings
 
 EXCEL_MAX_ROWS = 1_048_576
@@ -147,7 +148,7 @@ def build(run: Dict[str, Any], site: Dict[str, Any], extra: Dict[str, Any]) -> s
         return book.save()
     _simple_sheets(book, run, site)
     _tickets_sheet(book, extra)
-    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    c = sqlite3.connect(ro_uri(path), uri=True)
     try:
         q = lambda sql, *a: c.execute(sql, a)                                           # noqa: E731
         one = lambda sql, *a: c.execute(sql, a).fetchone()                              # noqa: E731

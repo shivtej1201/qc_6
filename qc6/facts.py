@@ -16,6 +16,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from qc6.sqlite_ro import ro_uri
 from qc6.settings import settings
 
 BATCH = 100_000
@@ -74,7 +75,7 @@ def export(db_path: str, job: str, run_id: int) -> Dict[str, int]:
     out = facts_dir(run_id)
     os.makedirs(out, exist_ok=True)
     counts = {}
-    c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    c = sqlite3.connect(ro_uri(db_path), uri=True)
     try:
         for name, sql, schema in (("links", LINKS_SQL, LINK_SCHEMA), ("images", IMAGES_SQL, IMAGE_SCHEMA)):
             path = os.path.join(out, f"{name}.parquet")

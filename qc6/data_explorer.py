@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from qc6.sqlite_ro import ro_uri
 from qc6.settings import settings
 
 MAX_SQL = 20_000
@@ -84,7 +85,7 @@ def _open(run_id: int) -> sqlite3.Connection:
     path = db_path(run_id)
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5, check_same_thread=False)
+    con = sqlite3.connect(ro_uri(path), uri=True, timeout=5, check_same_thread=False)
     have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for name, sql in VIEWS.items():
         need = set(re.findall(r"\b(on_page_\w+)\b", sql))
@@ -206,7 +207,7 @@ def schema(run_id: int) -> Dict[str, Any]:
     path = db_path(run_id)
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    con = sqlite3.connect(ro_uri(path), uri=True, timeout=5)
     try:
         tables = []
         for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):

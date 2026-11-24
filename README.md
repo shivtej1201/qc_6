@@ -37,12 +37,25 @@ disguises itself or gets around bot protection: if a CDN challenges it, it stops
 1. Install **Python 3.11+** from https://www.python.org/downloads/ and tick **"Add python.exe to PATH"**.
 2. Install **PostgreSQL 16** from https://www.postgresql.org/download/windows/ and remember the password you set for
    the `postgres` user (keep the default port 5432).
-3. Double-click **start.bat** (or run `.\start.bat` in PowerShell). It asks for that password once, creates the `qc6`
-   database, installs everything on the first start (a few minutes) and opens http://127.0.0.1:8003.
+3. Double-click **start.bat** (or run `.\start.bat` in PowerShell). It installs everything on the first start (a few
+   minutes), finds PostgreSQL, asks for that password when PostgreSQL wants one (not saved), creates the `qc6`
+   database and opens http://127.0.0.1:8003. Ctrl+C or closing the window stops QC; a running check goes back to the
+   queue first.
 
 To skip the password question, set it first (any characters work, including `@`). PowerShell: `$env:QC6_DB_PASSWORD = "your password"`.
 Or set the full address. PowerShell: `$env:QC6_DATABASE_URL = "postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6"`
 · Command Prompt: `set QC6_DATABASE_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/qc6`
+
+**Windows and macOS run the same code.** `start.bat` and `start.sh` / `start.command` only find Python 3.11+, make
+the `.venv` and install the packages (every package has a ready-made build for Windows, macOS Apple Silicon and Intel,
+and Linux on Python 3.11 to 3.13: `python scripts/check_wheels.py requirements.txt`). Everything after that is
+`qc6/launcher.py`, shared by both: find PostgreSQL (and ask for its password if needed), the data folder
+(`QC6_DATA_DIR`, default `var`), the encryption key, the database tables, the worker and the web app, opening the
+browser, and a clean stop. Another port on either: `PORT=8004 ./start.sh` / `set PORT=8004` then `start.bat`.
+
+**Encryption key:** saved passwords (SMTP, staging logins) are encrypted with `QC6_SECRET_KEY`. If you don't set one,
+the first start makes one and keeps it in `var/secret.key`. Back it up with the `var` folder; with another key the
+saved passwords have to be entered again.
 
 ### macOS (Apple Silicon or Intel)
 

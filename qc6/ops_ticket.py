@@ -11,6 +11,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from qc6.sqlite_ro import ro_uri
 from qc6.workbook import BROKEN_SQL, _meaning, db_path
 
 LIST_TOP = 50          # rows per list in the ticket text; the Excel sheets have every row
@@ -38,7 +39,7 @@ def collect(run_id: int, limit: Optional[int] = None) -> Optional[Dict[str, Any]
         return None
     job = f"RUN{run_id}"
     lim = f"LIMIT {int(limit)}" if limit else ""
-    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    c = sqlite3.connect(ro_uri(path), uri=True)
     try:
         _issue_found_on(c, job)
         one = lambda sql: c.execute(sql, (job,)).fetchone()                                    # noqa: E731

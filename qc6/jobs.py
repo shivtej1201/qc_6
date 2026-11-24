@@ -240,10 +240,14 @@ def _sample_urls(path: str, name: str, n: int = 2000) -> List[str]:
             got = from_sitemap_file(f.read(), name)
         return (got["urls"] or got["sitemaps"])[:n]
     out: List[str] = []
-    for i, (_, cell, cells, header) in enumerate(intake.sheet_rows(path, name)):
-        out += [c for c in ((_clean(cell),) if header else (_clean(v) for v in cells)) if c]
-        if i >= n:
-            break
+    rows = intake.sheet_rows(path, name)
+    try:
+        for i, (_, cell, cells, header) in enumerate(rows):
+            out += [c for c in ((_clean(cell),) if header else (_clean(v) for v in cells)) if c]
+            if i >= n:
+                break
+    finally:
+        rows.close()
     return out
 
 
