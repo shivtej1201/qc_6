@@ -55,16 +55,16 @@ def collect(run_id: int, limit: Optional[int] = None) -> Optional[Dict[str, Any]
         n_bad_pages = done - ok
 
         def links(where: str, kind: str) -> Dict[str, Any]:
-            n = one(f"SELECT COUNT(*) FROM on_page_validation_cache c WHERE c.job_id = ? AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}")[0]
+            n = one(f"SELECT COUNT(*) FROM on_page_validation_cache c WHERE c.job_id = ? AND c.referenced = 1 AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}")[0]
             pages = one(f"SELECT COUNT(DISTINCT r.source_page_url) FROM on_page_validation_cache c "
                         f"JOIN on_page_link_relationships r INDEXED BY idx_oplr_dest ON r.job_id = c.job_id AND r.normalized_found_url = c.normalized_url "
-                        f"WHERE c.job_id = ? AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}")[0]
+                        f"WHERE c.job_id = ? AND c.referenced = 1 AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}")[0]
             rows = c.execute(f"""SELECT c.normalized_url, c.url_scope, c.initial_http_status, c.http_status, c.status_bucket, c.final_url,
                     COALESCE(f.pages, 0), COALESCE(f.first_on, c.first_seen_source_url), f.examples,
                     (SELECT r.anchor_text FROM on_page_link_relationships r INDEXED BY idx_oplr_dest WHERE r.job_id = c.job_id
                        AND r.normalized_found_url = c.normalized_url AND r.anchor_text != '' LIMIT 1)
                  FROM on_page_validation_cache c LEFT JOIN temp.qt_found f ON f.u = c.normalized_url
-                 WHERE c.job_id = ? AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}
+                 WHERE c.job_id = ? AND c.referenced = 1 AND c.url_scope IN ('INTERNAL','EXTERNAL') AND {where}
                  ORDER BY COALESCE(f.pages, 0) DESC, c.normalized_url {lim}""", (job,)).fetchall()
             return {"unique": int(n or 0), "pages": int(pages or 0), "fix": FIX[kind], "rows": [
                 {"url": u, "scope": "on this site" if sc == "INTERNAL" else "other site", "status": _status(a, b, bk),
@@ -90,7 +90,7 @@ def collect(run_id: int, limit: Optional[int] = None) -> Optional[Dict[str, Any]
         images = {"unique": int(n_img or 0), "pages": int(img_pages or 0), "fix": FIX["image"], "rows": [
             {"url": u, "status": _status(a, b, bk), "pages": p, "example": ex1 or "", "examples": exs or ""}
             for u, a, b, bk, p, ex1, exs in img_rows]}
-        all_links = int(one("SELECT COUNT(*) FROM on_page_validation_cache WHERE job_id = ? AND url_scope IN ('INTERNAL','EXTERNAL')")[0] or 0)
+        all_links = int(one("SELECT COUNT(*) FROM on_page_validation_cache WHERE job_id = ? AND referenced = 1 AND url_scope IN ('INTERNAL','EXTERNAL')")[0] or 0)
     finally:
         c.close()
     return {"pages": {"total": total, "checked": done, "ok": ok, "redirected": redirected, "not_ok": n_bad_pages,

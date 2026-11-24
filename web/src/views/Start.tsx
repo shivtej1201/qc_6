@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Job, type QcBlock } from "../api";
+import { api, type Job, type Pipeline, type QcBlock } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
 import { Confirm, DownloadMenu, ErrorBox, Icon, ago, count, useLoad, useToast } from "../ui";
@@ -7,10 +7,11 @@ import { Confirm, DownloadMenu, ErrorBox, Icon, ago, count, useLoad, useToast } 
 /* The simple flow, no setup: sitemap / one page / a sheet -> the URL list (download it) -> Start crawling -> live
    progress with Pause, Resume and Cancel -> the report. Everything on one screen, updated every second. */
 
-type Source = "sitemap" | "single" | "sheet";
+type Source = "sitemap" | "single" | "list" | "sheet";
 const SOURCES: [Source, string, string][] = [
   ["sitemap", "Sitemap", "Paste the sitemap address. QC reads it, and any sitemaps it lists, for every page address."],
   ["single", "One page", "Check a single page."],
+  ["list", "Several pages", "Type or paste page addresses, one per line. Repeats and other sites are left out."],
   ["sheet", "Upload a file", "A sheet (CSV, Excel .xlsx, text) with page addresses in any column, or sitemap files saved from your browser (.xml, .xml.gz). You can pick several files."],
 ];
 
@@ -118,6 +119,12 @@ export function StartView({ params, onSite, onSitesChanged }: { params: URLSearc
               : files.length > 1 ? <><b>{files.length} files</b> ({files.slice(0, 3).map((f) => f.name).join(", ")}{files.length > 3 ? "…" : ""})</>
               : <>Choose files, or drop them here</>}</span>
           </label>
+        ) : source === "list" ? (
+          <>
+            <label className="sr-only" htmlFor="start-list">Page addresses, one per line</label>
+            <textarea id="start-list" className="input mono" rows={6} required value={value}
+              placeholder={"https://www.example.com/page-a\nhttps://www.example.com/page-b"} onChange={(e) => setValue(e.target.value)} />
+          </>
         ) : (
           <div className="row start-input">
             <label className="sr-only" htmlFor="start-url">{source === "sitemap" ? "Sitemap address" : "Page address"}</label>
@@ -128,7 +135,7 @@ export function StartView({ params, onSite, onSitesChanged }: { params: URLSearc
         )}
         {err && <div className="error-box" role="alert">{err}</div>}
         <div><button className="btn primary" type="submit" disabled={busy || (source === "sheet" ? files.length === 0 : !value.trim())}>
-          {busy ? "Working…" : source === "sitemap" ? "Get the URLs" : source === "single" ? "Add this page" : files.length > 1 ? "Read the files" : "Read the file"}</button></div>
+          {busy ? "Working…" : source === "sitemap" ? "Get the URLs" : source === "single" ? "Add this page" : source === "list" ? "Add these pages" : files.length > 1 ? "Read the files" : "Read the file"}</button></div>
       </form>
 
       {jobId > 0 && (job ? <JobCard job={job} onChange={() => { setNonce((n) => n + 1); jobs.reload(); worker.reload(); }} toast={toast}
@@ -164,7 +171,7 @@ export function StartView({ params, onSite, onSitesChanged }: { params: URLSearc
   );
 }
 
-const SOURCE_TEXT: Record<string, string> = { sitemap: "Sitemap", single: "Page", sheet: "File", list: "List" };
+const SOURCE_TEXT: Record<string, string> = { sitemap: "Sitemap", single: "Page", sheet: "File", list: "List", mixed: "Several sources" };
 const PILL: Record<string, [string, string]> = {
   extracting: ["warn", "Reading sitemap"], ready: ["new", "URLs ready"], queued: ["warn", "Waiting to start"], running: ["warn", "Crawling"],
   pausing: ["warn", "Pausing…"], cancelling: ["warn", "Stopping…"], paused: ["new", "Paused"], completed: ["good", "Report ready"], failed: ["bad", "Stopped"], cancelled: ["", "Cancelled"],
@@ -202,7 +209,8 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       else toast(e.detail ? `${e.title}. ${e.detail}` : e.title || e.message);
     } finally { setBusy(false); }
   };
-  const start = () => act(() => api.startList(j.id, browser, chosen), "Crawling started.");
+  const [reuse, setReuse] = useState(true);
+  const start = () => act(() => api.startList(j.id, browser, chosen, reuse), "Crawling started.");
   const runCtl = (what: "pause" | "resume" | "cancel", id = j.run_id!) => act(
     () => (what === "pause" ? api.pauseRun(id) : what === "resume" ? api.resumeRun(id) : api.cancelRun(id)),
     what === "pause" ? "Pausing: finishing the pages in hand, then it stops. Nothing already checked is lost."
@@ -219,11 +227,14 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       <Steps ph={ph} />
 
       {ph === "extracting" && (<>
-        <div className="big-num"><b>{count(j.progress?.urls || 0)}</b> page addresses found
-          <span>{j.progress?.sitemaps ? ` in ${count(j.progress.sitemaps)} sitemap${j.progress.sitemaps === 1 ? "" : "s"}` : ""}</span></div>
+        <div className="big-num"><b>{count(j.pipeline?.queued ?? j.progress?.queued ?? 0)}</b> unique page addresses so far
+          <span>{j.progress?.sitemaps ? ` from ${count(j.progress.sitemaps)} sitemap${j.progress.sitemaps === 1 ? "" : "s"}` : ""}
+            {j.pipeline?.read ? ` · ${count(j.pipeline.read)} rows read` : ""}</span></div>
         <div className="progress-line indeterminate" aria-hidden="true"><i /></div>
-        <div className="row"><button className="btn" disabled={busy} onClick={() => act(() => api.cancelList(j.id), "Stopped reading the sitemap.")}>Cancel</button></div>
+        <div className="row"><button className="btn" disabled={busy} onClick={() => act(() => api.cancelList(j.id), "Stopped reading.")}>Cancel</button></div>
       </>)}
+      {j.pipeline && <PipelineView p={j.pipeline} listId={j.id} />}
+      {j.status === "ready" && !j.run_id && j.error && <div className="error-box" role="alert" style={{ whiteSpace: "pre-line" }}>{j.error}</div>}
 
       {j.status === "failed" && <div className="error-box" role="alert" style={{ whiteSpace: "pre-line" }}>{j.error}</div>}
       {j.status === "failed" && /403|bot check|refused|CDN/i.test(j.error || "") && <AllowRule siteId={j.site_id} toast={toast} />}
@@ -237,6 +248,7 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
           <a className="btn" href={`/api/v2/lists/${j.id}/urls.xlsx`} download><Icon name="page" />Download URLs (Excel)</a>
           <a className="btn" href={`/api/v2/lists/${j.id}/urls.csv`} download><Icon name="page" />Download URLs (CSV)</a>
         </div>
+        <AddMore listId={j.id} onAdded={onChange} toast={toast} />
         {j.sample && j.sample.length > 0 && (
           <details className="sample"><summary>See the first {Math.min(20, j.url_count)} addresses</summary>
             <ol>{j.sample.map((u) => <li key={u} className="mono">{u}</li>)}</ol></details>
@@ -265,6 +277,8 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
           )}
           <label className="check"><input type="checkbox" checked={browser} onChange={(e) => setBrowser(e.target.checked)} />
             Also open sample pages in a real browser (speed, layout, console errors). Slower.</label>
+          <label className="check"><input type="checkbox" checked={reuse} onChange={(e) => setReuse(e.target.checked)} />
+            Reuse links that answered 200 in this site's last check (within 24 h). Anything that failed is always checked again.</label>
           <button className="btn primary big" disabled={busy} onClick={start}><Icon name="play" />Start crawling</button>
         </div>
       )}
@@ -447,5 +461,69 @@ function QcList({ title, block, kind }: { title: string; block: QcBlock; kind: "
       </table></div>
       <p className="fix-line">What to do: {block.fix}</p>
     </section>
+  );
+}
+
+/* One progress model for every source (sitemap, typed pages, sheet, several at once). */
+function PipelineView({ p, listId }: { p: Pipeline; listId: number }) {
+  const cells: [string, number, string?][] = [
+    ["Read", p.read], ["Valid URLs", p.valid], ["Duplicates removed", p.duplicates],
+    ["Unusable / other sites", p.invalid + p.other_hosts + p.outside_scope], ["Queued (unique)", p.queued],
+    ["Crawled", p.completed], ["Failed", p.failed, "bad"], ["Remaining", p.remaining],
+  ];
+  const srcs = Object.entries(p.by_source || {});
+  return (
+    <div className="pipeline" aria-label="Progress">
+      <dl className="pipe-grid">
+        {cells.map(([k, v, cls]) => <div key={k} className={cls && v ? cls : ""}><dt>{k}</dt><dd>{count(v)}</dd></div>)}
+      </dl>
+      {p.links_reused > 0 && <p className="faint">{count(p.links_reused)} links reused from the previous check (answered 200, not fetched again).</p>}
+      {srcs.length > 0 && (
+        <details className="pipe-src" open={srcs.length > 1}>
+          <summary>By source ({srcs.length})</summary>
+          <div className="table-wrap flat"><table>
+            <thead><tr><th>Source</th><th className="num">Read</th><th className="num">Added</th><th className="num">Duplicates</th><th className="num">Unusable</th></tr></thead>
+            <tbody>{srcs.map(([name, c]) => (
+              <tr key={name}><td className="mono" title={name}>{name}</td><td className="num">{count(c.rows)}</td><td className="num">{count(c.added)}</td>
+                <td className="num">{count(c.duplicates)}</td><td className="num">{count(c.invalid + c.other_hosts + c.outside_scope)}</td></tr>))}</tbody>
+          </table></div>
+          {p.rejected > 0 && <a href={`/api/v2/lists/${listId}/rejected.csv`} download>Download the {count(p.rejected)} unusable rows, with the reason</a>}
+        </details>
+      )}
+    </div>
+  );
+}
+
+function AddMore({ listId, onAdded, toast }: { listId: number; onAdded: () => void; toast: (m: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<"list" | "sitemap" | "file">("list");
+  const [value, setValue] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  if (!open) return <button className="btn quiet" onClick={() => setOpen(true)}>+ Add more URLs from another sitemap, typed pages or a file</button>;
+  const go_ = async () => {
+    setBusy(true);
+    try {
+      if (kind === "file") await api.addFilesToList(listId, files);
+      else await api.addToList(listId, kind, value.trim());
+      toast("Adding: repeats of URLs already in the list are left out.");
+      setValue(""); setFiles([]); setOpen(false); onAdded();
+    } catch (e: any) { toast(e.detail ? `${e.title}. ${e.detail}` : e.title || e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="panel add-more">
+      <div className="seg" role="group" aria-label="Add from">
+        {([["list", "Pages"], ["sitemap", "Sitemap"], ["file", "File"]] as const).map(([k, l]) =>
+          <button key={k} type="button" aria-pressed={kind === k} onClick={() => setKind(k)}>{l}</button>)}
+      </div>
+      {kind === "file" ? <input type="file" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xml,.gz" onChange={(e) => setFiles([...(e.target.files || [])])} />
+        : kind === "sitemap" ? <input className="input" value={value} placeholder="https://www.example.com/sitemap-2.xml" onChange={(e) => setValue(e.target.value)} />
+        : <textarea className="input mono" rows={4} value={value} placeholder="One address per line" onChange={(e) => setValue(e.target.value)} />}
+      <div className="row">
+        <button className="btn primary" disabled={busy || (kind === "file" ? !files.length : !value.trim())} onClick={go_}>{busy ? "Adding…" : "Add to this list"}</button>
+        <button className="btn quiet" onClick={() => setOpen(false)}>Close</button>
+      </div>
+    </div>
   );
 }

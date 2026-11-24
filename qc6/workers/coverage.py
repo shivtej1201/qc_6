@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 import threading
+import traceback
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -151,6 +152,19 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     else:
         entries = [{"url": u, "source_sitemap": "", "source_sitemap_number": 1} for u in urls]
     eng.initialize_inventory(entries)                 # idempotent: on resume, finished pages stay finished
+    from qc6 import reuse
+    win = reuse.hours()
+    if opts.get("reuse", True) and win > 0:           # existing-results check: fresh 200 links of the last check
+        prev = await reuse.previous_run(pool, site["id"], run_id, win)
+        if prev:
+            try:
+                n = await asyncio.to_thread(reuse.seed, db_path, job, prev, win)
+                if n:
+                    from qc6 import events
+                    await events.record(pool, run_id, "reuse", f"{n:,} links that answered 200 in check {prev} (last {win:g} h) "
+                                        "won't be fetched again unless this check finds them changed", previous_run=prev, links=n)
+            except Exception:
+                log.warning("reusing results of run %s failed (every link will be checked): %s", prev, traceback.format_exc())
     fp_path = os.path.join(run_dir, "fingerprints.json")
     if os.path.exists(fp_path):                       # fingerprints of pages parsed before a pause or a crash
         eng.load_fingerprints(fp_path)
@@ -201,7 +215,7 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
                 await record_minute(int(done), int(errs), float(ms))
             except Exception:
                 log.warning("per-minute figures for run %s not saved", run_id)
-            prog = {"stage": "coverage", "pages_done": done, "pages_total": len(urls)}
+            prog = {"stage": "coverage", "pages_done": done, "pages_total": len(urls), "pages_failed": int(errs)}
             async with pool.acquire() as conn:
                 await conn.execute("UPDATE runs SET progress = progress || $2::jsonb WHERE id = $1", run_id, prog)
                 await notify(conn, run_id, "progress", **prog)
@@ -233,6 +247,8 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps,
                                 products=eng.products, steps=steps)
     out["facts"] = fact_counts
+    from qc6 import reuse as _reuse
+    out["links_reused_from_previous"] = await asyncio.to_thread(_reuse.reused_count, db_path, job)
     out["timings"] = steps.out
     return out
 

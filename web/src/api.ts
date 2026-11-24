@@ -40,9 +40,13 @@ export function localStorageSet(k: string, v: string): void {
   try { window.localStorage.setItem(k, v); } catch { /* storage blocked */ }
 }
 
-export interface Job { id: number; site_id: number; source: "sitemap" | "single" | "sheet" | "list"; label: string;
+export interface PipelineSource { rows: number; valid: number; invalid: number; duplicates: number; other_hosts: number; outside_scope: number; added: number }
+export interface Pipeline { stage: string; sources: string[]; by_source: Record<string, PipelineSource>; sitemaps: number;
+  read: number; valid: number; invalid: number; duplicates: number; other_hosts: number; outside_scope: number; rejected: number;
+  queued: number; completed: number; failed: number; remaining: number; links_reused: number }
+export interface Job { id: number; site_id: number; source: "sitemap" | "single" | "sheet" | "list" | "mixed"; pipeline?: Pipeline; label: string;
   status: "extracting" | "ready" | "failed" | "cancelled"; url_count: number; error: string | null; primary_host: string;
-  progress: { sitemaps?: number; urls?: number; duplicates?: number; rejected?: number; errors?: number };
+  progress: { sitemaps?: number; urls?: number; queued?: number; rows?: number; duplicates?: number; rejected?: number; errors?: number };
   note: { duplicates?: number; other_hosts?: number; outside_scope?: number; capped?: boolean };
   created_at: string; updated_at: string; sample?: string[];
   run_id: number | null; run_status: string | null; run_kind: string | null; run_error: string | null;
@@ -225,7 +229,10 @@ export const api = {
   uploadList: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("file", x)); return req<Job & { skipped_files?: string[] }>("POST", "/api/v2/lists/upload", f); },
   cancelList: (id: number) => req<{ ok: boolean }>("POST", `/api/v2/lists/${id}/cancel`),
   deleteList: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/lists/${id}`),
-  startList: (id: number, browser: boolean, preset?: string) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser, preset }),
+  startList: (id: number, browser: boolean, preset?: string, reuse = true) => req<{ run_id: number }>("POST", `/api/v2/lists/${id}/start`, { browser, preset, reuse }),
+  addToList: (id: number, source: "sitemap" | "list", value: string) =>
+    req<Job>("POST", `/api/v2/lists/${id}/add`, source === "sitemap" ? { source, url: value } : { source, text: value }),
+  addFilesToList: (id: number, files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("file", x)); return req<Job>("POST", `/api/v2/lists/${id}/add-upload`, f); },
   worker: () => req<{ alive: boolean; waiting: number }>("GET", "/api/v2/worker"),
   briefs: (sid: number, url = "") => req<{ briefs: Brief[] }>("GET", `/api/v2/sites/${sid}/briefs?${new URLSearchParams({ url })}`),
   makeBrief: (sid: number, url: string) => req<Brief>("POST", `/api/v2/sites/${sid}/briefs`, { url }),

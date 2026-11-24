@@ -260,6 +260,36 @@ grouping 6 s. The Tickets screen lists in 0.1 s; an attachment with 40,000 rows 
   (the answer says how many couldn't be read).
 * **No duplicate Ops tickets**: creating a ticket first claims the fix in one atomic update, so a double click or two
   people at once get "already being created" instead of a second ticket.
+## One intake and one queue for every URL source
+
+Manual entry (one page or several), a sitemap (index -> child -> sub-sitemaps), an uploaded sheet (CSV / TSV / TXT /
+XLSX) or sitemap files, and URLs added to a list later all go through the same steps (`qc6/intake.py`):
+
+    read in chunks -> clean -> normalize (dedup key) -> global dedup across every source of the list
+      -> the list = the crawl queue -> the one crawl engine (pages -> links / images -> each unique URL validated
+         once -> results stored) -> report -> tickets -> e-mail
+
+* **Global dedup, sources kept.** The same page from the sitemap, a sheet and typed by hand is one queue entry. It
+  keeps every source that listed it, and where it was first seen (sheet row and that row's cells, sitemap, line). The
+  URL download (CSV / Excel) has *Source(s)* and *First seen at* columns, and the report's Sitemap Progress shows every
+  source (sheet and manual URLs appear there as "Sheet: file.xlsx" / "Manual entry").
+* **Add more URLs** to a list before its crawl starts: another sitemap, typed pages or a file. Each is deduplicated
+  against everything already in the list. A list with a sitemap in it is a whole-site check.
+* **Sheets of any size** (up to `QC6_MAX_UPLOAD_MB`, default 100 MB) are saved to disk in 1 MB pieces and read in
+  5,000-row chunks in the background, with live progress. Measured: 1.25 lakh rows read, normalized and deduplicated
+  in about 4 s, saved in about 2 s. Rows that can't be used (not an address, another site, outside the crawl scope) are
+  counted per source and downloadable with the reason (*Download the unusable rows*).
+* **One progress model** for every source: read, valid, duplicates removed, unusable, queued, crawled, failed,
+  remaining, plus a by-source table.
+* **Existing-results check across checks.** A link that answered 200 with no redirect in the site's previous check
+  within `QC6_REUSE_HOURS` (default 24) isn't fetched again. Anything that failed, redirected or timed out is always
+  checked again, a page of the new check always gets its own fresh answer, and images aren't reused. Untick *Reuse
+  links…* on Start crawling (or set `QC6_REUSE_HOURS=0`) to check every link again. The check's timeline, the summary
+  e-mail and `summary.links_reused_from_previous` say how many were reused; `url_status.seeded_by = 'PREVIOUS_CHECK'` in
+  the Data explorer shows which.
+* Only one check per site runs at a time (a second start names the check in the way), so the same URL is never crawled
+  by two checks at once.
+
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):
