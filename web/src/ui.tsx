@@ -57,6 +57,7 @@ const PATHS: Record<string, string> = {
   layers: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
   pause: "M9 6v12M15 6v12",
+  mail: "M3 6h18v12H3zM3 7l9 6 9-6",
 };
 export function Icon({ name }: { name: string }) {
   return (
@@ -137,6 +138,7 @@ export function Spark({ values }: { values: number[] }) {
 export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | null }) {
   const q = run ? `?run=${run}` : "";
   const items: [string, string, string][] = [
+    [`/api/v2/sites/${siteId}/export.report.xlsx${q}`, "Management report (Excel)", "Dashboard with charts, pivot summary, non-200 links, tickets: small, ready to present"],
     [`/api/v2/sites/${siteId}/export.workbook.xlsx${q}`, "Full audit workbook (Excel)", "Executive summary, sitemap progress, business / language / page type, status, issues, broken, redirect, external URLs, QC problems"],
     [`/api/v2/sites/${siteId}/report.pdf`, "PDF summary", "one page for people"],
     [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row: small"],

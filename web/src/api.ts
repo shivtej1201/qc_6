@@ -236,6 +236,10 @@ export const api = {
   facts: (runId: number, dataset: string, params: Record<string, string | number>) =>
     req<{ total: number; rows: any[]; summary: { rows: number; unique_urls: number; broken: number; redirects: number } }>(
       "GET", `/api/v2/runs/${runId}/facts/${dataset}?${new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))}`),
+  mail: () => req<MailSettings>("GET", "/api/v2/mail"),
+  saveMail: (b: MailForm) => req<MailSettings>("PUT", "/api/v2/mail", b),
+  testMail: (b: MailForm) => req<{ ok: boolean; to: string[] }>("POST", "/api/v2/mail/test", b),
+  sendSummary: (runId: number) => req<{ ok: boolean; to: number; subject: string; report_note: string }>("POST", `/api/v2/runs/${runId}/send-summary`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
   presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
     description: string; target_rps: number; max_rps: number; estimate: { minutes: number; pages: number } | null }[] }>("GET", `/api/v2/sites/${sid}/presets`),
@@ -247,3 +251,9 @@ export const api = {
   createTicket: (fixId: number) => req<{ url: string; key: string }>("POST", `/api/v2/fixes/${fixId}/ticket`),
   syncTickets: (sid: number) => req<{ moved_to_waiting: number }>("POST", `/api/v2/sites/${sid}/tickets/sync`),
 };
+
+export interface MailForm { enabled: boolean; host: string; port: number; security: "starttls" | "ssl" | "none"; username: string;
+  password?: string | null; sender: string; recipients: string[]; attach_report: boolean }
+export interface MailSettings extends Partial<MailForm> { enabled: boolean; can_edit: boolean; password_set?: boolean;
+  secret_key_set?: boolean; max_attach_mb?: number;
+  last_result: { ok?: boolean; error?: string; at?: string; run_id?: number; to?: number; report?: string } }

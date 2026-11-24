@@ -736,6 +736,87 @@ async def sync_tickets(site_id: int, me=Depends(current_member)):
     return {"moved_to_waiting": moved}
 
 
+# ------------------------------------------------------------------ e-mail (SMTP settings, crawl summary)
+class MailIn(BaseModel):
+    enabled: bool = False
+    host: str = Field("", max_length=253)
+    port: int = 587
+    security: str = "starttls"
+    username: str = Field("", max_length=320)
+    password: Optional[str] = Field(None, max_length=512)       # None: keep the saved one; "": remove it
+    sender: str = Field("", max_length=320)
+    recipients: List[str] = Field(default_factory=list, max_length=50)
+    attach_report: bool = True
+
+
+def _owner(me) -> None:
+    if me["role"] != "owner":
+        raise problem(403, "Only an owner can change e-mail settings", "The SMTP login is shared by the whole workspace.")
+
+
+@app.get("/api/v2/mail")
+async def mail_settings(me=Depends(current_member)):
+    from qc6 import mailer
+    out = mailer.public(await mailer.load(await get_pool(), me["workspace_id"]))
+    out["can_edit"] = me["role"] == "owner"
+    if me["role"] != "owner":                         # others see whether it's on, not the server details
+        out = {k: out[k] for k in ("enabled", "attach_report", "can_edit", "last_result")}
+    return out
+
+
+@app.put("/api/v2/mail")
+async def put_mail_settings(body: MailIn, me=Depends(current_member)):
+    _owner(me)
+    from qc6 import mailer
+    try:
+        out = await mailer.save(await get_pool(), me["workspace_id"], me["id"], body.model_dump())
+    except mailer.MailError as e:
+        raise problem(400, "The e-mail settings weren't saved", str(e))
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "mail.update", "workspace",
+                       {"enabled": out["enabled"], "host": out["host"], "recipients": len(out["recipients"])})
+    return {**out, "can_edit": True}
+
+
+@app.post("/api/v2/mail/test")
+async def test_mail(body: MailIn, me=Depends(current_member)):
+    """Send a test e-mail with what's in the form (saved password used when the form leaves it empty)."""
+    _owner(me)
+    from qc6 import mailer
+    pool = await get_pool()
+    saved = await mailer.load(pool, me["workspace_id"]) or {}
+    try:
+        clean = mailer.validate({**body.model_dump(), "enabled": True}, bool(saved.get("password_sealed")))
+    except mailer.MailError as e:
+        raise problem(400, "Check the settings", str(e))
+    cfg = {**clean, "password_sealed": saved.get("password_sealed")}
+    if not clean.get("password"):
+        cfg.pop("password", None)
+    try:
+        await asyncio.to_thread(mailer.send_now, cfg, clean["recipients"], "[QC] Test e-mail",
+                                "This is a test from QC. When a check finishes, the crawl summary will arrive like this, "
+                                "with the Management report attached.\n")
+    except mailer.MailError as e:
+        raise problem(502, "The test e-mail wasn't sent", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "mail.test", "workspace", {"to": len(clean["recipients"])})
+    return {"ok": True, "to": clean["recipients"]}
+
+
+@app.post("/api/v2/runs/{run_id}/send-summary")
+async def send_run_summary(run_id: int, me=Depends(current_member)):
+    """Send (again) the summary e-mail of one check to the saved recipients."""
+    can_edit(me)
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT s.* FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                              run_id, me["workspace_id"])
+    if row is None:
+        raise problem(404, "Check not found")
+    from qc6 import mailer
+    try:
+        return await mailer.send_summary(pool, run_id, dict(row))
+    except mailer.MailError as e:
+        raise problem(502, "The summary e-mail wasn't sent", str(e))
+
+
 # ------------------------------------------------------------------ runs + live stream
 class RunIn(BaseModel):
     kind: str = "full"
@@ -1787,7 +1868,7 @@ async def run_package(run_id: int, me=Depends(current_member)):
 async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
     """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
     from qc6 import export as ex
-    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx"):
+    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx", "report.xlsx"):
         raise problem(404, "Not found")
     s = await site_for(site_id, me)
     pool = await get_pool()
@@ -1801,7 +1882,13 @@ async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=De
     if fmt == "zip":
         path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
         return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
-    if fmt == "workbook.xlsx":                  # the full workbook, V5 layout: many sheets
+    if fmt == "report.xlsx":                    # the management report: dashboard, pivot summary, non-200 links, tickets
+        from qc6 import smt_report
+        path = await smt_report.report_file(pool, s, rid)
+        if path is None:
+            raise problem(404, "No link data for this check", "The management report needs a page check.")
+        name = name.replace("qc-report-", "qc-management-report-").replace(".report.xlsx", ".xlsx")
+    elif fmt == "workbook.xlsx":                # the full workbook, V5 layout: many sheets
         path = await ex.workbook_file(pool, s, rid)
         name = name.replace("qc-report-", "qc-audit-workbook-").replace(".workbook.xlsx", ".xlsx")
     else:

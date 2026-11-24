@@ -201,6 +201,14 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   with its text; the Excel report has a **Tickets** sheet.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
+* **Management report** (Download report → Management report, first in the list): the file to present. A
+  **Dashboard** (KPI tiles with the change since the previous check, key findings in plain words, four native Excel
+  charts, next steps), a **Pivot Summary** (status reconciliation, status codes, page type, business, language, page
+  type x status matrix, top 20 failed links, colour legend), **Non-200 Responses** (every link that is not a plain 200,
+  with its impact, sample page, redirect target and reason), **Tickets**, and **Problem Links** (page -> link pairs for
+  the failing links, up to 50,000; all pairs are in the ticket attachments and the CSV ZIP). Healthy links are counted,
+  not listed, and each URL is stored once, so it stays small: 1.3 MB for a 10,000-page check where the full workbook is
+  5.5 MB.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:
   **Summary**, **Ops Ticket** (the same ticket, ready to copy), **Broken Links**, **Broken Images**, **Redirects** and
   **Pages Not OK**, each listing every address, its status in words ("404 Not Found", "301 Moved Permanently -> 200
@@ -252,6 +260,29 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Precise remarks**: DNS temporary failure vs host name not found, connection timeout vs response timeout, connection
   refused, connection reset, SSL certificate vs handshake. When QC's own connection pool is full, the request waits and
   is not counted against the website.
+
+## Email summary after every check (SMTP)
+
+**Email summary** (URL QC menu, owners only) holds the workspace's SMTP settings: host, port, security (STARTTLS,
+SSL/TLS or none for a local relay), username, password, sender, recipients (up to 20), on/off, and whether to attach
+the Management report. **Send test e-mail** tries the settings before you save them.
+
+When a check completes (not single-URL / spot checks), QC e-mails a summary:
+* **Check:** crawl job ID, sitemap / source, start, finish, total time, and an overall status (completed successfully /
+  with problems / failed, with what needs attention).
+* **Pages:** URLs submitted, duplicates removed from the input, crawled, processed, failed, 200 / 3xx / 4xx / 5xx, no answer.
+* **Links:** extracted page-to-URL pairs, unique URLs, duplicate URLs skipped (result reused), 200 / 3xx / 4xx / 5xx,
+  DNS / network, timeout and SSL failures, blocked, and links that worked on a second check.
+* **Images, report generation status and ticket processing status.**
+
+The Management report is built, then **verified** (file exists, not empty, a complete .xlsx with no damaged parts)
+before it is attached. If it is over `QC6_MAIL_MAX_ATTACH_MB` (default 20 MB) the e-mail says so and goes without it.
+A temporary SMTP error is retried once. The outcome goes on the check's timeline, and the screen shows the last one.
+**Send the summary of check N now** re-sends any check.
+
+Security: the password is encrypted with `QC6_SECRET_KEY` (AES-256-GCM) and never sent to the browser (the screen
+only shows that one is saved). Line breaks are refused in every field (no header injection). Only owners can change
+or test the settings. Changes are written to the audit log.
 
 ## AI drafts (free, on your own machine)
 
