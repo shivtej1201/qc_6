@@ -248,6 +248,29 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
 * **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
 
+## Email summary after every check (SMTP)
+
+**Email summary** (URL QC menu, owners only) holds the workspace's SMTP settings: host, port, security (STARTTLS,
+SSL/TLS or none for a local relay), username, password, sender, recipients (up to 20), on/off, and whether to attach
+the Management report. **Send test e-mail** tries the settings before you save them.
+
+When a check completes (not single-URL / spot checks), QC e-mails a summary:
+* **Check:** crawl job ID, sitemap / source, start, finish, total time, and an overall status (completed successfully /
+  with problems / failed, with what needs attention).
+* **Pages:** URLs submitted, duplicates removed from the input, crawled, processed, failed, 200 / 3xx / 4xx / 5xx, no answer.
+* **Links:** extracted page-to-URL pairs, unique URLs, duplicate URLs skipped (result reused), 200 / 3xx / 4xx / 5xx,
+  DNS / network, timeout and SSL failures, blocked, and links that worked on a second check.
+* **Images, report generation status and ticket processing status.**
+
+The Management report is built, then **verified** (file exists, not empty, a complete .xlsx with no damaged parts)
+before it is attached. If it is over `QC6_MAIL_MAX_ATTACH_MB` (default 20 MB) the e-mail says so and goes without it.
+A temporary SMTP error is retried once. The outcome goes on the check's timeline, and the screen shows the last one.
+**Send the summary of check N now** re-sends any check.
+
+Security: the password is encrypted with `QC6_SECRET_KEY` (AES-256-GCM) and never sent to the browser (the screen
+only shows that one is saved). Line breaks are refused in every field (no header injection). Only owners can change
+or test the settings. Changes are written to the audit log.
+
 ## AI drafts (free, on your own machine)
 
 1. Install Ollama from https://ollama.com and start it.
