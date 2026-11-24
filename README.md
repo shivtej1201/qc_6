@@ -248,6 +248,18 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
 * **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
 
+## Where the time goes after the crawl (tickets, report)
+
+Every check now records how long each step after the crawl took: `summary.timings` and lines `[QC6] step …` in the
+worker log. Measured on 20,000 pages (860,000 links): report package 56 s (was 64 s; the formula-injection guard now
+skips the ~99.9% of rows that have no risky cell — same bytes), link facts 14 s, link intelligence 9 s, problem
+grouping 6 s. The Tickets screen lists in 0.1 s; an attachment with 40,000 rows is ready in about 1 s.
+
+* **Ops ticket sync** reads linked tickets 8 at a time over one connection pool (was one by one with a new connection
+  each), reads each ticket once, retries a 5xx / 429 / network blip once, and one failure no longer stops the sync
+  (the answer says how many couldn't be read).
+* **No duplicate Ops tickets**: creating a ticket first claims the fix in one atomic update, so a double click or two
+  people at once get "already being created" instead of a second ticket.
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):

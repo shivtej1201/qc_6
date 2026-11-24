@@ -9,11 +9,12 @@ Tokens are never returned by the API.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import List, Any, Dict, Optional
 
 import httpx
 
@@ -95,21 +96,53 @@ async def create(cfg: Dict[str, Any], fix: Dict[str, Any], site: Dict[str, Any],
         return {"url": f"{cfg['base_url']}/browse/{key}", "key": key}
 
 
-async def state(cfg: Dict[str, Any], key: str) -> Optional[str]:
-    """'open' or 'done' for a linked ticket, None if it can't be read."""
+async def state(cfg: Dict[str, Any], key: str, client: Optional[httpx.AsyncClient] = None) -> Optional[str]:
+    """'open' or 'done' for a linked ticket, None if it can't be read (network error, 404, no access)."""
     cfg = clean_config(cfg)
     if not cfg:
         return None
+    if client is None:
+        async with await _client() as c:
+            return await state(cfg, key, c)
+    for attempt in range(2):                          # one retry for a network blip or a 5xx / 429
+        try:
+            if cfg["provider"] == "github":
+                token = os.environ.get("QC6_GITHUB_TOKEN") or cfg.get("token")
+                r = await client.get(f"https://api.github.com/repos/{cfg['repo']}/issues/{key.lstrip('#')}",
+                                     headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+            else:
+                token = os.environ.get("QC6_JIRA_TOKEN") or cfg.get("token")
+                auth = base64.b64encode(f"{cfg['email']}:{token}".encode()).decode()
+                r = await client.get(f"{cfg['base_url']}/rest/api/2/issue/{key}?fields=status",
+                                     headers={"Authorization": f"Basic {auth}"})
+        except httpx.HTTPError:
+            r = None
+        if r is not None and r.status_code < 500 and r.status_code != 429:
+            break
+        if attempt == 0:
+            await asyncio.sleep(0.5)
+    if r is None or r.status_code != 200:
+        return None
+    if cfg["provider"] == "github":
+        return "done" if r.json().get("state") == "closed" else "open"
+    cat = ((r.json().get("fields") or {}).get("status") or {}).get("statusCategory", {}).get("key")
+    return "done" if cat == "done" else "open"
+
+
+SYNC_CONCURRENCY = 8
+
+
+async def states(cfg: Dict[str, Any], keys: List[str]) -> Dict[str, Optional[str]]:
+    """State of many tickets: each key read once, a few at a time over one connection pool (was: one by one, a new
+    connection each, and the first network error stopped the whole sync)."""
+    uniq = list(dict.fromkeys(k for k in keys if k))
+    out: Dict[str, Optional[str]] = {}
+    if not uniq or not clean_config(cfg):
+        return {k: None for k in uniq}
+    sem = asyncio.Semaphore(SYNC_CONCURRENCY)
     async with await _client() as c:
-        if cfg["provider"] == "github":
-            token = os.environ.get("QC6_GITHUB_TOKEN") or cfg.get("token")
-            r = await c.get(f"https://api.github.com/repos/{cfg['repo']}/issues/{key.lstrip('#')}",
-                            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
-            return ("done" if r.json().get("state") == "closed" else "open") if r.status_code == 200 else None
-        token = os.environ.get("QC6_JIRA_TOKEN") or cfg.get("token")
-        auth = base64.b64encode(f"{cfg['email']}:{token}".encode()).decode()
-        r = await c.get(f"{cfg['base_url']}/rest/api/2/issue/{key}?fields=status", headers={"Authorization": f"Basic {auth}"})
-        if r.status_code != 200:
-            return None
-        cat = ((r.json().get("fields") or {}).get("status") or {}).get("statusCategory", {}).get("key")
-        return "done" if cat == "done" else "open"
+        async def one(k: str) -> None:
+            async with sem:
+                out[k] = await state(cfg, k, c)
+        await asyncio.gather(*(one(k) for k in uniq))
+    return out

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import json
 import logging
 import os
@@ -222,19 +223,37 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         prog = {"stage": "analysing", "pages_done": len(urls), "pages_total": len(urls)}
         await conn.execute("UPDATE runs SET progress = progress || $2::jsonb WHERE id = $1", run_id, prog)
         await notify(conn, run_id, "progress", **prog)
+    steps = _Steps()
     pkg = await asyncio.to_thread(build_on_page_csv_package, db_path, job, os.path.join(run_dir, "reports"),
                                   package_name="QC_V6_COVERAGE", project_id=host)
+    steps.done("report_package")
     from qc6 import facts
     fact_counts = await asyncio.to_thread(facts.export, db_path, job, run_id)
+    steps.done("link_facts")
     out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps,
-                                products=eng.products)
+                                products=eng.products, steps=steps)
     out["facts"] = fact_counts
+    out["timings"] = steps.out
     return out
+
+
+class _Steps:
+    """Seconds each post-crawl step took: printed to the worker log and kept in the run summary (timings)."""
+    def __init__(self):
+        self.t, self.out = time.perf_counter(), {}
+
+    def done(self, name: str) -> None:
+        now = time.perf_counter()
+        self.out[name] = round(now - self.t, 2)
+        self.t = now
+        print(f"[QC6] step {name}: {self.out[name]:.2f} s", flush=True)
 
 
 async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str, job: str,
                           fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any],
-                          text_fps: Optional[Dict[str, int]] = None, products: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                          text_fps: Optional[Dict[str, int]] = None, products: Optional[Dict[str, Any]] = None,
+                          steps: Optional["_Steps"] = None) -> Dict[str, Any]:
+    steps = steps or _Steps()
     spot = await spot_pages(pool, run_id)
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
@@ -334,12 +353,16 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         await pool.execute("""UPDATE pages p SET facts = p.facts || jsonb_build_object('product', x.prod::jsonb)
                               FROM unnest($2::text[], $3::text[]) AS x(url, prod) WHERE p.run_id = $1 AND p.url = x.url""",
                            run_id, [u for u, v in products.items() if v], [json.dumps(v) for v in products.values() if v])
+    steps.done("pages_and_problems")
     graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items, spot=spot is not None)
+    steps.done("link_intelligence")
     applied = await apply(pool, run_id, site["id"], items, template_names=names, spot=spot is not None)
+    steps.done("fixes")
     complete = int(stats.get("source_pages_pending") or 0) == 0
     moved = await close_run(pool, run_id, site["id"], ["coverage"], complete=complete, pages=spot)
     # a spot check doesn't speak for the whole site: no health score from it
     sc = await snapshot_score(pool, run_id, site["id"], len(pages)) if spot is None else {"score": None}
+    steps.done("lifecycle_and_score")
     summary = {"pages": len(pages), "templates": len(db_tpl), "issues_v5": len(issues), **applied, "lifecycle": moved,
                "link_graph": graph,
                "score": sc.get("score"), "trust_gate": pkg.get("final_qc_status"), "zip": pkg.get("zip_path"),
