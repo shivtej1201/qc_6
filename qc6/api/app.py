@@ -2095,6 +2095,69 @@ async def facts_csv(run_id: int, dataset: str, filter: str = "", me=Depends(curr
                         background=BackgroundTask(os.unlink, tmp))
 
 
+# ------------------------------------------------------------------ data explorer (read-only SQL on a check's crawl data)
+class ExploreIn(BaseModel):
+    sql: str = Field(min_length=1, max_length=20_000)
+    offset: int = Field(0, ge=0)
+    limit: int = Field(100, ge=1, le=500)
+
+
+async def _explore_run(run_id: int, me) -> None:
+    pool = await get_pool()
+    ok = await pool.fetchval("SELECT 1 FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                             run_id, me["workspace_id"])
+    if not ok:
+        raise problem(404, "Check not found")
+
+
+@app.get("/api/v2/runs/{run_id}/explore/schema")
+async def explore_schema(run_id: int, me=Depends(current_member)):
+    await _explore_run(run_id, me)
+    from qc6 import data_explorer
+    try:
+        return await asyncio.to_thread(data_explorer.schema, run_id)
+    except FileNotFoundError:
+        raise problem(404, "No crawl data for this check", "The crawl database is kept for checks that read pages.")
+
+
+@app.post("/api/v2/runs/{run_id}/explore")
+async def explore(run_id: int, body: ExploreIn, me=Depends(current_member)):
+    await _explore_run(run_id, me)
+    from qc6 import data_explorer
+    try:
+        out = await asyncio.to_thread(data_explorer.run, run_id, body.sql, body.offset, body.limit)
+    except FileNotFoundError:
+        raise problem(404, "No crawl data for this check", "The crawl database is kept for checks that read pages.")
+    except data_explorer.QueryError as e:
+        raise problem(400, "The query couldn't run", str(e))
+    if body.offset == 0:
+        await services.log(await get_pool(), me["workspace_id"], me["id"], "explore.query", f"run:{run_id}",
+                           {"sql": body.sql[:2000], "ms": out["elapsed_ms"]})
+    return out
+
+
+@app.post("/api/v2/runs/{run_id}/explore.csv")
+async def explore_csv(run_id: int, body: ExploreIn, me=Depends(current_member)):
+    await _explore_run(run_id, me)
+    from qc6 import data_explorer
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    try:
+        n = await asyncio.to_thread(data_explorer.export_csv, run_id, body.sql, tmp)
+    except FileNotFoundError:
+        os.unlink(tmp)
+        raise problem(404, "No crawl data for this check")
+    except data_explorer.QueryError as e:
+        os.unlink(tmp)
+        raise problem(400, "The query couldn't run", str(e))
+    await services.log(await get_pool(), me["workspace_id"], me["id"], "explore.export", f"run:{run_id}",
+                       {"sql": body.sql[:2000], "rows": n})
+    from starlette.background import BackgroundTask
+    return FileResponse(tmp, media_type="text/csv", filename=f"qc-run{run_id}-query.csv",
+                        headers={"X-Row-Count": str(n)}, background=BackgroundTask(os.unlink, tmp))
+
+
 # ------------------------------------------------------------------ journeys
 class JourneyIn(BaseModel):
     yaml: str = Field(min_length=10, max_length=20_000)

@@ -248,6 +248,17 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
 * **Links → Anchor text**: generic anchors ("click here", "read more"), links with no text, the most used anchors.
 * **HTML QC received** (on a page): view, search and download the page's HTML when `QC6_KEEP_HTML=true`.
 
+## Data explorer (SQL on the crawl data)
+
+**Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):
+results table, row count, time taken, pages of 50-500 rows, CSV export (up to 10 lakh rows), example queries and every
+table and column one click away. Ready-made views: `pages`, `links` (each link with its target's status), `url_status`
+(each unique address, checked once, with `reuse_count`), `images`, `issues`; the raw engine tables (`url_results`,
+`on_page_validation_cache`, ...) work too, e.g. `SELECT * FROM url_results WHERE final_status_code = 404`.
+
+Safe and light: the file is opened read-only and SQLite itself refuses anything but reading (no INSERT/UPDATE/DELETE,
+ATTACH, PRAGMA, extensions); one statement at a time; 30 s time limit; at most 3 queries at once. The database is in
+WAL mode, so a query never blocks a running check. Every query is written to the audit log.
 ## Speed on slow sites and honest network remarks
 
 * **Requests in flight follow the site's answer time.** Each host's limit is sized as agreed rate x answer time
