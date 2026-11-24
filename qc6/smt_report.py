@@ -76,7 +76,8 @@ def _prepare(c: sqlite3.Connection, job: str, templates: Dict[str, str]) -> None
     (the crawl's own classification, else QC's page type, else 'Unclassified')."""
     c.execute(f"""CREATE TEMP TABLE d AS SELECT c.normalized_url AS u, {CATEGORY_SQL} AS cat, c.initial_http_status AS first,
                   c.http_status AS final, c.final_url, c.redirect_count, c.response_time_ms, c.error_type, c.remark, c.url_scope
-                  FROM on_page_validation_cache c WHERE c.job_id = ? AND c.url_scope IN ('INTERNAL', 'EXTERNAL')""", (job,))
+                  FROM on_page_validation_cache c WHERE c.job_id = ? AND c.referenced = 1
+                  AND c.url_scope IN ('INTERNAL', 'EXTERNAL')""", (job,))
     c.execute("CREATE UNIQUE INDEX temp.d_u ON d(u)")
     c.execute("CREATE TEMP TABLE tpl (url TEXT PRIMARY KEY, name TEXT)")
     if templates:

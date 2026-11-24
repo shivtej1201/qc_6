@@ -107,8 +107,8 @@ def test_single_url_and_sheet(env):
     csv_bytes = f"Page URL\n{site.base}/city/1\n{site.base}/city/2\n{site.base}/city/2\nhttps://other.test/x\n".encode()
     up = c.post("/api/v2/lists/upload", files={"file": ("pages.csv", csv_bytes, "text/csv")}, headers=H)
     assert up.status_code == 201, up.text
-    up = up.json()
-    assert up["url_count"] == 2 and up["note"]["duplicates"] == 1 and up["note"]["other_hosts"] == 1
+    up = _wait_list(c, up.json()["id"])
+    assert up["status"] == "ready" and up["url_count"] == 2 and up["note"]["duplicates"] == 1 and up["note"]["other_hosts"] == 1
     assert up["site_id"] == one["site_id"]                         # same host, same site
     bad = c.post("/api/v2/lists", json={"source": "single", "url": "not an address"}, headers=H)
     assert bad.status_code == 400
@@ -200,11 +200,11 @@ def test_sitemap_files_saved_from_a_browser(env):
              ("file", ("index.xml", f"<sitemapindex><sitemap><loc>{site.base}/s1.xml</loc></sitemap></sitemapindex>".encode(), "text/xml"))]
     r = c.post("/api/v2/lists/upload", files=files, headers=H)
     assert r.status_code == 201, r.text
-    j = r.json()
+    j = _wait_list(c, r.json()["id"])
     assert j["url_count"] == 4 and j["note"]["duplicates"] == 1 and site.base + "/city/1?a=1&b=2" in j["sample"]
-    assert j["label"] == "sitemap-1.xml and 1 more file" and "sitemap index" in j["skipped_files"][0]
-    only_index = c.post("/api/v2/lists/upload", files=[files[2]], headers=H)
-    assert only_index.status_code == 400 and f"{site.base}/s1.xml" in only_index.json()["detail"]
+    assert j["label"] == "sitemap-1.xml and 2 more files" and "sitemap index" in j["note"]["skipped_files"][0]
+    only_index = _wait_list(c, c.post("/api/v2/lists/upload", files=[files[2]], headers=H).json()["id"])
+    assert only_index["status"] == "failed" and f"{site.base}/s1.xml" in only_index["error"]
 
 
 def test_missing_package_message(env, monkeypatch):
@@ -658,3 +658,72 @@ def test_mail_report_verification(tmp_path):
         z.writestr("xl/workbook.xml", "<workbook/>")
     assert mailer.verify_xlsx(str(tmp_path / "ok.xlsx")) == (True, "")
     assert mailer._fmt(125000) == "1,25,000" and mailer._fmt(999) == "999"
+
+
+def test_common_intake_all_sources_one_queue(env):
+    """Sitemap + typed URLs + a sheet in ONE list: normalized, deduplicated across sources, every source kept;
+    one progress model; rejected rows downloadable; the next check reuses fresh 200 link results (not failures)."""
+    import csv as _csv
+    c, site, dsn = env
+    j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+    assert j["status"] == "ready" and j["url_count"] == 90
+    p = j["pipeline"]
+    assert p["queued"] == 90 and p["stage"] == "ready" and p["sources"] == [f"Sitemap: {site.base}/sitemap.xml"]
+    # typed: one already in the sitemap (other spelling), one new, one junk, one other site
+    typed = f"{site.base}/product/1?utm_source=mail#x\n{site.base}/extra-page\nhello\nhttps://other.test/a"
+    r = c.post(f"/api/v2/lists/{j['id']}/add", json={"source": "list", "text": typed}, headers=H)
+    assert r.status_code == 200, r.text
+    j = _wait_list(c, j["id"])
+    assert j["url_count"] == 91 and j["source"] == "mixed"
+    # a sheet with a repeat of a sitemap URL, a repeat of a typed URL, a new one and a junk row
+    sheet = (f"Page URL,Owner\n{site.base}/city/1,a\n{site.base}/extra-page,b\n{site.base}/apply,c\nn/a,d\n").encode()
+    r = c.post(f"/api/v2/lists/{j['id']}/add-upload", files={"file": ("more.csv", sheet, "text/csv")}, headers=H)
+    assert r.status_code == 200, r.text
+    j = _wait_list(c, j["id"])
+    p = j["pipeline"]
+    assert j["url_count"] == 92 and p["queued"] == 92
+    assert set(p["sources"]) == {f"Sitemap: {site.base}/sitemap.xml", "Manual entry", "Sheet: more.csv"}
+    bs = p["by_source"]
+    assert bs["Manual entry"]["duplicates"] == 1 and bs["Manual entry"]["invalid"] == 1 and bs["Manual entry"]["other_hosts"] == 1
+    assert bs["Sheet: more.csv"] == {"rows": 4, "valid": 3, "invalid": 1, "duplicates": 2, "other_hosts": 0, "outside_scope": 0, "added": 1}
+    assert p["duplicates"] == 3 and p["read"] == 90 + 4 + 4
+    # adding while it's being crawled is refused
+    rows = list(_csv.reader(io.StringIO(c.get(f"/api/v2/lists/{j['id']}/urls.csv").text.lstrip("﻿"))))
+    assert rows[0] == ["#", "URL", "Source(s)", "First seen at"] and len(rows) == 93
+    p1 = next(x for x in rows if x[1] == site.base + "/product/1")
+    assert p1[2] == f"Sitemap: {site.base}/sitemap.xml | Manual entry"
+    ap = next(x for x in rows if x[1] == site.base + "/apply")
+    assert ap[2] == "Sheet: more.csv" and ap[3] == "row 4"
+    rej = c.get(f"/api/v2/lists/{j['id']}/rejected.csv").text
+    assert "hello" in rej and "n/a" in rej and "other.test" in rej and "Another site" in rej
+    # list with the sitemap in it = whole-site check (not a spot check)
+    rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+    assert c.post(f"/api/v2/lists/{j['id']}/add", json={"source": "list", "text": site.base + "/x"}, headers=H).status_code == 409
+
+    async def run(r):
+        pool = await _pool(dsn)
+        await pool.execute("UPDATE sites SET settings = settings || '{\"rate_rps\": 40}'::jsonb")
+        await execute_run(pool, r)
+        out = await pool.fetchrow("SELECT options, summary FROM runs WHERE id = $1", r)
+        await pool.close()
+        return out
+    first = asyncio.run(run(rid))
+    assert "spot" not in (first["options"] or {})
+    j = c.get(f"/api/v2/lists/{j['id']}").json()
+    assert j["pipeline"]["completed"] == 92 and j["pipeline"]["remaining"] == 0
+    # a few pages typed by hand right after: their links that answered 200 aren't fetched again; /gone (404) is
+    two = _wait_list(c, c.post("/api/v2/lists", json={"source": "list", "text": f"{site.base}/product/1\n{site.base}/product/2"},
+                                headers=H).json()["id"])
+    rid2 = c.post(f"/api/v2/lists/{two['id']}/start", json={}, headers=H).json()["run_id"]
+    second = asyncio.run(run(rid2))
+    assert second["summary"]["links_reused_from_previous"] > 0
+    q = c.post(f"/api/v2/runs/{rid2}/explore", json={"sql": "SELECT url, http_status, seeded_by FROM url_status ORDER BY url"},
+               headers=H).json()
+    got = {r[0]: (r[1], r[2]) for r in q["rows"]}
+    assert got[site.base + "/gone"][0] == 404 and got[site.base + "/gone"][1] != "PREVIOUS_CHECK"     # failures re-checked
+    assert any(v == (200, "PREVIOUS_CHECK") for v in got.values())
+    assert got[site.base + "/product/2"][1] != "PREVIOUS_CHECK"         # a page of this check: its own fresh answer
+    # turned off: every link fetched
+    three = _wait_list(c, c.post("/api/v2/lists", json={"source": "list", "text": f"{site.base}/product/1"}, headers=H).json()["id"])
+    rid3 = c.post(f"/api/v2/lists/{three['id']}/start", json={"reuse": False}, headers=H).json()["run_id"]
+    assert asyncio.run(run(rid3))["summary"]["links_reused_from_previous"] == 0

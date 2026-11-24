@@ -40,7 +40,7 @@ VIEWS = {
                   LEFT JOIN on_page_validation_cache c ON c.job_id = r.job_id AND c.normalized_url = r.normalized_found_url""",
     "url_status": """SELECT normalized_url AS url, url_scope AS scope, http_status, initial_http_status, final_url, redirect_count,
                             status_bucket, remark, error_type, error_message, response_time_ms, first_seen_source_url,
-                            reuse_count, checked_at FROM on_page_validation_cache""",
+                            reuse_count, seeded_by, checked_at FROM on_page_validation_cache WHERE referenced = 1""",
     "images": """SELECT r.source_page_url, r.image_url, r.normalized_image_url AS url, r.image_type AS kind,
                         r.internal_external AS scope, r.alt_present, r.alt_text, c.http_status, c.status_bucket, c.remark,
                         c.content_type, c.content_length, c.image_issue

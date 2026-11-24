@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import io
 import re
 import uuid
 import traceback
@@ -15,7 +16,7 @@ import logging
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -863,15 +864,22 @@ class SpotIn(BaseModel):
 
 
 async def _start_list_check(site_id: int, me, urls: List[str], kind: str, whole_site: bool, source: str, name: str = ""):
-    from qc6.url_lists import ListError, for_site
     can_edit(me)
     s = await site_for(site_id, me)
     if kind not in ("coverage", "full"):
         raise problem(400, "Pick a page check or a full check")
-    try:
-        got = for_site(urls, s)
-    except ListError as e:
-        raise problem(400, "Check the addresses", str(e))
+    from qc6 import intake as _intake
+    it = _intake.Intake(s["primary_host"], (s.get("settings") or {}).get("scope"))
+    src = _intake.source_label("sheet" if source == "sheet" else "list", name)
+    for u in urls:
+        it.add(u, src)
+    if not it.urls:
+        other = [v for _, _, v, why in it.rejects if why.startswith("Another site")]
+        raise problem(400, "Check the addresses", f"None of the addresses are on {s['primary_host']}." +
+                      (f" For example: {other[0]}" if other else " No address starting with http:// or https:// was found."))
+    summ = it.summary()
+    got = {"urls": it.urls, "other_hosts": summ["other_hosts"], "duplicates": summ["duplicates"],
+           "other_examples": [v for _, _, v, why in it.rejects if why.startswith("Another site")][:5]}
     n = len(got["urls"])
     label = (got["urls"][0] if n == 1 else f"{n:,} pages" + (f" from {name}" if name else ""))
     opts: Dict[str, Any] = {"urls": got["urls"]}
@@ -1054,10 +1062,9 @@ async def make_list(body: ListIn, me=Depends(current_member)):
                 url = "https://" + url
             lid = await jobs.from_sitemap(pool, me, url)
         elif body.source == "single":
-            lid = await jobs.from_urls(pool, me, jobs.single_url(body.url), "single", body.url.strip())
+            lid = await jobs.from_text(pool, me, body.url.strip(), "single", body.url.strip())
         else:
-            urls = from_text(body.text)
-            lid = await jobs.from_urls(pool, me, urls, "list", f"{len(urls):,} pasted addresses")
+            lid = await jobs.from_text(pool, me, body.text, "list")
     except ListError as e:
         raise problem(400, "Check the address", str(e))
     except services.NotAllowed as e:
@@ -1066,41 +1073,137 @@ async def make_list(body: ListIn, me=Depends(current_member)):
     return _list_out(await jobs.get(pool, me["workspace_id"], lid))
 
 
-@app.post("/api/v2/lists/upload", status_code=201)
-async def upload_list(request: Request, me=Depends(current_member)):
-    """A URL list from uploaded files: sheets (.csv, .tsv, .txt, .xlsx; the URL column or any http cell) or sitemap
-    files saved from a browser (.xml, .xml.gz). Several files at once are combined into one list."""
-    from qc6 import jobs
-    from qc6.url_lists import ListError, MAX_BYTES, from_upload
-    can_edit(me)
+async def _save_uploads(request: Request) -> List[Tuple[str, str]]:
+    """Uploaded files copied to disk in 1 MB pieces (never whole in memory), up to QC6_MAX_UPLOAD_MB each."""
+    from qc6.intake import MAX_UPLOAD_BYTES
     form = await request.form()
     files = [f for f in form.getlist("file") if hasattr(f, "read")][:200]
     if not files:
         raise problem(400, "Choose a file to upload")
-    urls: List[str] = []
-    names: List[str] = []
-    problems: List[str] = []
-    for f in files:
-        data = await f.read(MAX_BYTES + 1)
-        name = os.path.basename(getattr(f, "filename", "") or "file")[:120]
-        try:
-            urls += from_upload(data, name)
-            names.append(name)
-        except ListError as e:
-            problems.append(str(e))
-    if not urls:
-        raise problem(400, "That file can't be used" if len(files) == 1 else "Those files can't be used",
-                      problems[0] if problems else "No address starting with http:// or https:// was found.")
-    label = names[0] + (f" and {len(names) - 1} more file{'s' if len(names) > 2 else ''}" if len(names) > 1 else "")
+    import tempfile
+    out: List[Tuple[str, str]] = []
+    up_dir = os.path.join(settings.data_dir, "uploads")
+    os.makedirs(up_dir, exist_ok=True)
+    try:
+        for f in files:
+            name = os.path.basename(getattr(f, "filename", "") or "file")[:120]
+            fd, path = tempfile.mkstemp(dir=up_dir, suffix="-" + re.sub(r"[^A-Za-z0-9._-]+", "_", name)[-60:])
+            size = 0
+            with os.fdopen(fd, "wb") as w:
+                while True:
+                    chunk = await f.read(1 << 20)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        w.close()
+                        os.unlink(path)
+                        raise problem(400, "That file is too big", f"{name} is over {MAX_UPLOAD_BYTES // 1048576} MB. Split it, "
+                                      "or keep only the URL column (QC6_MAX_UPLOAD_MB raises the limit).")
+                    w.write(chunk)
+            out.append((path, name))
+    except BaseException:
+        for p, _ in out:
+            if os.path.exists(p):
+                os.unlink(p)
+        raise
+    return out
+
+
+@app.post("/api/v2/lists/upload", status_code=201)
+async def upload_list(request: Request, me=Depends(current_member)):
+    """A URL list from uploaded files: sheets (.csv, .tsv, .txt, .xlsx; the URL column or any http cell) or sitemap
+    files saved from a browser (.xml, .xml.gz). Several files at once are combined into one list. Read in the
+    background in chunks with live progress (status 'extracting'), like a sitemap."""
+    from qc6 import jobs
+    from qc6.url_lists import ListError
+    can_edit(me)
+    files = await _save_uploads(request)
     pool = await get_pool()
     try:
-        lid = await jobs.from_urls(pool, me, urls, "sheet", label)
+        lid = await jobs.from_files(pool, me, files)
     except (ListError, services.NotAllowed) as e:
-        raise problem(400, "That file can't be used", str(e))
-    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}", {"source": "sheet", "files": names[:20]})
-    out = _list_out(await jobs.get(pool, me["workspace_id"], lid))
-    out["skipped_files"] = problems[:5]
-    return out
+        for p, _ in files:
+            if os.path.exists(p):
+                os.unlink(p)
+        raise problem(400, "That file can't be used" if len(files) == 1 else "Those files can't be used", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "list.create", f"list:{lid}",
+                       {"source": "sheet", "files": [n for _, n in files][:20]})
+    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+
+
+class AddIn(BaseModel):
+    source: str = Field(pattern="^(sitemap|list)$")
+    url: str = Field(default="", max_length=4000)
+    text: str = Field(default="", max_length=20_000_000)
+
+
+@app.post("/api/v2/lists/{lid}/add")
+async def add_to_list(lid: int, body: AddIn, me=Depends(current_member)):
+    """Add URLs from another source (a sitemap or typed addresses) to a list that hasn't started: deduplicated
+    against everything already in it; each URL keeps every source that listed it."""
+    from qc6 import jobs
+    from qc6.url_lists import ListError
+    can_edit(me)
+    pool = await get_pool()
+    try:
+        if body.source == "sitemap":
+            url = body.url.strip()
+            if url and "://" not in url:
+                url = "https://" + url
+            await jobs.from_sitemap(pool, me, url, add_to=lid)
+        else:
+            await jobs.from_text(pool, me, body.text, add_to=lid)
+    except LookupError:
+        raise problem(404, "URL list not found")
+    except ListError as e:
+        raise problem(409 if "started" in str(e) or "still being read" in str(e) else 400, "URLs not added", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "list.add", f"list:{lid}", {"source": body.source})
+    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+
+
+@app.post("/api/v2/lists/{lid}/add-upload")
+async def add_upload_to_list(lid: int, request: Request, me=Depends(current_member)):
+    from qc6 import jobs
+    from qc6.url_lists import ListError
+    can_edit(me)
+    pool = await get_pool()
+    if await jobs.get(pool, me["workspace_id"], lid) is None:
+        raise problem(404, "URL list not found")
+    files = await _save_uploads(request)
+    try:
+        await jobs.from_files(pool, me, files, add_to=lid)
+    except (ListError, LookupError) as e:
+        for p, _ in files:
+            if os.path.exists(p):
+                os.unlink(p)
+        raise problem(409, "URLs not added", str(e))
+    await services.log(pool, me["workspace_id"], me["id"], "list.add", f"list:{lid}",
+                       {"source": "sheet", "files": [n for _, n in files][:20]})
+    return _list_out(await jobs.get(pool, me["workspace_id"], lid))
+
+
+@app.get("/api/v2/lists/{lid}/rejected.csv")
+async def list_rejects(lid: int, me=Depends(current_member)):
+    """Rows that couldn't be used, with the reason (not an address, another site, outside the scope, repeats aren't here)."""
+    pool = await get_pool()
+    if not await pool.fetchval("SELECT 1 FROM url_lists WHERE id = $1 AND workspace_id = $2", lid, me["workspace_id"]):
+        raise problem(404, "URL list not found")
+    rows = await pool.fetch("SELECT source, ref, value, reason FROM list_rejects WHERE list_id = $1", lid)
+
+    def gen():
+        import csv as _csv
+        import json as _json
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        buf.write("\ufeff")
+        w.writerow(["Source", "Row / line", "Value", "Reason"])
+        for r in rows:
+            ref = r["ref"] if isinstance(r["ref"], dict) else _json.loads(r["ref"] or "{}")
+            w.writerow([r["source"], ref.get("row") or ref.get("line") or "", r["value"], r["reason"]])
+        yield buf.getvalue().encode()
+    return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="rejected-rows-{lid}.csv"'})
 
 
 @app.get("/api/v2/lists")
@@ -1143,6 +1246,7 @@ async def delete_list(lid: int, me=Depends(current_member)):
 
 
 class CrawlIn(BaseModel):
+    reuse: bool = True                  # links that answered 200 in this site's last check (within QC6_REUSE_HOURS) aren't fetched again
     browser: bool = False
     preset: Optional[str] = None        # speed: conservative | target | max_tested | enterprise_150k; None = picked by list size
 
@@ -1155,7 +1259,7 @@ async def start_list(lid: int, body: CrawlIn, me=Depends(current_member)):
     can_edit(me)
     pool = await get_pool()
     try:
-        rid = await jobs.start_crawl(pool, me, lid, body.browser, body.preset)
+        rid = await jobs.start_crawl(pool, me, lid, body.browser, body.preset, body.reuse)
     except LookupError:
         raise problem(404, "URL list not found")
     except ListError as e:
@@ -1175,12 +1279,13 @@ async def list_sheet(lid: int, fmt: str, me=Depends(current_member)):
     r = await jobs.urls_of(pool, me["workspace_id"], lid)
     if r is None:
         raise problem(404, "URL list not found or not ready")
+    rows = await jobs.url_rows(pool, lid, r)
     name = f"urls-{re.sub(r'[^a-z0-9.-]+', '-', r['primary_host'].lower())}-{lid}.{fmt}"
     if fmt == "csv":
-        return StreamingResponse(jobs.urls_csv(r["urls"]), media_type="text/csv; charset=utf-8",
+        return StreamingResponse(jobs.urls_csv(rows), media_type="text/csv; charset=utf-8",
                                  headers={"Content-Disposition": f'attachment; filename="{name}"'})
     from starlette.background import BackgroundTask
-    path = await asyncio.to_thread(jobs.urls_xlsx, r["urls"], r["label"])
+    path = await asyncio.to_thread(jobs.urls_xlsx, rows, r["label"])
     return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path),
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 

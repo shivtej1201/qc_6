@@ -248,13 +248,13 @@ def crawl_numbers(run_id: int) -> Optional[Dict[str, Any]]:
                           SUM(crawl_state != 'PENDING' AND http_status BETWEEN 500 AND 599),
                           SUM(crawl_state != 'PENDING' AND http_status IS NULL)
                      FROM on_page_source_pages WHERE job_id = ?""")
-        cats = dict(c.execute(f"SELECT {CATEGORY_SQL} AS k, COUNT(*) FROM on_page_validation_cache c WHERE c.job_id = ? GROUP BY k",
+        cats = dict(c.execute(f"SELECT {CATEGORY_SQL} AS k, COUNT(*) FROM on_page_validation_cache c WHERE c.job_id = ? AND c.referenced = 1 GROUP BY k",
                               (job,)).fetchall())
         rels = one("SELECT COUNT(*), COALESCE(SUM(occurrence_count), 0) FROM on_page_link_relationships WHERE job_id = ?")
         imgs = one("SELECT COUNT(*) FROM on_page_image_relationships WHERE job_id = ?")[0]
         uimg = one("SELECT COUNT(*) FROM on_page_image_validation_cache WHERE job_id = ?")[0]
         rc = one("""SELECT SUM(remark LIKE '%worked on a second check%'), SUM(remark LIKE '%confirmed on a second check%')
-                      FROM on_page_validation_cache WHERE job_id = ?""")
+                      FROM on_page_validation_cache WHERE job_id = ? AND referenced = 1""")
         recheck = {"recheck_recovered": int(rc[0] or 0), "recheck_confirmed": int(rc[1] or 0)}
     finally:
         c.close()
@@ -333,7 +333,9 @@ def compose(run: Dict[str, Any], site: Dict[str, Any], source: str, nums: Option
             ("200 OK", _fmt(ln["s2xx"])), ("Redirects (3xx)", _fmt(ln["s3xx"])), ("4xx", _fmt(ln["s4xx"])), ("5xx", _fmt(ln["s5xx"])),
             ("DNS failures / network errors", _fmt(ln["dns_network"])), ("Timeout failures", _fmt(ln["timeout"])),
             ("SSL failures", _fmt(ln["ssl"])), ("Blocked (robots / firewall)", _fmt(ln["blocked"])),
-            ("Worked on a second check (not reported as failures)", _fmt(nums["recheck"].get("recheck_recovered", 0)))]))
+            ("Worked on a second check (not reported as failures)", _fmt(nums["recheck"].get("recheck_recovered", 0))),
+            ("200 results reused from the previous check (not fetched again)",
+             _fmt((run.get("summary") or {}).get("links_reused_from_previous", 0)))]))
         rows.append(("Images", [("Total images extracted (placements)", _fmt(im["extracted"])), ("Unique images", _fmt(im["unique"]))]))
     rows.append(("Report and tickets", [
         ("Report generation", report.get("note", "-")),
