@@ -1787,7 +1787,7 @@ async def run_package(run_id: int, me=Depends(current_member)):
 async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=Depends(current_member)):
     """The whole report of one check in one sheet: summary, problems, every page x problem with 'seen before' remarks."""
     from qc6 import export as ex
-    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx"):
+    if fmt not in ("csv", "xlsx", "zip", "workbook.xlsx", "report.xlsx"):
         raise problem(404, "Not found")
     s = await site_for(site_id, me)
     pool = await get_pool()
@@ -1801,7 +1801,13 @@ async def export_report(site_id: int, fmt: str, run: Optional[int] = None, me=De
     if fmt == "zip":
         path = await ex.zip_file(pool, s, rid, name[:-4] + ".csv")
         return FileResponse(path, filename=name, background=BackgroundTask(os.unlink, path), media_type="application/zip")
-    if fmt == "workbook.xlsx":                  # the full workbook, V5 layout: many sheets
+    if fmt == "report.xlsx":                    # the management report: dashboard, pivot summary, non-200 links, tickets
+        from qc6 import smt_report
+        path = await smt_report.report_file(pool, s, rid)
+        if path is None:
+            raise problem(404, "No link data for this check", "The management report needs a page check.")
+        name = name.replace("qc-report-", "qc-management-report-").replace(".report.xlsx", ".xlsx")
+    elif fmt == "workbook.xlsx":                # the full workbook, V5 layout: many sheets
         path = await ex.workbook_file(pool, s, rid)
         name = name.replace("qc-report-", "qc-audit-workbook-").replace(".workbook.xlsx", ".xlsx")
     else:

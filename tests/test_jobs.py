@@ -348,6 +348,32 @@ def test_full_workbook_like_the_v5_sample(env):
     assert t["qc"]["broken_links"]["unique"] >= 1 and t["qc"]["pages"]["checked"] == 90
     assert t["ticket"]["priority"] and "/gone" in t["ticket"]["text"] and "STEPS TO REPRODUCE" in t["ticket"]["text"]
     assert c.get("/api/v2/runs/999999/ops-ticket").status_code == 404
+    # Management report: small, ready to present; healthy links summarised, not listed
+    mr = c.get(f"/api/v2/sites/{j['site_id']}/export.report.xlsx?run={rid}")
+    assert mr.status_code == 200, mr.text
+    assert "qc-management-report-" in mr.headers["content-disposition"]
+    assert len(mr.content) < len(r.content)
+    import zipfile as _zf
+    charts = [n for n in _zf.ZipFile(io.BytesIO(mr.content)).namelist() if n.startswith("xl/charts/chart")]
+    assert len(charts) >= 3, charts                                           # native Excel charts on the dashboard
+    mwb = openpyxl.load_workbook(io.BytesIO(mr.content), read_only=True)
+    assert mwb.sheetnames[:5] == ["Dashboard", "Pivot Summary", "Non-200 Responses", "Tickets", "Problem Links"], mwb.sheetnames
+    mrows = lambda n: [list(x) for x in mwb[n].iter_rows(values_only=True)]                       # noqa: E731
+    dash = [str(v) for row in mrows("Dashboard") for v in row if v is not None]
+    assert any(v.startswith("Website quality report") for v in dash) and "BROKEN LINKS" in dash and "Key findings" in dash
+    piv = [str(row[0]) for row in mrows("Pivot Summary") if row and row[0]]
+    for sec in ("A. OVERALL STATUS", "B. HTTP STATUS CODES", "C. SOURCE PAGE TYPE", "D. BUSINESS", "E. LANGUAGE",
+                "F. PAGE TYPE x STATUS", "G. HIGHEST-IMPACT", "H. STATUS COLOUR LEGEND"):
+        assert any(x.startswith(sec) for x in piv), sec
+    n2 = mrows("Non-200 Responses")
+    assert n2[0][:5] == ["Sr.no", "Destination URL", "First status", "Final status", "Status category"]
+    gone_row = next(x for x in n2[1:] if x[1].endswith("/gone"))
+    assert gone_row[3] == 404 and gone_row[4] == "Client error (4xx)" and gone_row[6] >= 1 and gone_row[7].startswith(site.base)
+    assert all(x[4] != "OK (2xx)" for x in n2[1:])
+    pl = mrows("Problem Links")
+    assert len(pl) > 1 and all(x[10] != "OK (2xx)" for x in pl[1:] if x[0] is not None and isinstance(x[0], int))
+    tk_rows = mrows("Tickets")
+    assert tk_rows[0][:4] == ["Ticket", "Priority", "Severity", "Issue"] and any(str(x[0]).startswith("QC-") for x in tk_rows[1:])
     # Tickets tab: one ticket per issue type, every URL in its attachment
     assert "Tickets" in names
     tk = rows("Tickets")
