@@ -1,4 +1,6 @@
 import asyncio
+import collections
+import math
 import concurrent.futures
 import json
 import os
@@ -392,7 +394,8 @@ def classify_http_outcome(
 
     if error_type:
         if error_type == "Timeout":
-            return ("TIMED_OUT", "Timeout", "Timeout", "Timeout — Request Timed Out", "NONE")
+            return ("TIMED_OUT", "Timeout", "Timeout",
+                    f"Timeout — {error_message.split(':')[0][:140]}" if error_message else "Timeout — Request Timed Out", "NONE")
         if error_type in ("DNS Error", "Connection Error", "Network Error"):
             return (
                 "FAILED",
@@ -509,8 +512,65 @@ def classify_http_outcome(
     return ("FAILED", "Other errors", cat or "Unknown", f"Unexpected HTTP Status ({final_status})", waf_status)
 
 
-from qcv5.core.request_errors import classify_request_exception  # noqa: E402
+from qcv5.core.request_errors import classify_request_exception, describe_request_exception  # noqa: E402
 from qcv5.audit.on_page_schema import ON_PAGE_IMAGE_ALTERS, ON_PAGE_IMAGE_SCHEMA_SQL, ensure_on_page_image_schema  # noqa: E402,F401
+
+
+class AdaptiveLimit:
+    """A semaphore whose size can change while requests wait on it. Each host gets one; its size follows the
+    host's answer time so that requests in flight = agreed rate x answer time (Little's law). The rate limits
+    (pacemaker / host budget) still decide how many requests leave per second, so a slow site is not hit harder,
+    it just stops being starved by a fixed number of slots."""
+
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self.active = 0
+        self._waiters: "collections.deque[asyncio.Future]" = collections.deque()
+
+    def set_limit(self, n: int) -> None:
+        self.limit = max(1, int(n))
+        self._wake()
+
+    def _wake(self) -> None:
+        while self._waiters and self.active < self.limit:
+            f = self._waiters.popleft()
+            if not f.done():
+                self.active += 1
+                f.set_result(None)
+
+    async def __aenter__(self):
+        if self.active < self.limit and not self._waiters:
+            self.active += 1
+            return self
+        f = asyncio.get_running_loop().create_future()
+        self._waiters.append(f)
+        try:
+            await f
+        except asyncio.CancelledError:
+            if f.done() and not f.cancelled():         # the slot was granted just before the cancel: give it back
+                self.active -= 1
+                self._wake()
+            else:
+                try:
+                    self._waiters.remove(f)
+                except ValueError:
+                    pass
+            raise
+        return self
+
+    async def __aexit__(self, *exc):
+        self.active -= 1
+        self._wake()
+        return False
+
+
+TRANSIENT_BUCKETS = ("Timeout", "DNS/Network", "SSL")
+NET_RETRIES = 2                 # transport failures (DNS, connect, reset, timeout) are retried at least this often
+RECHECK_CONCURRENCY = 8         # end-of-crawl second check of transient failures: calm, few at a time
+
+
+class _Stopped(Exception):
+    """A request given up because the run is pausing / stopping (the item stays PENDING for resume)."""
 
 
 class HostRateBudget:
@@ -723,6 +783,13 @@ class OnPageAuditEngine:
         self.audit_images = audit_images
         self.audit_seo = audit_seo
         self.image_concurrency = max(1, int(image_concurrency))
+        # requests in flight per host follow the host's answer time (see AdaptiveLimit); caps keep it sane
+        self.primary_inflight_cap = 128
+        self.other_host_rps = 8.0
+        self.other_inflight_cap = 24
+        self._host_lat: Dict[str, float] = {}
+        self._recheck_items: List[Tuple[str, str, Dict[str, Any]]] = []
+        self._rechecking = False
         self.image_discard_body_limit = image_discard_body_limit
         self.max_connections = max_connections
         # Per-host budgets: {"assets.example.com": 10} or {".cdn.example": {"rps": 8, "max_rps": 12}}
@@ -1144,8 +1211,25 @@ class OnPageAuditEngine:
         async with self._host_sem_lock:
             if host not in self._host_sems:
                 cap = self.source_concurrency if self._is_primary_host(url) else self.per_host_concurrency
-                self._host_sems[host] = asyncio.Semaphore(cap)
+                self._host_sems[host] = AdaptiveLimit(cap)
             return self._host_sems[host]
+
+    def _note_latency(self, url: str, ms: float) -> None:
+        """Running answer time per host; resizes that host's in-flight limit to rate x time (x1.3 headroom)."""
+        host = (urllib.parse.urlsplit(url).hostname or "unknown").lower()
+        old = self._host_lat.get(host)
+        lat = ms if old is None else old * 0.8 + ms * 0.2
+        self._host_lat[host] = lat
+        sem = self._host_sems.get(host)
+        if sem is None or not hasattr(sem, "set_limit"):
+            return
+        if self._is_primary_host(url):
+            rate, floor, cap = self.target_rps, self.source_concurrency, self.primary_inflight_cap
+        else:
+            hb = self._budget_for(url)
+            rate, floor, cap = (hb.rps if hb else self.other_host_rps), self.per_host_concurrency, self.other_inflight_cap
+        want = int(math.ceil(rate * lat / 1000.0 * 1.3)) + 2
+        sem.set_limit(max(floor, min(cap, want)))
 
     async def _acquire_primary_pace(self):
         """
@@ -1278,6 +1362,7 @@ class OnPageAuditEngine:
         need_body: bool = True,
         max_hops: int = 10,
         kind: str = "url",
+        timeout: Optional[httpx.Timeout] = None,
         discard_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
@@ -1362,7 +1447,9 @@ class OnPageAuditEngine:
         raw_bytes = b""
         resp_headers: Dict[str, str] = {}
 
-        while retries <= self.max_retries:
+        net_limit = max(self.max_retries, NET_RETRIES)
+        pool_waits = 0
+        while retries <= net_limit:
             attempts += 1
             net_ms = 0.0
             t_req = None
@@ -1401,7 +1488,7 @@ class OnPageAuditEngine:
                         t_req = time.perf_counter()
                         m["http_requests"] += 1
                         m["requests_by_kind"][kind] += 1
-                        async with client.stream("GET", current_url) as resp:
+                        async with client.stream("GET", current_url, **({"timeout": timeout} if timeout is not None else {})) as resp:
                             st = resp.status_code
                             m["status_counts"][st] += 1
                             if st in (301, 302, 303, 307, 308):
@@ -1455,6 +1542,7 @@ class OnPageAuditEngine:
                                     await self._discard_body(resp, discard_limit)
                                 net_ms += (time.perf_counter() - t_req) * 1000.0
                                 self._reservoir_add(m["latencies_ms"], (time.perf_counter() - t_req) * 1000.0)
+                                self._note_latency(current_url, (time.perf_counter() - t_req) * 1000.0)
                                 break
 
                 initial_status = redirect_chain[0]["status"] if redirect_chain else final_status
@@ -1465,7 +1553,7 @@ class OnPageAuditEngine:
 
                 if not ssrf_safe or error_type in ("Redirect Loop", "Redirect Without Location", "Invalid Redirect Target"):
                     break   # deterministic: a retry cannot change the outcome
-                if final_status in (429, 502, 503, 504) and retries < self.max_retries:
+                if final_status in (429, 502, 503, 504) and retries < max(self.max_retries, 1):
                     retries += 1
                     m["retries"] = m.get("retries", 0) + 1
                     await asyncio.sleep(retry_delay(retries, resp_headers.get("retry-after")))
@@ -1475,6 +1563,13 @@ class OnPageAuditEngine:
             except Exception as e:
                 if t_req is not None:
                     net_ms += (time.perf_counter() - t_req) * 1000.0
+                if isinstance(e, httpx.PoolTimeout) and pool_waits < 20:
+                    # QC's own connection pool was full: says nothing about the website, so wait and try again
+                    # without using up a retry (it used to be reported as the URL timing out)
+                    pool_waits += 1
+                    m["pool_waits"] = m.get("pool_waits", 0) + 1
+                    await asyncio.sleep(0.5)
+                    continue
                 # type-based classification (httpx DNS failures never contain the word "dns")
                 error_type = classify_request_exception(e)
                 if error_type == "Redirect Loop":
@@ -1484,12 +1579,12 @@ class OnPageAuditEngine:
                     m["timeouts"] += 1
                 else:
                     m["network_errors"] += 1
-                error_message = (str(e) or e.__class__.__name__)[:200]
+                error_message = f"{describe_request_exception(e)}: {(str(e) or e.__class__.__name__)[:160]}"
                 final_status = None
                 retries += 1
-                if retries <= self.max_retries:
+                if retries <= net_limit:
                     m["retries"] = m.get("retries", 0) + 1
-                    await asyncio.sleep(retry_delay(retries))
+                    await asyncio.sleep(retry_delay(retries) * 2)      # 1 s, 2 s, ... a blip usually clears
 
         elapsed_ms = round(net_ms, 2)
         html_text = ""
@@ -2544,7 +2639,14 @@ class OnPageAuditEngine:
             if getattr(self, "_dest_idle", None) is not None:
                 self._dest_idle.set()
 
+    def _note_recheck(self, kind: str, url: str, rec: Dict[str, Any]) -> None:
+        if self._rechecking:
+            return
+        if rec.get("status_bucket") in TRANSIENT_BUCKETS or rec.get("http_status") in (502, 503, 504):
+            self._recheck_items.append((kind, url, rec))
+
     async def _complete_destination(self, url: str, rec: Dict[str, Any]):
+        self._note_recheck("dest", url, rec)
         self._dest_state[url] = rec["validation_state"]
         fut = self._inflight.pop(url, None)
         if fut is not None and not fut.done():
@@ -2623,6 +2725,59 @@ class OnPageAuditEngine:
                    content_length=res.get("content_length"), image_issue=self._image_issue(url, res))
         return rec
 
+    async def _recheck_transient(self, client: httpx.AsyncClient) -> None:
+        """Second check of every link / image that failed for a network reason (DNS, connection, timeout, SSL) or a
+        temporary server error (502-504): calmly, a few at a time, with longer timeouts. A link that answers now gets
+        its real status (remark says it recovered); one that fails again is confirmed. So a blip during a busy crawl
+        no longer ends up in the report as 'DNS / network issue'."""
+        items: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for kind, url, rec in self._recheck_items:
+            items[(kind, url)] = rec
+        self._recheck_items = []
+        if not items:
+            return
+        m = self.metrics
+        m["rechecked"] = len(items)
+        print(f"[PIPELINE] Second check of {len(items):,} links / images that failed for a network reason", flush=True)
+        self._rechecking = True
+        await asyncio.sleep(3)                       # let a passing blip clear
+        tmo = httpx.Timeout(connect=max(15.0, self.connect_timeout * 3), read=max(45.0, self.read_timeout * 3),
+                            write=settings.WRITE_TIMEOUT, pool=60.0)
+        sem = asyncio.Semaphore(RECHECK_CONCURRENCY)
+
+        async def one(kind: str, url: str, old: Dict[str, Any]):
+            async with sem:
+                if self._stop_requested:
+                    return
+                try:
+                    res = await self.fetch_url_manual_redirects(client, url, need_body=False, kind="recheck", timeout=tmo)
+                except Exception:
+                    return
+            still = res["status_bucket"] in TRANSIENT_BUCKETS or res.get("http_status") in (502, 503, 504)
+            if kind == "dest":
+                rec = self._dest_record(url, old.get("url_scope", ""), res)
+            else:
+                rec = self._image_record(url, old.get("image_type", ""), old.get("internal_external", ""), res)
+            if still:
+                rec["remark"] = f"{rec['remark']} (confirmed on a second check)"
+                m["recheck_confirmed"] = m.get("recheck_confirmed", 0) + 1
+            else:
+                rec["remark"] = f"{rec['remark']} (worked on a second check; first try: {str(old.get('remark') or '')[:90]})"
+                m["recheck_recovered"] = m.get("recheck_recovered", 0) + 1
+            if kind == "dest":
+                self._dest_state[url] = rec["validation_state"]
+                await self._write_q.put(("dest", rec))
+            else:
+                self._img_state[url] = rec["validation_state"]
+                await self._write_q.put(("image", rec))
+
+        try:
+            await asyncio.gather(*(one(k, u, r) for (k, u), r in items.items()))
+        finally:
+            self._rechecking = False
+        print(f"[PIPELINE] Second check: {m.get('recheck_recovered', 0):,} worked, {m.get('recheck_confirmed', 0):,} confirmed",
+              flush=True)
+
     def _img_done(self):
         self._img_outstanding -= 1
         if self._img_outstanding <= 0:
@@ -2631,6 +2786,7 @@ class OnPageAuditEngine:
                 self._img_idle.set()
 
     async def _complete_image(self, url: str, rec: Dict[str, Any]):
+        self._note_recheck("image", url, rec)
         self._img_state[url] = rec["validation_state"]
         fut = self._img_inflight.pop(url, None)
         if fut is not None and not fut.done():
@@ -2675,6 +2831,34 @@ class OnPageAuditEngine:
         """Graceful interruption: stop feeding sources, finish in-flight work, flush, return.
         Queued-but-unstarted destinations stay PENDING in the DB and are rescheduled on resume."""
         self._stop_requested = True
+        ev, loop = getattr(self, "_stop_ev", None), getattr(self, "_stop_loop", None)
+        if ev is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:                   # loop already closed
+                pass
+
+    async def _unless_stopped(self, coro):
+        """Await a request, but give it up as soon as the run is paused / stopped: with many workers queued at the
+        site's rate limit, waiting for each of them to get its turn first would make a pause take minutes."""
+        ev = getattr(self, "_stop_ev", None)
+        if ev is None:
+            return await coro
+        task = asyncio.ensure_future(coro)
+        if not ev.is_set():
+            waiter = asyncio.ensure_future(ev.wait())
+            try:
+                await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waiter.cancel()
+            if task.done():
+                return task.result()
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+        raise _Stopped()
 
     def _parse_and_classify(self, src_url: str, final_url: str, html: str, seo_ctx: Optional[Tuple[str, str]] = None):
         """ONE Parser pass per page: links, canonical, hreflang, meta tags, data-pageType, title, images and
@@ -2930,6 +3114,8 @@ class OnPageAuditEngine:
             self.conn = self._connect_db()
         self.metrics = self._new_metrics()
         self._stop_requested = False
+        self._stop_ev = asyncio.Event()
+        self._stop_loop = asyncio.get_running_loop()
         self._run_sources_done = 0
         pending_refs = self._load_run_state()
 
@@ -2947,7 +3133,11 @@ class OnPageAuditEngine:
         ]
         print(f"[PIPELINE] Pending source pages: {len(pending_sources):,} | resumed PENDING destinations: {len(pending_refs):,}", flush=True)
 
-        max_conn = self.max_connections or (max(self.source_concurrency, self.dest_concurrency, self.image_concurrency) * 2)
+        # workers: enough to fill the adaptive in-flight limits (they wait on the rate limits, not on the network)
+        page_workers = max(self.source_concurrency, 64)
+        dest_workers = max(self.dest_concurrency, 64)
+        img_workers = max(self.image_concurrency, 48)
+        max_conn = self.max_connections or max(256, (page_workers + dest_workers + img_workers) * 2)
         limits = httpx.Limits(
             max_connections=max_conn,
             # keep every connection we are allowed to open alive: churning primary keep-alive
@@ -2967,7 +3157,7 @@ class OnPageAuditEngine:
         # one connection pool per host (see http_pool.py): httpcore re-scans every pooled connection on each
         # request, so a single pool shared by the primary site, CDN and external hosts costs O(all connections)
         transport = PerHostPoolTransport(
-            limits=limits, other_host_keepalive=self.per_host_concurrency,
+            limits=limits, other_host_keepalive=max(self.per_host_concurrency, self.other_inflight_cap),
             is_heavy_host=self._is_heavy_host, allow_local=self.allow_local,
             verify=tls_verify(), http2=self.http2,           # bad certificates are reported as SSL_ERROR, not ignored
         )
@@ -2986,7 +3176,7 @@ class OnPageAuditEngine:
         ) as client:
             await self._wait_for_primary_ready(client, initial_wait=False)
 
-            fetch_q: asyncio.Queue = asyncio.Queue(maxsize=self.source_concurrency * 2)
+            fetch_q: asyncio.Queue = asyncio.Queue(maxsize=page_workers * 2)
             parse_q: asyncio.Queue = asyncio.Queue(maxsize=max(4, self.parse_workers * 4))
             self._dest_q = asyncio.Queue(maxsize=5000)
             self._write_q = asyncio.Queue(maxsize=2000)
@@ -3023,7 +3213,7 @@ class OnPageAuditEngine:
                     finish_source_item()
                     await src_idle.wait()
                     items = requeue_sources
-                for _ in range(self.source_concurrency):
+                for _ in range(page_workers):                # one stop signal per page worker
                     await fetch_q.put(None)
 
             async def on_source_fetched(item: Dict[str, Any], res: Dict[str, Any]):
@@ -3066,7 +3256,11 @@ class OnPageAuditEngine:
                         continue
                     try:
                         norm_src = item["normalized_source_url"]
-                        res = await self.fetch_url_manual_redirects(client, norm_src, need_body=True, kind="source")
+                        try:
+                            res = await self._unless_stopped(
+                                self.fetch_url_manual_redirects(client, norm_src, need_body=True, kind="source"))
+                        except _Stopped:                 # left PENDING; the finally below counts it done
+                            continue
                         self.metrics["source_fetches"] += 1
                         if res["is_primary_waf"] or res.get("is_budget_waf"):
                             trigger = self._note_primary_waf() if res["is_primary_waf"] else False
@@ -3312,7 +3506,7 @@ class OnPageAuditEngine:
                                 self.metrics["dest_validations_skipped_cached"] += 1
                             self._dest_done()
                             continue
-                        res = await self.fetch_url_manual_redirects(client, url, need_body=False, kind="url")
+                        res = await self._unless_stopped(self.fetch_url_manual_redirects(client, url, need_body=False, kind="url"))
                         self.metrics["dest_validations"] += 1
                         if res["is_primary_waf"] or res.get("is_budget_waf"):
                             trigger = self._note_primary_waf() if res["is_primary_waf"] else False
@@ -3331,7 +3525,8 @@ class OnPageAuditEngine:
                         await self._complete_destination(url, self._dest_record(url, item["url_scope"], res))
                         self._dest_done()
                     except Exception as e:
-                        print(f"[PIPELINE] destination error for {url}: {e!r} (left PENDING)", flush=True)
+                        if not isinstance(e, _Stopped):
+                            print(f"[PIPELINE] destination error for {url}: {e!r} (left PENDING)", flush=True)
                         fut = self._inflight.pop(url, None)
                         if fut is not None and not fut.done():
                             fut.cancel()
@@ -3355,8 +3550,8 @@ class OnPageAuditEngine:
                                 self.metrics["image_validations_skipped_cached"] += 1
                             self._img_done()
                             continue
-                        res = await self.fetch_url_manual_redirects(client, url, need_body=False, kind="image",
-                                                                    discard_limit=self.image_discard_body_limit)
+                        res = await self._unless_stopped(self.fetch_url_manual_redirects(
+                            client, url, need_body=False, kind="image", discard_limit=self.image_discard_body_limit))
                         self.metrics["image_validations"] += 1
                         if res["is_primary_waf"] or res.get("is_budget_waf"):
                             trigger = self._note_primary_waf() if res["is_primary_waf"] else False
@@ -3375,7 +3570,8 @@ class OnPageAuditEngine:
                         await self._complete_image(url, self._image_record(url, item["image_type"], item["internal_external"], res))
                         self._img_done()
                     except Exception as e:
-                        print(f"[PIPELINE] image error for {url}: {e!r} (left PENDING)", flush=True)
+                        if not isinstance(e, _Stopped):
+                            print(f"[PIPELINE] image error for {url}: {e!r} (left PENDING)", flush=True)
                         fut = self._img_inflight.pop(url, None)
                         if fut is not None and not fut.done():
                             fut.cancel()
@@ -3392,8 +3588,8 @@ class OnPageAuditEngine:
                     run_task.cancel()
 
             writer_t.add_done_callback(_writer_died)
-            dest_tasks = [asyncio.create_task(dest_worker()) for _ in range(self.dest_concurrency)]
-            img_tasks = [asyncio.create_task(image_worker()) for _ in range(self.image_concurrency)]
+            dest_tasks = [asyncio.create_task(dest_worker()) for _ in range(dest_workers)]
+            img_tasks = [asyncio.create_task(image_worker()) for _ in range(img_workers)]
             fetch_tasks: List[asyncio.Task] = []
             parse_tasks: List[asyncio.Task] = []
             try:
@@ -3403,7 +3599,7 @@ class OnPageAuditEngine:
                 for u, it, ie in self._img_pending_refs:
                     await self._schedule_image(u, it, ie)
 
-                fetch_tasks = [asyncio.create_task(fetch_worker()) for _ in range(self.source_concurrency)]
+                fetch_tasks = [asyncio.create_task(fetch_worker()) for _ in range(page_workers)]
                 parse_tasks = [asyncio.create_task(parse_worker()) for _ in range(self.parse_workers)]
                 await source_producer()
                 await asyncio.gather(*fetch_tasks)
@@ -3431,6 +3627,8 @@ class OnPageAuditEngine:
                 await asyncio.gather(*dest_tasks, *img_tasks)
                 if self._bg_tasks:
                     await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
+                if not (max_source_pages_this_run is not None or self._stop_requested):
+                    await self._recheck_transient(client)
             except asyncio.CancelledError:
                 if writer_t.done() and not writer_t.cancelled() and writer_t.exception() is not None:
                     raise RuntimeError("on-page audit DB writer failed; run aborted (resumable)") from writer_t.exception()
