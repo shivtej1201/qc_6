@@ -251,6 +251,10 @@ export const api = {
       "GET", `/api/v2/runs/${runId}/facts/${dataset}?${new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))}`),
   exploreSchema: (runId: number) => req<ExploreSchema>("GET", `/api/v2/runs/${runId}/explore/schema`),
   explore: (runId: number, sql: string, offset = 0, limit = 100) => req<ExploreResult>("POST", `/api/v2/runs/${runId}/explore`, { sql, offset, limit }),
+  mail: () => req<MailSettings>("GET", "/api/v2/mail"),
+  saveMail: (b: MailForm) => req<MailSettings>("PUT", "/api/v2/mail", b),
+  testMail: (b: MailForm) => req<{ ok: boolean; to: string[] }>("POST", "/api/v2/mail/test", b),
+  sendSummary: (runId: number) => req<{ ok: boolean; to: number; subject: string; report_note: string }>("POST", `/api/v2/runs/${runId}/send-summary`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
   presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
     description: string; target_rps: number; max_rps: number; estimate: { minutes: number; pages: number } | null }[] }>("GET", `/api/v2/sites/${sid}/presets`),
@@ -267,3 +271,8 @@ export interface ExploreSchema { views: { name: string; columns: string[] }[]; t
   examples: { name: string; sql: string }[]; limits: { timeout_s: number; page_max: number; export_max_rows: number } }
 export interface ExploreResult { columns: string[]; rows: (string | number | null)[][]; total: number | null; has_more: boolean;
   offset: number; limit: number; elapsed_ms: number }
+export interface MailForm { enabled: boolean; host: string; port: number; security: "starttls" | "ssl" | "none"; username: string;
+  password?: string | null; sender: string; recipients: string[]; attach_report: boolean }
+export interface MailSettings extends Partial<MailForm> { enabled: boolean; can_edit: boolean; password_set?: boolean;
+  secret_key_set?: boolean; max_attach_mb?: number;
+  last_result: { ok?: boolean; error?: string; at?: string; run_id?: number; to?: number; report?: string } }

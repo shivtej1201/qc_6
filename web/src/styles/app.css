@@ -586,3 +586,15 @@ ul.plain li { overflow-wrap: anywhere; }
 .link-btn:hover { text-decoration: underline; }
 @media (max-width: 800px) { .explore { grid-template-columns: 1fr; } .explore-side { max-height: 240px; } }
 .explore-table-item summary .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* Email summary settings */
+.mail-form { display: grid; gap: 14px; max-width: 860px; }
+.mail-form fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 0; }
+.mail-form legend { font-weight: 600; padding: 0 6px; }
+.mail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
+.mail-grid label { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.mail-grid label.wide { grid-column: 1 / -1; }
+.mail-grid input, .mail-grid select, .mail-grid textarea { font-size: 14px; color: var(--ink); }
+.mail-form label.check { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 8px; }
+.switch-row { display: flex; gap: 10px; align-items: flex-start; }
+.switch-row span { display: grid; }
+.switch-row small { color: var(--ink-3); }
