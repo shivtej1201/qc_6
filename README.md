@@ -201,6 +201,14 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   with its text; the Excel report has a **Tickets** sheet.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
+* **Management report** (Download report → Management report, first in the list): the file to present. A
+  **Dashboard** (KPI tiles with the change since the previous check, key findings in plain words, four native Excel
+  charts, next steps), a **Pivot Summary** (status reconciliation, status codes, page type, business, language, page
+  type x status matrix, top 20 failed links, colour legend), **Non-200 Responses** (every link that is not a plain 200,
+  with its impact, sample page, redirect target and reason), **Tickets**, and **Problem Links** (page -> link pairs for
+  the failing links, up to 50,000; all pairs are in the ticket attachments and the CSV ZIP). Healthy links are counted,
+  not listed, and each URL is stored once, so it stays small: 1.3 MB for a 10,000-page check where the full workbook is
+  5.5 MB.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:
   **Summary**, **Ops Ticket** (the same ticket, ready to copy), **Broken Links**, **Broken Images**, **Redirects** and
   **Pages Not OK**, each listing every address, its status in words ("404 Not Found", "301 Moved Permanently -> 200

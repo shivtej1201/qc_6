@@ -137,6 +137,7 @@ export function Spark({ values }: { values: number[] }) {
 export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | null }) {
   const q = run ? `?run=${run}` : "";
   const items: [string, string, string][] = [
+    [`/api/v2/sites/${siteId}/export.report.xlsx${q}`, "Management report (Excel)", "Dashboard with charts, pivot summary, non-200 links, tickets: small, ready to present"],
     [`/api/v2/sites/${siteId}/export.workbook.xlsx${q}`, "Full audit workbook (Excel)", "Executive summary, sitemap progress, business / language / page type, status, issues, broken, redirect, external URLs, QC problems"],
     [`/api/v2/sites/${siteId}/report.pdf`, "PDF summary", "one page for people"],
     [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row: small"],
