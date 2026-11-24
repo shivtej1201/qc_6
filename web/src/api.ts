@@ -20,6 +20,19 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return data as T;
 }
 
+/** POST that answers with a file (CSV): returns the file and how many rows it holds. */
+export async function postForFile(path: string, body: unknown): Promise<{ blob: Blob; rows: number }> {
+  const headers: Record<string, string> = { "X-QC-Requested-With": "qc6", "Content-Type": "application/json" };
+  const user = localStorageGet("qc6-user");
+  if (user) headers["X-QC-User"] = user;
+  const r = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const d = (r.headers.get("content-type") || "").includes("json") ? await r.json() : {};
+    throw new ApiError(r.status, d.title || `Request failed (${r.status})`, d.detail || "", d);
+  }
+  return { blob: await r.blob(), rows: Number(r.headers.get("X-Row-Count") || 0) };
+}
+
 export function localStorageGet(k: string): string | null {
   try { return window.localStorage.getItem(k); } catch { return null; }
 }
@@ -236,6 +249,12 @@ export const api = {
   facts: (runId: number, dataset: string, params: Record<string, string | number>) =>
     req<{ total: number; rows: any[]; summary: { rows: number; unique_urls: number; broken: number; redirects: number } }>(
       "GET", `/api/v2/runs/${runId}/facts/${dataset}?${new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]))}`),
+  exploreSchema: (runId: number) => req<ExploreSchema>("GET", `/api/v2/runs/${runId}/explore/schema`),
+  explore: (runId: number, sql: string, offset = 0, limit = 100) => req<ExploreResult>("POST", `/api/v2/runs/${runId}/explore`, { sql, offset, limit }),
+  mail: () => req<MailSettings>("GET", "/api/v2/mail"),
+  saveMail: (b: MailForm) => req<MailSettings>("PUT", "/api/v2/mail", b),
+  testMail: (b: MailForm) => req<{ ok: boolean; to: string[] }>("POST", "/api/v2/mail/test", b),
+  sendSummary: (runId: number) => req<{ ok: boolean; to: number; subject: string; report_note: string }>("POST", `/api/v2/runs/${runId}/send-summary`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
   presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
     description: string; target_rps: number; max_rps: number; estimate: { minutes: number; pages: number } | null }[] }>("GET", `/api/v2/sites/${sid}/presets`),
@@ -247,3 +266,13 @@ export const api = {
   createTicket: (fixId: number) => req<{ url: string; key: string }>("POST", `/api/v2/fixes/${fixId}/ticket`),
   syncTickets: (sid: number) => req<{ moved_to_waiting: number }>("POST", `/api/v2/sites/${sid}/tickets/sync`),
 };
+
+export interface ExploreSchema { views: { name: string; columns: string[] }[]; tables: { name: string; columns: string[] }[];
+  examples: { name: string; sql: string }[]; limits: { timeout_s: number; page_max: number; export_max_rows: number } }
+export interface ExploreResult { columns: string[]; rows: (string | number | null)[][]; total: number | null; has_more: boolean;
+  offset: number; limit: number; elapsed_ms: number }
+export interface MailForm { enabled: boolean; host: string; port: number; security: "starttls" | "ssl" | "none"; username: string;
+  password?: string | null; sender: string; recipients: string[]; attach_report: boolean }
+export interface MailSettings extends Partial<MailForm> { enabled: boolean; can_edit: boolean; password_set?: boolean;
+  secret_key_set?: boolean; max_attach_mb?: number;
+  last_result: { ok?: boolean; error?: string; at?: string; run_id?: number; to?: number; report?: string } }

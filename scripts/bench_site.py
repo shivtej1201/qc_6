@@ -20,6 +20,7 @@ import random
 
 N = 10000
 PORT = 8900
+SLOW = (0.06, 0.14)          # page / HTML answer time, seconds (--slow 3,6 for a site like a busy production CDN)
 
 
 def page(i: int, host: str) -> bytes:
@@ -71,9 +72,9 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                         + "".join(f"<url><loc>http://{host}/p/{i}</loc></url>" for i in range(N)) + "</urlset>").encode()
                 ctype = "application/xml"
             elif path.startswith("/p/") and path[3:].isdigit() and int(path[3:]) < N:
-                body, delay = page(int(path[3:]), host), random.uniform(0.06, 0.14)
+                body, delay = page(int(path[3:]), host), random.uniform(*SLOW)
             elif path == "/" or path.startswith("/c/") or path.startswith("/ref/"):
-                body, delay = b"<!doctype html><html><head><title>Listing</title></head><body><h1>Listing</h1></body></html>", random.uniform(0.06, 0.14)
+                body, delay = b"<!doctype html><html><head><title>Listing</title></head><body><h1>Listing</h1></body></html>", random.uniform(*SLOW)
             elif path.startswith("/old/"):
                 status, extra = 301, f"Location: /p/{int(path[5:] or 0) * 37 % N}\r\n"
             elif path.startswith(("/static/", "/fonts/")):
@@ -107,6 +108,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--pages", type=int, default=N)
     ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--slow", default="", help="page answer time range in seconds, e.g. 3,6")
     a = ap.parse_args()
     N, PORT = a.pages, a.port
+    if a.slow:
+        lo, hi = (float(x) for x in a.slow.split(","))
+        SLOW = (lo, hi)
     asyncio.run(main())

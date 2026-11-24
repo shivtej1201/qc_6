@@ -373,6 +373,11 @@ async def after_run_hooks(pool, run_id: int, site: Dict[str, Any], summary: Dict
         await alerts.after_run(pool, run_id, site, summary)
     except Exception:
         log.warning("after-run hooks failed for run %s: %s", run_id, traceback.format_exc())
+    try:                                    # crawl summary e-mail with the Management report (only when turned on)
+        from qc6 import mailer
+        await mailer.after_run(pool, run_id, site)
+    except Exception:
+        log.warning("summary e-mail after run %s failed: %s", run_id, traceback.format_exc())
     try:                                    # fresh Search Console / GA4 numbers for the opportunity score
         from qc6 import search_console as sc
         if sc.configured(site)["ready"]:

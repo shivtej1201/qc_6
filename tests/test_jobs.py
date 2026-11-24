@@ -81,6 +81,24 @@ def test_sitemap_to_report(env):
     assert rep.status_code == 200 and "QC site quality report" in rep.text[:100] and "High problems" in rep.text
     assert any(x["id"] == j["id"] for x in c.get("/api/v2/lists").json()["jobs"])
 
+    # Data explorer: read-only SQL on the check's own crawl database
+    sch = c.get(f"/api/v2/runs/{rid}/explore/schema").json()
+    assert {"pages", "links", "url_status", "images", "issues"} <= {v["name"] for v in sch["views"]}
+    assert "url_results" in {t["name"] for t in sch["tables"]} and sch["examples"]
+    q = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT url, http_status FROM pages ORDER BY url;", "limit": 25}, headers=H).json()
+    assert q["columns"] == ["url", "http_status"] and len(q["rows"]) == 25 and q["total"] == 90 and q["has_more"]
+    q2 = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT url FROM pages ORDER BY url", "offset": 75, "limit": 25}, headers=H).json()
+    assert len(q2["rows"]) == 15 and not q2["has_more"] and q2["total"] == 90
+    for bad in ("DELETE FROM url_results", "UPDATE on_page_source_pages SET http_status = 1", "SELECT 1; DROP TABLE jobs",
+                "ATTACH DATABASE '/tmp/x.db' AS x", "SELECT load_extension('x')", "SELECT * FROM pragma_table_info('jobs')",
+                "SELECT * FROM no_such_table", ""):
+        r = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": bad or " "}, headers=H)
+        assert r.status_code in (400, 422), (bad, r.text)
+    assert c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT COUNT(*) FROM pages"}, headers=H).json()["rows"] == [[90]]
+    csv_r = c.post(f"/api/v2/runs/{rid}/explore.csv", json={"sql": "SELECT url FROM pages"}, headers=H)
+    assert csv_r.status_code == 200 and csv_r.headers["x-row-count"] == "90" and csv_r.text.count("\n") == 91
+    assert c.post("/api/v2/runs/999999/explore", json={"sql": "SELECT 1"}, headers=H).status_code == 404
+
 
 def test_single_url_and_sheet(env):
     c, site, dsn = env
@@ -348,6 +366,32 @@ def test_full_workbook_like_the_v5_sample(env):
     assert t["qc"]["broken_links"]["unique"] >= 1 and t["qc"]["pages"]["checked"] == 90
     assert t["ticket"]["priority"] and "/gone" in t["ticket"]["text"] and "STEPS TO REPRODUCE" in t["ticket"]["text"]
     assert c.get("/api/v2/runs/999999/ops-ticket").status_code == 404
+    # Management report: small, ready to present; healthy links summarised, not listed
+    mr = c.get(f"/api/v2/sites/{j['site_id']}/export.report.xlsx?run={rid}")
+    assert mr.status_code == 200, mr.text
+    assert "qc-management-report-" in mr.headers["content-disposition"]
+    assert len(mr.content) < len(r.content)
+    import zipfile as _zf
+    charts = [n for n in _zf.ZipFile(io.BytesIO(mr.content)).namelist() if n.startswith("xl/charts/chart")]
+    assert len(charts) >= 3, charts                                           # native Excel charts on the dashboard
+    mwb = openpyxl.load_workbook(io.BytesIO(mr.content), read_only=True)
+    assert mwb.sheetnames[:5] == ["Dashboard", "Pivot Summary", "Non-200 Responses", "Tickets", "Problem Links"], mwb.sheetnames
+    mrows = lambda n: [list(x) for x in mwb[n].iter_rows(values_only=True)]                       # noqa: E731
+    dash = [str(v) for row in mrows("Dashboard") for v in row if v is not None]
+    assert any(v.startswith("Website quality report") for v in dash) and "BROKEN LINKS" in dash and "Key findings" in dash
+    piv = [str(row[0]) for row in mrows("Pivot Summary") if row and row[0]]
+    for sec in ("A. OVERALL STATUS", "B. HTTP STATUS CODES", "C. SOURCE PAGE TYPE", "D. BUSINESS", "E. LANGUAGE",
+                "F. PAGE TYPE x STATUS", "G. HIGHEST-IMPACT", "H. STATUS COLOUR LEGEND"):
+        assert any(x.startswith(sec) for x in piv), sec
+    n2 = mrows("Non-200 Responses")
+    assert n2[0][:5] == ["Sr.no", "Destination URL", "First status", "Final status", "Status category"]
+    gone_row = next(x for x in n2[1:] if x[1].endswith("/gone"))
+    assert gone_row[3] == 404 and gone_row[4] == "Client error (4xx)" and gone_row[6] >= 1 and gone_row[7].startswith(site.base)
+    assert all(x[4] != "OK (2xx)" for x in n2[1:])
+    pl = mrows("Problem Links")
+    assert len(pl) > 1 and all(x[10] != "OK (2xx)" for x in pl[1:] if x[0] is not None and isinstance(x[0], int))
+    tk_rows = mrows("Tickets")
+    assert tk_rows[0][:4] == ["Ticket", "Priority", "Severity", "Issue"] and any(str(x[0]).startswith("QC-") for x in tk_rows[1:])
     # Tickets tab: one ticket per issue type, every URL in its attachment
     assert "Tickets" in names
     tk = rows("Tickets")
@@ -519,3 +563,98 @@ def test_clear_all_data(env):
     n, audit, members = asyncio.run(left())
     assert all(v == 0 for v in n.values()), n
     assert audit == 1 and members >= 1
+
+
+def test_summary_email_after_check(env, monkeypatch):
+    """SMTP settings (password sealed, never returned), test e-mail, and the crawl summary with the Management report
+    attached, sent by itself when a check completes."""
+    from smtp_sink import SmtpSink
+    import zipfile
+    c, site, dsn = env
+    monkeypatch.setenv("QC6_SECRET_KEY", "test-secret-key-for-mail")
+    sink = SmtpSink()
+    try:
+        form = {"enabled": True, "host": "127.0.0.1", "port": sink.port, "security": "none", "username": "qc-bot",
+                "password": "s3cret!", "sender": "qc@example.test", "recipients": ["lead@example.test", "seo@example.test"],
+                "attach_report": True}
+        bad = c.put("/api/v2/mail", json={**form, "sender": "qc@example.test\r\nBcc: x@y.z"}, headers=H)
+        assert bad.status_code == 400 and "line breaks" in bad.json()["detail"]
+        assert c.put("/api/v2/mail", json={**form, "recipients": ["not-an-address"]}, headers=H).status_code == 400
+        saved = c.put("/api/v2/mail", json=form, headers=H)
+        assert saved.status_code == 200, saved.text
+        got = c.get("/api/v2/mail").json()
+        assert got["password_set"] and "password" not in got and "s3cret" not in str(got)
+        assert got["recipients"] == ["lead@example.test", "seo@example.test"]
+
+        async def sealed():
+            pool = await _pool(dsn)
+            v = await pool.fetchval("SELECT password_sealed FROM mail_settings")
+            await pool.close()
+            return v
+        assert asyncio.run(sealed()).startswith("v2:") and "s3cret" not in asyncio.run(sealed())
+
+        # keep the saved password when the form leaves it empty; a wrong one is refused with a plain message
+        t = c.post("/api/v2/mail/test", json={**form, "password": None}, headers=H)
+        assert t.status_code == 200, t.text
+        assert sink.messages[-1]["msg"]["Subject"] == "[QC] Test e-mail" and sink.messages[-1]["auth"] == ("qc-bot", "s3cret!")
+        wrong = c.post("/api/v2/mail/test", json={**form, "password": "nope"}, headers=H)
+        assert wrong.status_code == 502 and "username or password" in wrong.json()["detail"]
+
+        # a check finishes -> the summary arrives by itself, report attached
+        j = _wait_list(c, c.post("/api/v2/lists", json={"source": "sitemap", "url": site.base + "/sitemap.xml"}, headers=H).json()["id"])
+        rid = c.post(f"/api/v2/lists/{j['id']}/start", json={}, headers=H).json()["run_id"]
+        n0 = len(sink.messages)
+
+        async def run():
+            pool = await _pool(dsn)
+            await pool.execute("UPDATE sites SET settings = settings || '{\"rate_rps\": 40}'::jsonb")
+            await execute_run(pool, rid)
+            await pool.close()
+        asyncio.run(run())
+        assert len(sink.messages) == n0 + 1
+        m = sink.messages[-1]
+        assert m["to"] == ["lead@example.test", "seo@example.test"] and m["from"] == "qc@example.test"
+        msg = m["msg"]
+        assert f"check {rid}" in msg["Subject"] and "broken links" in msg["Subject"]
+        text = msg.get_body(preferencelist=("plain",)).get_content()
+        for want in ("Crawl job ID", "Sitemap / source", "Total URLs submitted", "URLs crawled", "Successfully processed",
+                     "Failed", "200 OK", "3xx", "4xx", "5xx", "DNS failures", "Timeout failures", "Redirects",
+                     "Duplicate URLs skipped", "Total extracted URLs", "Total unique URLs", "Total images extracted",
+                     "Started", "Finished", "Total processing time", "Report generation", "Ticket processing",
+                     "Generated and attached", "sitemap.xml"):
+            assert want in text, want
+        assert "Total URLs submitted: 90" in text
+        atts = list(msg.iter_attachments())
+        assert len(atts) == 1 and atts[0].get_filename().endswith(f"check{rid}.xlsx")
+        z = zipfile.ZipFile(io.BytesIO(atts[0].get_content()))
+        assert "xl/workbook.xml" in z.namelist() and z.testzip() is None
+        assert c.get("/api/v2/mail").json()["last_result"]["ok"] is True
+
+        # send again by hand; e-mail off -> nothing after the next check
+        again = c.post(f"/api/v2/runs/{rid}/send-summary", headers=H)
+        assert again.status_code == 200 and again.json()["ok"] and len(sink.messages) == n0 + 2
+        c.put("/api/v2/mail", json={**form, "enabled": False, "password": None}, headers=H)
+        async def hook():
+            pool = await _pool(dsn)
+            from qc6 import mailer
+            await mailer.after_run(pool, rid, dict(await pool.fetchrow("SELECT * FROM sites LIMIT 1")))
+            await pool.close()
+        asyncio.run(hook())
+        assert len(sink.messages) == n0 + 2
+    finally:
+        sink.close()
+
+
+def test_mail_report_verification(tmp_path):
+    from qc6 import mailer
+    import zipfile
+    assert mailer.verify_xlsx(None)[0] is False
+    assert mailer.verify_xlsx(str(tmp_path / "missing.xlsx"))[0] is False
+    (tmp_path / "empty.xlsx").write_bytes(b"")
+    assert mailer.verify_xlsx(str(tmp_path / "empty.xlsx")) == (False, "the report file is empty")
+    (tmp_path / "half.xlsx").write_bytes(b"PK\x03\x04 cut short")
+    assert "complete" in mailer.verify_xlsx(str(tmp_path / "half.xlsx"))[1]
+    with zipfile.ZipFile(tmp_path / "ok.xlsx", "w") as z:
+        z.writestr("xl/workbook.xml", "<workbook/>")
+    assert mailer.verify_xlsx(str(tmp_path / "ok.xlsx")) == (True, "")
+    assert mailer._fmt(125000) == "1,25,000" and mailer._fmt(999) == "999"

@@ -201,6 +201,14 @@ check left "pausing" by a closed worker becomes "paused" by itself instead of bl
   with its text; the Excel report has a **Tickets** sheet.
 * **What is checked:** the pages in the list, and every link and every image on them. CSS, JavaScript, fonts,
   preloads and source maps are not checked (not recorded, not requested), so the requests go to what matters.
+* **Management report** (Download report → Management report, first in the list): the file to present. A
+  **Dashboard** (KPI tiles with the change since the previous check, key findings in plain words, four native Excel
+  charts, next steps), a **Pivot Summary** (status reconciliation, status codes, page type, business, language, page
+  type x status matrix, top 20 failed links, colour legend), **Non-200 Responses** (every link that is not a plain 200,
+  with its impact, sample page, redirect target and reason), **Tickets**, and **Problem Links** (page -> link pairs for
+  the failing links, up to 50,000; all pairs are in the ticket attachments and the CSV ZIP). Healthy links are counted,
+  not listed, and each URL is stored once, so it stays small: 1.3 MB for a 10,000-page check where the full workbook is
+  5.5 MB.
 * **Full audit workbook** (Download report → Full audit workbook) opens with sheets anyone can read in a minute:
   **Summary**, **Ops Ticket** (the same ticket, ready to copy), **Broken Links**, **Broken Images**, **Redirects** and
   **Pages Not OK**, each listing every address, its status in words ("404 Not Found", "301 Moved Permanently -> 200
@@ -252,6 +260,52 @@ grouping 6 s. The Tickets screen lists in 0.1 s; an attachment with 40,000 rows 
   (the answer says how many couldn't be read).
 * **No duplicate Ops tickets**: creating a ticket first claims the fix in one atomic update, so a double click or two
   people at once get "already being created" instead of a second ticket.
+## Data explorer (SQL on the crawl data)
+
+**Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):
+results table, row count, time taken, pages of 50-500 rows, CSV export (up to 10 lakh rows), example queries and every
+table and column one click away. Ready-made views: `pages`, `links` (each link with its target's status), `url_status`
+(each unique address, checked once, with `reuse_count`), `images`, `issues`; the raw engine tables (`url_results`,
+`on_page_validation_cache`, ...) work too, e.g. `SELECT * FROM url_results WHERE final_status_code = 404`.
+
+Safe and light: the file is opened read-only and SQLite itself refuses anything but reading (no INSERT/UPDATE/DELETE,
+ATTACH, PRAGMA, extensions); one statement at a time; 30 s time limit; at most 3 queries at once. The database is in
+WAL mode, so a query never blocks a running check. Every query is written to the audit log.
+## Speed on slow sites and honest network remarks
+
+* **Requests in flight follow the site's answer time.** Each host's limit is sized as agreed rate x answer time
+  (Little's law), so a site that takes 3-6 s per page still gets its full agreed rate instead of about 5 pages a second.
+  The rate itself (req/s, Crawl-delay, slow-down on 429/5xx) is unchanged: a slow site is not hit harder.
+* **Network failures are retried, then checked a second time.** Connection, DNS and timeout errors are retried at least
+  twice with back-off. At the end of the crawl every link or image that still failed for a network reason (or a 502-504)
+  is checked again, calmly (8 at a time, longer timeouts). The remark then says *worked on a second check* (with the
+  first error) or *confirmed on a second check*. A busy moment no longer shows a working URL as "DNS / network issue".
+* **Precise remarks**: DNS temporary failure vs host name not found, connection timeout vs response timeout, connection
+  refused, connection reset, SSL certificate vs handshake. When QC's own connection pool is full, the request waits and
+  is not counted against the website.
+
+## Email summary after every check (SMTP)
+
+**Email summary** (URL QC menu, owners only) holds the workspace's SMTP settings: host, port, security (STARTTLS,
+SSL/TLS or none for a local relay), username, password, sender, recipients (up to 20), on/off, and whether to attach
+the Management report. **Send test e-mail** tries the settings before you save them.
+
+When a check completes (not single-URL / spot checks), QC e-mails a summary:
+* **Check:** crawl job ID, sitemap / source, start, finish, total time, and an overall status (completed successfully /
+  with problems / failed, with what needs attention).
+* **Pages:** URLs submitted, duplicates removed from the input, crawled, processed, failed, 200 / 3xx / 4xx / 5xx, no answer.
+* **Links:** extracted page-to-URL pairs, unique URLs, duplicate URLs skipped (result reused), 200 / 3xx / 4xx / 5xx,
+  DNS / network, timeout and SSL failures, blocked, and links that worked on a second check.
+* **Images, report generation status and ticket processing status.**
+
+The Management report is built, then **verified** (file exists, not empty, a complete .xlsx with no damaged parts)
+before it is attached. If it is over `QC6_MAIL_MAX_ATTACH_MB` (default 20 MB) the e-mail says so and goes without it.
+A temporary SMTP error is retried once. The outcome goes on the check's timeline, and the screen shows the last one.
+**Send the summary of check N now** re-sends any check.
+
+Security: the password is encrypted with `QC6_SECRET_KEY` (AES-256-GCM) and never sent to the browser (the screen
+only shows that one is saved). Line breaks are refused in every field (no header injection). Only owners can change
+or test the settings. Changes are written to the audit log.
 
 ## AI drafts (free, on your own machine)
 
@@ -317,6 +371,7 @@ checks (FEAT-08-02).
 | Full, 2,000 pages | 224 s: coverage, then 25 real-browser visits at human pace (6 visitors), then journeys |
 | **10,000 pages at the default speed (Standard, 12 req/s)**, `scripts/bench_site.py` | **15 min 53 s** end to end (sitemap to report): 429,970 links, 60,000 images, 10,651 unique URLs and 2,000 unique images each checked once (100 x 301 -> 200, 50 x 404 found and placed on their pages); full workbook 11 s |
 | Large site speed (16 -> 18 req/s), same stand-in site | held 16.0 req/s steady, no slow-downs; 3 lakh pages at that rate is about 5¾ h (Standard: about 7½ h) |
+| **Slow site (every page 3-6 s), 1,000 pages, Standard 12 req/s**, `scripts/bench_site.py --slow 3,6` | before: 5 min 12 s (3.2 pages/s, 7.3 of 12 req/s used); now: **2 min 55 s** (11.7 of 12 req/s), identical results (42,970 links, 6,000 images, 7,196 findings) |
 | V5 engine alone, 300,000 pages | 3 h 22 min end to end (V5 benchmark) |
 
 ## Status against the delivery plan (blueprint §16)
