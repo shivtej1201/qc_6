@@ -13,6 +13,7 @@ import { PagesView } from "./views/Pages";
 import { LiveView } from "./views/Live";
 import { FixesView } from "./views/Fixes";
 import { TicketsView } from "./views/Tickets";
+import { DataView } from "./views/Data";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
 import { LinksView } from "./views/Links";
@@ -33,7 +34,8 @@ export function go(view: string, params: Record<string, string | number> = {}) {
 const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, string, string][] }[] = [
   { label: "URL QC", items: [["start", "play", "New check", "start crawl sitemap upload sheet url jobs results ticket"], ["fixes", "fix", "Problems", "issues problems fixes inbox"],
     ["tickets", "page", "Tickets", "ticket raise ops jira template internal"],
-    ["links", "link", "Links & images", "broken redirects images"]] },
+    ["links", "link", "Links & images", "broken redirects images"],
+    ["data", "database", "Data explorer", "sql query database explore table url_results debug"]] },
   { label: "More tools", more: true, items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
     ["growth", "growth", "Growth", "opportunities search console queries"], ["pages", "layers", "All pages", "inventory urls compare"],
     ["journeys", "journey", "Journeys", "flows paths"], ["live", "live", "Live run", "check running progress"]] },
@@ -111,7 +113,7 @@ function App({ local }: { local: boolean }) {
     const p = { site, params: route.params };
     body = {
       today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, tickets: <TicketsView {...p} />, page: <PageView {...p} />,
-      journeys: <JourneysView {...p} />, links: <LinksView {...p} />,
+      journeys: <JourneysView {...p} />, links: <LinksView {...p} />, data: <DataView {...p} />,
     }[route.view] || <TodayView {...p} />;
   }
 

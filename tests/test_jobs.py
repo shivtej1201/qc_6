@@ -81,6 +81,24 @@ def test_sitemap_to_report(env):
     assert rep.status_code == 200 and "QC site quality report" in rep.text[:100] and "High problems" in rep.text
     assert any(x["id"] == j["id"] for x in c.get("/api/v2/lists").json()["jobs"])
 
+    # Data explorer: read-only SQL on the check's own crawl database
+    sch = c.get(f"/api/v2/runs/{rid}/explore/schema").json()
+    assert {"pages", "links", "url_status", "images", "issues"} <= {v["name"] for v in sch["views"]}
+    assert "url_results" in {t["name"] for t in sch["tables"]} and sch["examples"]
+    q = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT url, http_status FROM pages ORDER BY url;", "limit": 25}, headers=H).json()
+    assert q["columns"] == ["url", "http_status"] and len(q["rows"]) == 25 and q["total"] == 90 and q["has_more"]
+    q2 = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT url FROM pages ORDER BY url", "offset": 75, "limit": 25}, headers=H).json()
+    assert len(q2["rows"]) == 15 and not q2["has_more"] and q2["total"] == 90
+    for bad in ("DELETE FROM url_results", "UPDATE on_page_source_pages SET http_status = 1", "SELECT 1; DROP TABLE jobs",
+                "ATTACH DATABASE '/tmp/x.db' AS x", "SELECT load_extension('x')", "SELECT * FROM pragma_table_info('jobs')",
+                "SELECT * FROM no_such_table", ""):
+        r = c.post(f"/api/v2/runs/{rid}/explore", json={"sql": bad or " "}, headers=H)
+        assert r.status_code in (400, 422), (bad, r.text)
+    assert c.post(f"/api/v2/runs/{rid}/explore", json={"sql": "SELECT COUNT(*) FROM pages"}, headers=H).json()["rows"] == [[90]]
+    csv_r = c.post(f"/api/v2/runs/{rid}/explore.csv", json={"sql": "SELECT url FROM pages"}, headers=H)
+    assert csv_r.status_code == 200 and csv_r.headers["x-row-count"] == "90" and csv_r.text.count("\n") == 91
+    assert c.post("/api/v2/runs/999999/explore", json={"sql": "SELECT 1"}, headers=H).status_code == 404
+
 
 def test_single_url_and_sheet(env):
     c, site, dsn = env
