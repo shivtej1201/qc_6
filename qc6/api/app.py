@@ -602,6 +602,11 @@ async def create_ticket(fix_id: int, request: Request, me=Depends(current_member
         raise problem(404, "Fix not found")
     if f["ticket_url"]:
         raise problem(409, "This fix already has a ticket", f["ticket_url"])
+    # claim the fix first (one atomic UPDATE): a double click or two people at once can't create two tickets
+    claimed = await pool.fetchval("UPDATE fixes SET ticket_key = 'creating' WHERE id = $1 AND ticket_key IS NULL "
+                                  "AND ticket_url IS NULL RETURNING id", fix_id)
+    if not claimed:
+        raise problem(409, "A ticket for this fix is already being created", "Refresh in a moment to see it.")
     s = dict(await pool.fetchrow("SELECT * FROM sites WHERE id = $1", f["site_id"]))
     pages = [r["page_url"] for r in await pool.fetch("SELECT DISTINCT page_url FROM findings WHERE fix_id = $1 AND run_id = $2 LIMIT 10",
                                                      fix_id, f["last_seen_run"])]
@@ -609,10 +614,14 @@ async def create_ticket(fix_id: int, request: Request, me=Depends(current_member
     link = str(request.base_url).rstrip("/") + f"/#/fixes?fix={fix_id}"
     try:
         t = await tickets.create((s["settings"] or {}).get("tickets") or {}, dict(f), s, pages, link)
-    except ValueError as e:
-        raise problem(400, "The ticket wasn't created", str(e))
-    except httpx.HTTPError as e:
+    except (ValueError, httpx.HTTPError) as e:
+        await pool.execute("UPDATE fixes SET ticket_key = NULL WHERE id = $1 AND ticket_key = 'creating'", fix_id)
+        if isinstance(e, ValueError):
+            raise problem(400, "The ticket wasn't created", str(e))
         raise problem(502, "The ticket service didn't answer", type(e).__name__)
+    except BaseException:
+        await pool.execute("UPDATE fixes SET ticket_key = NULL WHERE id = $1 AND ticket_key = 'creating'", fix_id)
+        raise
     await pool.execute("UPDATE fixes SET ticket_key = $2 WHERE id = $1", fix_id, t["key"])
     await services.update_fix(pool, fix_id, me["id"], ticket_url=t["url"])
     return t
@@ -725,15 +734,17 @@ async def sync_tickets(site_id: int, me=Depends(current_member)):
     s = await site_for(site_id, me)
     pool = await get_pool()
     from qc6 import tickets
+    rows = await pool.fetch("SELECT id, status, ticket_key FROM fixes WHERE site_id = $1 AND ticket_key IS NOT NULL "
+                            "AND ticket_key <> 'creating' AND status IN ('open','in_progress')", site_id)
+    st = await tickets.states((s["settings"] or {}).get("tickets") or {}, [f["ticket_key"] for f in rows])
     moved = 0
-    for f in await pool.fetch("SELECT id, status, ticket_key FROM fixes WHERE site_id = $1 AND ticket_key IS NOT NULL "
-                              "AND status IN ('open','in_progress')", site_id):
-        st = await tickets.state((s["settings"] or {}).get("tickets") or {}, f["ticket_key"])
-        if st == "done":
+    for f in rows:
+        if st.get(f["ticket_key"]) == "done":
             await services.update_fix(pool, f["id"], me["id"], status="fixed_pending_check",
                                       comment=f"Ticket {f['ticket_key']} was closed.")
             moved += 1
-    return {"moved_to_waiting": moved}
+    unread = sum(1 for k in set(f["ticket_key"] for f in rows) if st.get(k) is None)
+    return {"moved_to_waiting": moved, "checked": len(st), "unread": unread}
 
 
 # ------------------------------------------------------------------ runs + live stream

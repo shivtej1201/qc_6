@@ -228,3 +228,37 @@ def test_visual_changes_between_checks(pg_pool, tmp_path, monkeypatch):
     out, stored = asyncio.run(go())
     assert stored == 6
     assert [x["template"] for x in out] == ["Product pages"] and out[0]["changed"] > 0.5
+
+
+def test_ticket_sync_many_at_once_tolerates_failures():
+    seen, active, peak = [], [0], [0]
+    flaky = {"7": 0}
+
+    async def handler(req: httpx.Request):
+        n = req.url.path.rsplit("/", 1)[-1]
+        seen.append(n)
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        await asyncio.sleep(0.05)
+        active[0] -= 1
+        if n == "13":
+            raise httpx.ConnectError("down", request=req)
+        if n == "7" and flaky["7"] == 0:              # a 503 once, then fine: retried
+            flaky["7"] += 1
+            return httpx.Response(503)
+        return httpx.Response(200, json={"state": "closed" if int(n) % 2 else "open"})
+    tickets.set_transport(httpx.MockTransport(handler))
+    os.environ["QC6_GITHUB_TOKEN"] = "ghp_test"
+    try:
+        keys = [f"#{i}" for i in range(1, 41)] + ["#3", "#3"]           # duplicates are read once
+        import time as _t
+        t0 = _t.perf_counter()
+        st = asyncio.run(tickets.states({"provider": "github", "repo": "acme/web"}, keys))
+        took = _t.perf_counter() - t0
+    finally:
+        tickets.set_transport(None)
+        os.environ.pop("QC6_GITHUB_TOKEN", None)
+    assert len(st) == 40 and seen.count("3") == 1
+    assert st["#13"] is None and st["#7"] == "done" and st["#2"] == "open"
+    assert 1 < peak[0] <= tickets.SYNC_CONCURRENCY
+    assert took < 1.5                                   # 40 x 50 ms one by one would be 2 s+

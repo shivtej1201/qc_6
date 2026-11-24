@@ -111,6 +111,23 @@ def _safe(v: Any) -> Any:
     return "" if v is None else v
 
 
+_BAD_FIRST = frozenset(("=", "+", "-", "@", "\t", "\r"))
+
+
+def _safe_rows(rows) -> List[Any]:
+    """_safe() on every cell, but rows without a risky cell (nearly all) go to the CSV writer untouched (csv writes
+    None as an empty cell already): same bytes, much less work on a 1 lakh-page report."""
+    out = []
+    for row in rows:
+        for v in row:
+            if v.__class__ is str and v and v[0] in _BAD_FIRST:
+                out.append([_safe(x) for x in row])
+                break
+        else:
+            out.append(row)
+    return out
+
+
 def _stream(conn: sqlite3.Connection, path: str, header: List[str], sql: str, args: tuple,
             batch: int = 5000, on_row: Optional[Callable[[Dict[str, Any]], None]] = None) -> int:
     n = 0
@@ -122,7 +139,7 @@ def _stream(conn: sqlite3.Connection, path: str, header: List[str], sql: str, ar
             rows = cur.fetchmany(batch)
             if not rows:
                 break
-            w.writerows([[_safe(v) for v in row] for row in rows])
+            w.writerows(_safe_rows(rows))
             if on_row is not None:
                 for row in rows:
                     on_row(dict(zip(header, row)))
