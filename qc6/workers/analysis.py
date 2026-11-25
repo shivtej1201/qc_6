@@ -32,6 +32,34 @@ async def notify(conn, run_id: int, event: str, **data) -> None:
 MAX_PAGES_PER_FIX = int(os.environ.get("QC6_MAX_PAGES_PER_FIX", "20000"))   # example pages stored per fix per check
 
 
+BOILERPLATE = {"Header", "Footer", "Navigation", "Modal / popup", "Header/Footer"}
+
+
+def _group_of(rows, scope: str, template_names: Dict[int, str]) -> tuple:
+    """(component, template label) of a fix for Template x Component x Issue tickets: the component most of its
+    findings are in; the template of its pages, or 'Site-wide' when a header / footer / navigation link (or any
+    problem) spans several templates."""
+    from collections import Counter
+    from qc6.components import component as comp_of
+    comps = Counter()
+    tpls = Counter()
+    for r in rows:
+        ev = r.evidence if isinstance(r.evidence, dict) else {}
+        comps[ev.get("component") or comp_of(r.rule, subject=r.subject)] += 1
+        tpls[r.template_id] += 1
+    comp = comps.most_common(1)[0][0] if comps else ""
+    if scope == "template" or len(tpls) <= 1:
+        tid = next(iter(tpls)) if tpls else None
+        label = template_names.get(tid, "") if tid is not None else ""
+        return comp, label or "Unclassified pages"
+    if comp in BOILERPLATE:
+        return comp, "Site-wide"
+    top, n = tpls.most_common(1)[0]
+    if n * 2 > sum(tpls.values()) and top is not None:
+        return comp, template_names.get(top, "") or "Unclassified pages"
+    return comp, f"Several templates ({len(tpls)})"
+
+
 async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
                 template_pages: Optional[Dict[int, int]] = None, template_names: Optional[Dict[int, str]] = None,
                 project_templates: bool = False, spot: bool = False) -> Dict[str, int]:
@@ -61,18 +89,24 @@ async def apply(pool, run_id: int, site_id: int, items: Iterable[Item],
                 if project_templates and rule.scope == "template" and it.template_id in template_pages:
                     n = max(n, template_pages[it.template_id])   # caller passes only findings seen on >= half the sample
                 tname = template_names.get(it.template_id, "") if it.template_id is not None else ""
+                comp, ttpl = _group_of(g["rows"], rule.scope, template_names)
                 texts = R.render(it.rule, n_pages=n, template=tname or "matching", example=it.page_url,
                                  **{"subject": it.subject, **it.fields})
                 row = await conn.fetchrow(
                     """INSERT INTO fixes (site_id, fix_key, rule, severity, dimension, scope, template_id, subject, title,
-                                          pages_affected, first_seen_run, last_seen_run, source, texts, example_url)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,$14)
-                       ON CONFLICT (site_id, fix_key) DO UPDATE SET """ + ("""updated_at = fixes.updated_at""" if spot else """
+                                          pages_affected, first_seen_run, last_seen_run, source, texts, example_url,
+                                          component, ticket_template)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,$14,$15,$16)
+                       ON CONFLICT (site_id, fix_key) DO UPDATE SET """ + ("""updated_at = fixes.updated_at,
+                         component = CASE WHEN fixes.component = '' THEN EXCLUDED.component ELSE fixes.component END,
+                         ticket_template = CASE WHEN fixes.ticket_template = '' THEN EXCLUDED.ticket_template ELSE fixes.ticket_template END"""
+                                                                             if spot else """
                          title = EXCLUDED.title, pages_affected = EXCLUDED.pages_affected, last_seen_run = EXCLUDED.last_seen_run,
-                         texts = EXCLUDED.texts, example_url = EXCLUDED.example_url, updated_at = now()""") + """
+                         texts = EXCLUDED.texts, example_url = EXCLUDED.example_url, component = EXCLUDED.component,
+                         ticket_template = EXCLUDED.ticket_template, updated_at = now()""") + """
                        RETURNING id, (xmax = 0) AS inserted""",
                     site_id, key, it.rule, rule.severity, rule.dimension, rule.scope, it.template_id, it.subject,
-                    texts["title"], n, run_id, it.source, texts, it.page_url)
+                    texts["title"], n, run_id, it.source, texts, it.page_url, comp, ttpl)
                 if row["inserted"]:
                     new += 1
                     await conn.execute("INSERT INTO fix_events (fix_id, kind, run_id, detail) VALUES ($1,'found',$2,$3)",

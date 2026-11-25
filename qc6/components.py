@@ -22,6 +22,7 @@ RULE_PREFIX = [
     ("HREFLANG", "Hreflang"), ("OPEN_GRAPH", "Open Graph / social meta"),
     ("STRUCTURED_DATA", "Structured data (schema)"), ("SCHEMA_", "Structured data (schema)"),
     ("PRODUCT_", "Product schema"), ("OFFER_", "Product schema"), ("EMI_", "EMI"),
+    ("BROKEN_LINK", "Links"), ("REDIRECTED_LINK", "Links"), ("BROKEN_IMAGE", "Images"),
     ("NOT_IN_SITEMAP", "Sitemap"), ("NOINDEX_IN_SITEMAP", "Sitemap"), ("SITEMAP_", "Sitemap"),
     ("VIEWPORT", "Page markup"), ("CHARSET", "Page markup"), ("HTML_", "Page markup"),
     ("URL_", "URL format"), ("TRAILING_SLASH", "URL format"),
@@ -34,8 +35,10 @@ RULE_PREFIX = [
 ]
 
 
-def component(rule: str, element_type: str = "", location: str = "") -> str:
+def component(rule: str, element_type: str = "", location: str = "", subject: str = "") -> str:
     rule = (rule or "").upper()
+    if rule.startswith("SCHEMA_") and subject:                       # "Offer.price" -> "Offer schema"
+        return f"{subject.split('.', 1)[0]} schema"
     et = (element_type or "").upper()
     if et in TYPE_COMPONENT:
         return TYPE_COMPONENT[et]

@@ -624,7 +624,7 @@ async def _ticket_texts(pool, site_id: int, keys: List[str]) -> Dict[str, Dict[s
     out: Dict[str, Dict[str, str]] = {}
     if not keys:
         return out
-    rows = await pool.fetch(f"""SELECT DISTINCT ON (gkey) gkey, texts FROM (SELECT {it.group_key_sql()} AS gkey, f.texts, f.pages_affected
+    rows = await pool.fetch(f"""SELECT DISTINCT ON (gkey) gkey, texts FROM (SELECT {it.group_key_sql('f', it.mode_of_key(keys[0]) if keys else 'issue_type')} AS gkey, f.texts, f.pages_affected
                                FROM fixes f WHERE f.site_id = $1) x WHERE gkey = ANY($2::text[]) ORDER BY gkey, pages_affected DESC""",
                             site_id, keys)
     for r in rows:

@@ -159,6 +159,30 @@ def build_files(run_id: int, host: str, templates: Dict[str, str], out_dir: str,
                     a["urls"].add(found)
                 if len(a["ex_urls"]) < EXAMPLES:
                     a["ex_urls"].append(found)
+        if has("qc_schema_checks"):                    # schema + EMI problems (qc6.schema_check), same grouping
+            for page, tmpl, probs, emi, emi_note in c.execute(f"""
+                    SELECT q.page_url, {tpl_sql}, q.problems, q.emi_status, q.emi_note FROM qc_schema_checks q
+                      LEFT JOIN on_page_source_pages s ON s.job_id = q.job_id AND s.source_page_url = q.page_url
+                      LEFT JOIN temp.tpl t ON t.url = q.page_url WHERE q.job_id = ?""", (job,)):
+                entries = []
+                for part in [x for x in (probs or "").split("; ") if x]:
+                    path, _, rest = part.partition(" ")
+                    kind = rest.split(" ", 1)[0]
+                    entries.append(("SCHEMA_FIELD_MISSING" if kind == "missing" else "SCHEMA_VALUE_INVALID",
+                                    f"{path.split('.', 1)[0]} schema", path, "MEDIUM"))
+                if emi in ("missing", "invalid"):
+                    entries.append((f"EMI_{emi.upper()}", "EMI", emi_note or "", "MEDIUM"))
+                for rule, comp, found, sev in entries:
+                    k = (tmpl, comp, rule if not found or rule.startswith("EMI") else f"{rule}:{found}")
+                    a = agg.get(k)
+                    if a is None:
+                        a = agg[k] = {"sev": sev, "cat": "SCHEMA" if rule.startswith("SCHEMA") else "EMI", "pages": set(),
+                                      "occ": 0, "urls": set(), "ex_pages": [], "ex_urls": []}
+                    a["occ"] += 1
+                    if page not in a["pages"]:
+                        a["pages"].add(page)
+                        if len(a["ex_pages"]) < EXAMPLES:
+                            a["ex_pages"].append(page)
         sev_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
         rows = sorted(agg.items(), key=lambda kv: (sev_rank.get(str(kv[1]["sev"]).upper(), 9), -len(kv[1]["pages"])))
         x = _Xlsx(os.path.join(out_dir, "Issue_Summary.xlsx"))
@@ -166,7 +190,8 @@ def build_files(run_id: int, host: str, templates: Dict[str, str], out_dir: str,
             "Template-wise issues", ["Template", "Component", "Issue", "Rule", "Severity", "Category", "Affected pages",
                                      "Occurrences", "Different URLs"] + [f"Example page {i}" for i in range(1, EXAMPLES + 1)]
             + [f"Example URL {i}" for i in range(1, EXAMPLES + 1)],
-            ([k[0], k[1], humanize(k[2]), k[2], v["sev"], v["cat"], len(v["pages"]), v["occ"], len(v["urls"])]
+            ([k[0], k[1], humanize(k[2].split(":")[0]) + (f": {k[2].split(':', 1)[1]}" if ":" in k[2] else ""), k[2], v["sev"],
+              v["cat"], len(v["pages"]), v["occ"], len(v["urls"])]
              + (v["ex_pages"] + [""] * EXAMPLES)[:EXAMPLES] + (v["ex_urls"] + [""] * EXAMPLES)[:EXAMPLES] for k, v in rows),
             [26, 26, 34, 26, 10, 14, 14, 12, 14] + [60] * (2 * EXAMPLES), "No issues found.")
         by_rule: Dict[str, Dict[str, Any]] = {}
@@ -261,6 +286,17 @@ def build_files(run_id: int, host: str, templates: Dict[str, str], out_dir: str,
                 [70, 24] + [18] * len(have))
         else:
             files["Schema_Audit.xlsx"] = x.sheet("Pages", ["Page"], [], [70], "No page facts in this check.")
+        if has("qc_schema_checks"):
+            x.sheet("Schema & EMI", ["Page", "Template", "Schema types", "Product", "Offer", "Price", "Currency",
+                                     "Schema problems", "Problems", "EMI", "EMI found in", "EMI amount", "EMI note"],
+                    c.execute(f"""SELECT q.page_url, {tpl_sql}, q.schema_types, CASE q.product WHEN 1 THEN 'yes' ELSE 'no' END,
+                                         CASE q.offer WHEN 1 THEN 'yes' ELSE 'no' END, q.price, q.currency, q.problem_count,
+                                         q.problems, q.emi_status, q.emi_sources, q.emi_amount, q.emi_note
+                                    FROM qc_schema_checks q LEFT JOIN on_page_source_pages s
+                                      ON s.job_id = q.job_id AND s.source_page_url = q.page_url
+                                    LEFT JOIN temp.tpl t ON t.url = q.page_url WHERE q.job_id = ?
+                                   ORDER BY q.problem_count DESC, q.page_url""", (job,)),
+                    [70, 24, 40, 9, 8, 12, 9, 10, 80, 14, 30, 12, 40])
         x.close()
 
         # ---------------- CSV detail

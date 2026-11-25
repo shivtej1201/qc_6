@@ -708,6 +708,22 @@ async def put_ticket_template(site_id: int, body: TicketTemplateIn, me=Depends(c
     return it.template_of({"ticket_template": {"title": body.title, "body": body.body}})
 
 
+class GroupingIn(BaseModel):
+    mode: str = Field(pattern="^(template_component|issue_type)$")
+
+
+@app.put("/api/v2/sites/{site_id}/ticket-grouping")
+async def put_ticket_grouping(site_id: int, body: GroupingIn, me=Depends(current_member)):
+    """How tickets are grouped: template_component (Template + Component + Issue) or issue_type (one per issue)."""
+    can_edit(me)
+    await site_for(site_id, me)
+    pool = await get_pool()
+    await pool.execute("UPDATE sites SET settings = settings || jsonb_build_object('ticket_grouping', $2::text) WHERE id = $1",
+                       site_id, body.mode)
+    await services.log(pool, me["workspace_id"], me["id"], "ticket_grouping.save", f"site:{site_id}", {"mode": body.mode})
+    return {"mode": body.mode}
+
+
 class RaisedIn(BaseModel):
     ref: str = Field("", max_length=120)
 
