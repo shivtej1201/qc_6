@@ -47,6 +47,8 @@ VIEWS = {
                         c.content_type, c.content_length, c.image_issue
                    FROM on_page_image_relationships r
                    LEFT JOIN on_page_image_validation_cache c ON c.job_id = r.job_id AND c.normalized_url = r.normalized_image_url""",
+    "excluded": """SELECT source_page_url, kind, found_url, normalized_url, url_type, reason, occurrence_count AS occurrences,
+                          location FROM on_page_excluded_urls""",
     "issues": """SELECT rule_code, category, severity, page_url, element_type, found_url, http_status, final_url, detail
                    FROM on_page_issues""",
 }
@@ -58,6 +60,7 @@ EXAMPLES = [
     ("Network / DNS / timeout remarks", "SELECT url, status_bucket, remark\nFROM url_status\nWHERE status_bucket IN ('Timeout', 'DNS/Network', 'SSL')"),
     ("Most reused URLs (checked once)", "SELECT url, reuse_count, http_status\nFROM url_status\nORDER BY reuse_count DESC\nLIMIT 50"),
     ("Images without alt text", "SELECT source_page_url, url\nFROM images\nWHERE alt_present = 0"),
+    ("Excluded URLs by reason", "SELECT reason, kind, COUNT(*) AS urls, SUM(occurrences) AS occurrences\nFROM excluded\nGROUP BY reason, kind\nORDER BY occurrences DESC"),
     ("Issues by rule", "SELECT rule_code, severity, COUNT(*) AS n\nFROM issues\nGROUP BY rule_code, severity\nORDER BY n DESC"),
 ]
 

@@ -4,12 +4,12 @@ import io
 import re
 import time
 import urllib.parse
-import urllib.robotparser
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Set, Any, Optional, Tuple
 import httpx
 
 from qcv5.core.config import settings
+from qcv5.crawler.robots_rules import Robots
 from qcv5.crawler.url_normalizer import URLNormalizer
 from qcv5.crawler.diagnostics_403 import Diagnostics403
 
@@ -26,48 +26,30 @@ class RobotsManager:
         self.http_client = http_client
         self.allow_local = getattr(settings, "ALLOW_LOCAL_TESTING", False) if allow_local is None else allow_local
         self.user_agent = user_agent
-        self.parsers: Dict[str, Optional[urllib.robotparser.RobotFileParser]] = {}
+        self.parsers: Dict[str, Optional[Robots]] = {}
         self.lock = asyncio.Lock()
 
-    async def get_parser(self, url: str) -> Optional[urllib.robotparser.RobotFileParser]:
+    async def get_parser(self, url: str) -> Optional[Robots]:
+        """RFC 9309 rules for the URL's origin; None only when the address isn't allowed at all."""
         parsed = urllib.parse.urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        
         async with self.lock:
             if origin in self.parsers:
                 return self.parsers[origin]
-
             robots_url = f"{origin}/robots.txt"
             if not URLNormalizer.is_safe_url(robots_url, allow_local=self.allow_local):
                 self.parsers[origin] = None
                 return None
-
-            parser = urllib.robotparser.RobotFileParser()
             try:
-                browser_headers = {  # the same identity as every other request (the client's headers + this UA)
-                    "User-Agent": self.user_agent,
-                    "Accept": "text/plain,text/html,*/*"
-                }
-                resp = await self.http_client.get(robots_url, headers=browser_headers, timeout=5.0)
-                if resp.status_code == 200:
-                    parser.parse(resp.text.splitlines())
-                    self.parsers[origin] = parser
-                    return parser
-                elif resp.status_code in [401, 403]:
-                    # Site explicitly forbids robots.txt or access
-                    parser.parse(["User-agent: *", "Disallow: /"])
-                    self.parsers[origin] = parser
-                    return parser
-                else:
-                    # 404 or other non-200 generally implies allow all
-                    parser.parse(["User-agent: *", "Allow: /"])
-                    self.parsers[origin] = parser
-                    return parser
+                headers = {"User-Agent": self.user_agent, "Accept": "text/plain,text/html,*/*"}
+                resp = await self.http_client.get(robots_url, headers=headers, timeout=5.0, follow_redirects=True)
+                # 200: its rules. 4xx (incl. 401/403 from a CDN): no rules (RFC 9309), so sitemaps aren't wrongly
+                # reported as robots-blocked. 5xx / network error: no rules either (QC doesn't guess).
+                rb = Robots(resp.text if resp.status_code == 200 else "")
             except Exception:
-                # Network error or timeout on robots.txt: allow by default or empty
-                parser.parse(["User-agent: *", "Allow: /"])
-                self.parsers[origin] = parser
-                return parser
+                rb = Robots("")
+            self.parsers[origin] = rb
+            return rb
 
     async def is_allowed(self, url: str) -> bool:
         """Check if URL is permitted by target domain's robots.txt."""
@@ -77,7 +59,7 @@ class RobotsManager:
             parser = await self.get_parser(url)
             if not parser:
                 return False
-            return parser.can_fetch(self.user_agent, url)
+            return parser.check(url, "QC-Audit")[0]
         except Exception:
             return True
 
