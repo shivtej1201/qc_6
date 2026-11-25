@@ -172,6 +172,7 @@ DATASETS = {
     "15_seo_page_audit.csv": "SEO facts per 2xx HTML page",
     "16_sitemap_audit.csv": "Health per sitemap file",
     "17_input_exceptions.csv": "Input URLs not crawled as pages (invalid or duplicate) with the reason",
+    "18_excluded_urls.csv": "URLs and images found on pages but not reported (JS, CSS, tag managers, analytics, tracking, invalid) with the reason",
 }
 
 
@@ -730,6 +731,12 @@ def build_on_page_csv_package(
         "line_no", "input_url", "normalized_url", "reason", "duplicate_of",
     ], """SELECT line_no, input_url, normalized_url, reason, duplicate_of FROM on_page_input_exceptions
            WHERE job_id = ? ORDER BY line_no""", J)
+    has_excl = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'on_page_excluded_urls'").fetchone())
+    files["18_excluded_urls.csv"] = _stream(conn, out("18_excluded_urls.csv"), [
+        "source_page_url", "kind", "found_url", "normalized_url", "url_type", "reason", "occurrences", "location",
+    ], """SELECT source_page_url, kind, found_url, normalized_url, url_type, reason, occurrence_count, location
+           FROM on_page_excluded_urls WHERE job_id = ? ORDER BY source_page_url, id""" if has_excl else
+       "SELECT 1, 2, 3, 4, 5, 6, 7, 8 WHERE ? IS NULL", J)
     score = compute_score(conn, job_id, project_id)
     csv_seconds = round(time.time() - t0, 2)
 
@@ -779,7 +786,14 @@ def build_on_page_csv_package(
     manifest: Dict[str, Dict[str, Any]] = {n: _validate_csv(out(n)) for n in sorted(files)}
     manifest_problems = sum(1 for n, m in manifest.items()
                             if m["rows"] != files[n] or m["bad_rows"] or not m["encoding_ok"])
+    # completeness: on every page, URLs found = URLs reported (relationship occurrences) + URLs excluded (with a reason)
+    has_cols = has_excl and "discovered_url_count" in {r[1] for r in conn.execute("PRAGMA table_info(on_page_source_pages)")}
+    pages_not_adding_up = q1("""SELECT COUNT(*) FROM on_page_source_pages s WHERE s.job_id = ? AND s.crawl_state != 'PENDING'
+        AND COALESCE(s.discovered_url_count, 0) > 0 AND s.discovered_url_count != COALESCE(s.excluded_url_occurrences, 0)
+            + COALESCE((SELECT SUM(r.occurrence_count) FROM on_page_link_relationships r
+                        WHERE r.job_id = s.job_id AND r.source_page_url = s.source_page_url), 0)""") if has_cols else 0
     checks: List[Tuple[str, Any, Any]] = [
+        ("every_found_url_is_reported_or_excluded_with_a_reason", 0, pages_not_adding_up),
         ("every_source_page_has_terminal_state", src_total, sum(src.get(k, 0) for k in terminal_src)),
         ("every_http_url_has_terminal_validation_state", 0, url_states.get("PENDING", 0)),
         ("every_image_url_has_terminal_validation_state", 0, img_states.get("PENDING", 0)),

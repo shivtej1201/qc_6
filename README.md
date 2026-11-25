@@ -303,6 +303,36 @@ XLSX) or sitemap files, and URLs added to a list later all go through the same s
 * Only one check per site runs at a time (a second start names the check in the way), so the same URL is never crawled
   by two checks at once.
 
+## What goes in the URL report, and why the rest doesn't
+
+Every URL and image found on a page goes through one classification step (`engine/qcv5/crawler/url_rules.py`)
+before anything is recorded. It is either **reported** (validated, in the URL / image report) or **excluded with a
+reason**: JS, CSS, Font, Preload / resource hint, Google Tag Manager, Analytics, Ads tracking, CleverTap, Tracking
+pixel, Monitoring, Integration resource, Invalid URL, Empty URL.
+
+* Excluded URLs are kept with the page and the reason: `18_excluded_urls.csv` in the report package, and the
+  `excluded` view in the Data explorer.
+* Each page records how many URLs and images it had. The report's trust gate checks, for every page,
+  **found = reported + excluded** (`every_found_url_is_reported_or_excluded_with_a_reason`), so nothing disappears.
+* HTTP and HTTPS URLs are both kept, from links, canonical, hreflang, Open Graph, JSON-LD, iframes, `<img src/srcset>`
+  and `<picture><source>`. `http://` links are reported as such, so they show up as HTTP URL issues.
+* Rules are data: defaults in the file above, plus a JSON file (`QC6_URL_RULES`) or the site's `settings.url_rules`:
+  `exclude_hosts` (host or any subdomain -> reason), `exclude_url_contains`, `include_hosts` (never excluded by host),
+  `exclude_extensions` / `keep_extensions`, `include_technical_resources: true` for a technical-resource audit.
+* **Components:** each URL also records where on the page it was found: Head, Breadcrumb, Navigation, Header, Footer,
+  Pagination, Product listing, Related / recommendations, FAQ, Reviews, Banner / carousel, Sidebar, Modal / popup,
+  Main content.
+
+**robots.txt** is matched as RFC 9309 and Google do (`robots_rules.py`). The longest rule wins and Allow wins a tie;
+`*` and `$` wildcards work; QC's own `QC-Audit` group is used before `*`. A robots.txt that can't be read (4xx,
+including a CDN's 403, 5xx or no answer) blocks nothing. Python's built-in parser, used before, took the first
+matching rule in file order and had no wildcards, so `Disallow: /` then `Allow: /images/` wrongly reported images as
+ROBOTS_BLOCKED. A real block now names the rule and the file, e.g. `'Disallow: /private/' in https://cdn.example.com/robots.txt`.
+
+**Circuit breaker:** when another host fails 8 times in a row (DNS / connection / timeout), its links fail fast for
+60 s instead of each waiting through timeouts and retries. They're all checked again calmly at the end of the crawl,
+so no result is lost. The site's own host is never cut off; it slows down instead.
+
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):

@@ -480,21 +480,47 @@ class Parser(HTMLParser):
         if self.current_on_page_anchor:
             self.current_on_page_anchor['text'] += data
             
+    # Page component of an element, innermost match first (a breadcrumb inside the header is a Breadcrumb):
+    # class / id / role / aria-label / itemtype keywords, then the HTML5 landmark tags.
+    _COMPONENT_WORDS = (
+        ('Breadcrumb', ('breadcrumb',)),
+        ('Pagination', ('pagination', 'pager', 'page-numbers')),
+        ('Modal / popup', ('modal', 'popup', 'dialog')),
+        ('FAQ', ('faq', 'accordion')),
+        ('Reviews', ('review', 'rating', 'testimonial')),
+        ('Related / recommendations', ('related', 'similar', 'recommend', 'you-may', 'also-like', 'crosssell', 'upsell')),
+        ('Product listing', ('product-grid', 'product-list', 'productlist', 'plp', 'listing', 'product-card', 'productcard',
+                             'product-tile', 'search-result')),
+        ('Banner / carousel', ('banner', 'hero', 'carousel', 'slider', 'swiper', 'slick')),
+        ('Navigation', ('megamenu', 'mega-menu', 'navbar', 'nav-menu', 'main-menu', 'menu')),
+        ('Sidebar', ('sidebar', 'side-bar')),
+        ('Footer', ('footer',)),
+        ('Header', ('header', 'masthead', 'topbar')),
+    )
+    _LANDMARK = {'footer': 'Footer', 'header': 'Header', 'nav': 'Navigation', 'aside': 'Sidebar',
+                 'main': 'Main content', 'article': 'Main content', 'dialog': 'Modal / popup'}
+    _BOILERPLATE = frozenset({'Header', 'Footer', 'Navigation', 'Modal / popup', 'Header/Footer'})
+
     def _identify_component(self):
+        landmark = None
         for tag, attrs in reversed(self.path):
-            if tag in self.ignored_elements:
-                return 'Header/Footer'
-            classes = attrs.get('class', '')
-            id_str = attrs.get('id', '')
-            if 'modal' in classes or 'modal' in id_str:
-                return 'Header/Footer'
-        return 'Content Section'
-        
+            hay = ' '.join(str(attrs.get(k) or '') for k in ('class', 'id', 'role', 'aria-label', 'itemtype',
+                                                             'data-component', 'data-section')).lower()
+            if hay:
+                for name, words in self._COMPONENT_WORDS:
+                    if any(w in hay for w in words):
+                        return name
+            if landmark is None and tag in self._LANDMARK:
+                landmark = self._LANDMARK[tag]
+                if landmark != 'Main content':
+                    return landmark
+        return landmark or 'Content Section'
+
     def _identify_container_type(self, comp: str = None):
         # returns 'ignored', 'preferred', or 'body'
         if comp is None:
             comp = self._identify_component()
-        if comp == 'Header/Footer':
+        if comp in self._BOILERPLATE:
             return 'ignored'
         for tag, attrs in self.path:
             if tag in self.preferred_selectors:

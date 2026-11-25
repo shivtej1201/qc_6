@@ -9,7 +9,6 @@ import re
 import sqlite3
 import time
 import urllib.parse
-import urllib.robotparser
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -27,6 +26,8 @@ from qcv5.crawler.safe_net import tls_verify
 from qcv5.audit.seo_audit import SEO_COLUMNS, page_facts as seo_page_facts
 from qcv5.crawler.status_classifier import StatusClassifier
 from qcv5.crawler.url_normalizer import URLNormalizer
+from qcv5.crawler.url_rules import DEFAULT as URL_RULES_DEFAULT, UrlRules
+from qcv5.crawler.robots_rules import Robots
 
 NON_HTTP_SCHEMES = {
     "mailto": "MAILTO",
@@ -202,10 +203,29 @@ def classify_and_normalize_discovered_url(
     }
 
 
+def _exclude(bucket: Dict[Tuple[str, str], Dict[str, Any]], raw: str, resolved: str, url_type: str, reason: str,
+             loc: str) -> None:
+    key = (resolved or raw, reason)
+    rec = bucket.get(key)
+    if rec is None:
+        bucket[key] = {"found_url": raw[:1000], "normalized_url": (resolved or raw)[:1000], "url_type": url_type,
+                       "reason": reason, "occurrence_count": 1, "location": loc or ""}
+    else:
+        rec["occurrence_count"] += 1
+
+
+def _resolve(base: str, href: str) -> str:
+    try:
+        return urllib.parse.urljoin(base, href)
+    except ValueError:
+        return href
+
+
 def extract_on_page_urls(
     source_page_url: str,
     final_source_url: str,
     html: str,
+    rules: Optional[UrlRules] = None,
 ) -> Tuple[int, List[Dict[str, Any]], Parser]:
     """
     Parse HTML with existing QC V5 Parser and return:
@@ -222,9 +242,20 @@ def extract_on_page_urls(
         except Exception:
             pass
 
-    raw_elements = [el for el in parser.get_all_on_page_urls()
-                     if not is_skipped_asset(el.get("href") or "", el.get("url_type", "ANCHOR"))]
-    raw_count = len(raw_elements)
+    rules = rules or URL_RULES_DEFAULT
+    all_elements = parser.get_all_on_page_urls()
+    excluded: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    raw_elements = []
+    for el in all_elements:              # every URL found is reported or excluded with a reason: nothing disappears
+        href = (el.get("href") or "").strip()
+        ut = el.get("url_type", "ANCHOR")
+        resolved = _resolve(parser.final_base_href, href) if href else ""
+        reason = rules.classify(href, ut, resolved) if href else "Empty URL"
+        if reason:
+            _exclude(excluded, href, resolved if resolved.lower().startswith(("http://", "https://")) else "", ut, reason,
+                     el.get("component") or "")
+        else:
+            raw_elements.append(el)
     source_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
 
     # Collapse per normalized destination on this source page
@@ -234,12 +265,11 @@ def extract_on_page_urls(
         if not raw_href:
             continue
         meta = classify_and_normalize_discovered_url(raw_href, parser.final_base_href, source_host)
-        if not meta["valid"]:
+        if not meta["valid"] or not meta["normalized_url"]:
+            _exclude(excluded, raw_href, "", el.get("url_type", "ANCHOR"), "Invalid URL", el.get("component") or "")
             continue
 
         norm_key = meta["normalized_url"]
-        if not norm_key:
-            continue
 
         el_type = el.get("url_type", "ANCHOR")
         anchor_text = " ".join((el.get("text") or "").split())[:250]
@@ -284,6 +314,9 @@ def extract_on_page_urls(
     for rec in out:
         # requested unless EVERY occurrence on this page is a not-requested type (e.g. only a form action)
         rec["not_requested"] = bool(rec["is_http"] and set(rec["link_types"]) <= NOT_REQUESTED_TYPES)
+    parser.excluded_urls = list(excluded.values())
+    parser.discovered_url_count = len(all_elements)
+    raw_count = sum(r["occurrence_count"] for r in out)          # = found - excluded (checked in the report)
     return raw_count, out, parser
 
 
@@ -316,20 +349,27 @@ def classify_image_url(raw: str, base_url: str, source_host: str) -> Dict[str, A
     }
 
 
-def extract_on_page_images(parser: Parser, source_host: str) -> Tuple[int, List[Dict[str, Any]]]:
+def extract_on_page_images(parser: Parser, source_host: str, rules: Optional[UrlRules] = None) -> Tuple[int, List[Dict[str, Any]]]:
     """
     Collapse the parser's image occurrences per (normalized image URL, alt_present, alt_text):
     the same image with the same alt on one page is ONE relationship with occurrence_count and all
     attribute sources; a different alt text on the same page is a separate SEO relationship.
     Validation is later deduplicated by normalized image URL only (alt is never part of that key).
     """
+    rules = rules or URL_RULES_DEFAULT
     raw_list = parser.all_on_page_images
     grouped: Dict[Tuple[str, Any, str], Dict[str, Any]] = {}
+    excluded: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for el in raw_list:
         raw = (el.get("src") or "").strip()
         if not raw:
+            _exclude(excluded, "", "", "IMAGE", "Empty URL", el.get("component") or "")
             continue
         meta = classify_image_url(raw, parser.final_base_href, source_host)
+        reason = rules.classify(raw, "IMAGE", meta["normalized"]) if meta["is_http"] else None
+        if reason and reason not in ("JS", "CSS", "Font", "Source map"):     # tracking pixels, analytics beacons
+            _exclude(excluded, raw, meta["normalized"], "IMAGE", reason, el.get("component") or "")
+            continue
         key = (meta["normalized"], el.get("alt_present"), el.get("alt_text") or "")
         rec = grouped.get(key)
         if rec is None:
@@ -355,7 +395,9 @@ def extract_on_page_images(parser: Parser, source_host: str) -> Tuple[int, List[
             for f in ("width", "height", "loading"):
                 if not rec[f] and el.get(f):
                     rec[f] = el[f]
-    return len(raw_list), list(grouped.values())
+    parser.excluded_images = list(excluded.values())
+    parser.discovered_image_count = len(raw_list)
+    return sum(r["occurrence_count"] for r in grouped.values()), list(grouped.values())
 
 
 def classify_http_outcome(
@@ -566,6 +608,8 @@ class AdaptiveLimit:
 
 TRANSIENT_BUCKETS = ("Timeout", "DNS/Network", "SSL")
 NET_RETRIES = 2                 # transport failures (DNS, connect, reset, timeout) are retried at least this often
+CIRCUIT_FAILS = 8              # transport failures in a row before another host's circuit opens
+CIRCUIT_OPEN_SEC = 60.0
 RECHECK_CONCURRENCY = 8         # end-of-crawl second check of transient failures: calm, few at a time
 
 
@@ -649,20 +693,52 @@ class HostRateBudget:
 
 
 class RobotsCache:
-    """Async per-host robots.txt fetcher & cache respecting QC V5 security."""
+    """Async per-host robots.txt fetcher & cache (RFC 9309 matching, see robots_rules)."""
+
+    AGENT = "QC-Audit"
 
     def __init__(self, allow_local: bool = False, before_fetch=None):
         self.allow_local = allow_local
-        self._cache: Dict[str, Optional[urllib.robotparser.RobotFileParser]] = {}
+        self._cache: Dict[str, Optional[Robots]] = {}
+        self._notes: Dict[str, str] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         # Optional async hook(url) awaited before the robots.txt GET (used to charge
         # primary-domain robots fetches to the shared primary rate budget).
         self.before_fetch = before_fetch
         self.fetch_count = 0
+        self.last_reason = ""
 
-    async def can_fetch(self, client: httpx.AsyncClient, url: str) -> bool:
+    async def _load(self, client: httpx.AsyncClient, origin: str) -> None:
+        robots_url = f"{origin}/robots.txt"
+        if not URLNormalizer.is_safe_url(robots_url, allow_local=self.allow_local):
+            self._cache[origin], self._notes[origin] = None, "robots.txt not fetched (address not allowed)"
+            return
+        try:
+            if self.before_fetch is not None:
+                await self.before_fetch(robots_url)
+            self.fetch_count += 1
+            url, r = robots_url, None
+            for _ in range(5):                      # RFC 9309: follow at least five redirects
+                r = await client.get(url, timeout=8.0)
+                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                    nxt = urllib.parse.urljoin(url, r.headers["location"])
+                    if not URLNormalizer.is_safe_url(nxt, allow_local=self.allow_local):
+                        break
+                    url = nxt
+                    continue
+                break
+            if r is not None and r.status_code == 200 and r.text:
+                self._cache[origin], self._notes[origin] = Robots(r.text), url
+            else:                                   # 4xx: no rules (RFC 9309); 5xx / other: not treated as a block
+                code = r.status_code if r is not None else "?"
+                self._cache[origin], self._notes[origin] = None, f"robots.txt answered {code}: no rules applied"
+        except Exception as e:
+            self._cache[origin], self._notes[origin] = None, f"robots.txt unreachable ({type(e).__name__}): no rules applied"
+
+    async def check(self, client: httpx.AsyncClient, url: str) -> Tuple[bool, str]:
+        """(allowed, why) — why names the deciding rule and the robots.txt when blocked."""
         if not getattr(settings, "RESPECT_ROBOTS", True):
-            return True
+            return True, ""
         parsed = urllib.parse.urlsplit(url)
         origin = f"{parsed.scheme}://{parsed.netloc}".lower()
         if origin not in self._cache:
@@ -672,30 +748,18 @@ class RobotsCache:
                 self._locks[origin] = asyncio.Lock()
             async with self._locks[origin]:
                 if origin not in self._cache:
-                    robots_url = f"{origin}/robots.txt"
-                    if not URLNormalizer.is_safe_url(robots_url, allow_local=self.allow_local):
-                        self._cache[origin] = None
-                    else:
-                        rp = urllib.robotparser.RobotFileParser()
-                        try:
-                            if self.before_fetch is not None:
-                                await self.before_fetch(robots_url)
-                            self.fetch_count += 1
-                            r = await client.get(robots_url, timeout=8.0)
-                            if r.status_code == 200 and r.text:
-                                rp.parse(r.text.splitlines())
-                                self._cache[origin] = rp
-                            else:
-                                self._cache[origin] = None
-                        except Exception:
-                            self._cache[origin] = None
-        rp = self._cache.get(origin)
-        if rp is None:
-            return True
+                    await self._load(client, origin)
+        rb = self._cache.get(origin)
+        if rb is None:
+            return True, ""
         try:
-            return rp.can_fetch("*", url)
+            ok, rule = rb.check(url, self.AGENT)
         except Exception:
-            return True
+            return True, ""
+        return ok, ("" if ok else f"'{rule}' in {self._notes.get(origin) or origin + '/robots.txt'}")
+
+    async def can_fetch(self, client: httpx.AsyncClient, url: str) -> bool:
+        return (await self.check(client, url))[0]
 
 
 class OnPageAuditEngine:
@@ -789,6 +853,7 @@ class OnPageAuditEngine:
         self.other_inflight_cap = 24
         self._host_lat: Dict[str, float] = {}
         self._recheck_items: List[Tuple[str, str, Dict[str, Any]]] = []
+        self._breaker: Dict[str, Dict[str, Any]] = {}
         self._rechecking = False
         self.image_discard_body_limit = image_discard_body_limit
         self.max_connections = max_connections
@@ -1054,6 +1119,29 @@ class OnPageAuditEngine:
             conn.commit()
         except Exception:
             pass
+        # every URL / image found on a page that isn't reported, with the reason (nothing disappears silently)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS on_page_excluded_urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                source_page_url TEXT NOT NULL,
+                kind TEXT NOT NULL,              -- url | image
+                found_url TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                url_type TEXT NOT NULL,
+                reason TEXT NOT NULL,            -- JS, CSS, Google Tag Manager, Analytics, CleverTap, Invalid URL ...
+                occurrence_count INTEGER DEFAULT 1,
+                location TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_opex_page ON on_page_excluded_urls(job_id, source_page_url);
+            CREATE INDEX IF NOT EXISTS idx_opex_reason ON on_page_excluded_urls(job_id, reason);
+        """)
+        for col in ("discovered_url_count", "excluded_url_occurrences", "discovered_image_count", "excluded_image_occurrences"):
+            try:
+                conn.execute(f"ALTER TABLE on_page_source_pages ADD COLUMN {col} INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
         ensure_on_page_image_schema(conn)
 
     def initialize_inventory(self, source_entries: List[Dict[str, Any]]) -> str:
@@ -1401,7 +1489,7 @@ class OnPageAuditEngine:
             }
 
         # 2. Robots validation
-        robots_ok = await self.robots.can_fetch(client, url)
+        robots_ok, robots_why = await self.robots.check(client, url)
         if not robots_ok:
             self.metrics["robots_blocked"] += 1
             term, bkt, scls, rem, waf_st = classify_http_outcome(
@@ -1418,9 +1506,9 @@ class OnPageAuditEngine:
                 "content_type": "",
                 "status_bucket": bkt,
                 "status_classification": scls,
-                "remark": rem,
+                "remark": f"{rem}: {robots_why}" if robots_why else rem,
                 "error_type": "ROBOTS_BLOCKED",
-                "error_message": "Disallowed by robots.txt",
+                "error_message": f"Disallowed by robots.txt {robots_why}".strip(),
                 "robots_status": "DISALLOWED",
                 "waf_status": waf_st,
                 "html": "",
@@ -1449,6 +1537,18 @@ class OnPageAuditEngine:
 
         net_limit = max(self.max_retries, NET_RETRIES)
         pool_waits = 0
+        # circuit breaker for other hosts: after CIRCUIT_FAILS transport failures in a row, links to that host fail
+        # fast for CIRCUIT_OPEN_SEC (no timeouts x retries each); they're all checked again calmly at the end of the
+        # crawl (second check), so no result is lost. The site's own host is never cut off (it slows down instead).
+        c_host = urllib.parse.urlsplit(url).netloc.lower()
+        if not is_primary and kind != "recheck":
+            br = self._breaker.get(c_host)
+            if br and br["open_until"] > time.monotonic():
+                net_limit = -1
+                error_type = br["type"]
+                error_message = (f"Not tried now: {c_host} failed {CIRCUIT_FAILS} times in a row "
+                                 f"({br['msg'][:80]}); checked again at the end of the crawl")
+                m["circuit_skips"] = m.get("circuit_skips", 0) + 1
         while retries <= net_limit:
             attempts += 1
             net_ms = 0.0
@@ -1586,6 +1686,18 @@ class OnPageAuditEngine:
                     m["retries"] = m.get("retries", 0) + 1
                     await asyncio.sleep(retry_delay(retries) * 2)      # 1 s, 2 s, ... a blip usually clears
 
+        if not is_primary and kind != "recheck" and net_limit >= 0:
+            br = self._breaker.setdefault(c_host, {"fails": 0, "open_until": 0.0, "type": "", "msg": ""})
+            if error_type and final_status is None and error_type != "Redirect Loop":
+                br["fails"] += 1
+                br["type"], br["msg"] = error_type, error_message
+                if br["fails"] >= CIRCUIT_FAILS:
+                    br["fails"], br["open_until"] = 0, time.monotonic() + CIRCUIT_OPEN_SEC
+                    m["circuit_opens"] = m.get("circuit_opens", 0) + 1
+                    print(f"[PIPELINE] {c_host}: {CIRCUIT_FAILS} failures in a row; its links fail fast for "
+                          f"{CIRCUIT_OPEN_SEC:.0f} s and are checked again at the end", flush=True)
+            elif final_status is not None:
+                br["fails"] = 0
         elapsed_ms = round(net_ms, 2)
         html_text = ""
         if raw_bytes and ("html" in content_type.lower() or not content_type or final_status in (403, 429)):
@@ -1733,6 +1845,10 @@ class OnPageAuditEngine:
                     page_type = :page_type,
                     classification_method = :classification_method,
                     raw_occurrences_count = :raw_occurrences_count,
+                    discovered_url_count = :discovered_url_count,
+                    excluded_url_occurrences = :excluded_url_occurrences,
+                    discovered_image_count = :discovered_image_count,
+                    excluded_image_occurrences = :excluded_image_occurrences,
                     relationships_count = :relationships_count,
                     raw_image_occurrences_count = :raw_image_occurrences_count,
                     image_relationships_count = :image_relationships_count,
@@ -1746,6 +1862,12 @@ class OnPageAuditEngine:
                 """,
                 source_updates,
             )
+            ex_rows = [x for su in source_updates for x in (su.get("_excluded") or [])]
+            if ex_rows:
+                self.conn.executemany(
+                    "INSERT INTO on_page_excluded_urls (job_id, source_page_url, kind, found_url, normalized_url, url_type, "
+                    "reason, occurrence_count, location) VALUES (:job_id, :source_page_url, :kind, :found_url, :normalized_url, "
+                    ":url_type, :reason, :occurrence_count, :location)", ex_rows)
             seo_rows = [su["_seo"] for su in source_updates if su.get("_seo")]
             if seo_rows:
                 self.conn.executemany(
@@ -2863,11 +2985,14 @@ class OnPageAuditEngine:
     def _parse_and_classify(self, src_url: str, final_url: str, html: str, seo_ctx: Optional[Tuple[str, str]] = None):
         """ONE Parser pass per page: links, canonical, hreflang, meta tags, data-pageType, title, images and
         the SEO signals. seo_ctx=(x_robots_tag, checked_at) requests the SEO row (2xx HTML pages only)."""
-        raw_occ, rels, parser = extract_on_page_urls(src_url, final_url, html)
+        rules = getattr(self, "url_rules", None)
+        raw_occ, rels, parser = extract_on_page_urls(src_url, final_url, html, rules)
         raw_img, img_rels = 0, []
         if self.audit_images:
             source_host = (urllib.parse.urlsplit(final_url or src_url).hostname or "").lower()
-            raw_img, img_rels = extract_on_page_images(parser, source_host)   # same Parser instance
+            raw_img, img_rels = extract_on_page_images(parser, source_host, rules)   # same Parser instance
+        excl = {"urls": getattr(parser, "excluded_urls", []), "images": getattr(parser, "excluded_images", []),
+                "found_urls": getattr(parser, "discovered_url_count", 0), "found_images": getattr(parser, "discovered_image_count", 0)}
         seo = None
         if seo_ctx is not None:
             seo = seo_page_facts(self.job_id, src_url, final_url, parser, rels, seo_ctx[0], seo_ctx[1],
@@ -2875,10 +3000,10 @@ class OnPageAuditEngine:
         t1, t2, _ = self.classifier.extract_meta_tags(html[:32768], parser=None)
         title = " ".join((parser.title or "").split())[:300]
         if t1 and t2:
-            return raw_occ, rels, t2, t1, "META_TAG", t1, t2, raw_img, img_rels, title, seo
+            return raw_occ, rels, t2, t1, "META_TAG", t1, t2, raw_img, img_rels, title, seo, excl
         clf = self.classifier.classify_from_html(src_url, final_url, html, parser=parser)
         return (raw_occ, rels, clf.business or "NEEDS_REVIEW", clf.page_type or "NEEDS_REVIEW",
-                clf.method, clf.tag_1, clf.tag_2, raw_img, img_rels, title, seo)
+                clf.method, clf.tag_1, clf.tag_2, raw_img, img_rels, title, seo, excl)
 
     def performance_summary(self) -> Dict[str, Any]:
         m = self.metrics
@@ -3306,6 +3431,7 @@ class OnPageAuditEngine:
                         raw_img, extracted_imgs = 0, []
                         page_title = ""
                         seo_row = None
+                        excl = {"urls": [], "images": [], "found_urls": 0, "found_images": 0}
                         if html:
                             ctype = str(fetch_res.get("content_type") or "").lower()
                             seo_ctx = None
@@ -3313,7 +3439,7 @@ class OnPageAuditEngine:
                                     and (not ctype or "html" in ctype)):
                                 seo_ctx = (fetch_res.get("x_robots_tag") or "", now_iso, str(fetch_res.get("content_type") or ""))
                             (raw_occ, extracted_rels, biz, pt, clf_method, tag_1, tag_2,
-                             raw_img, extracted_imgs, page_title, seo_row) = await loop.run_in_executor(
+                             raw_img, extracted_imgs, page_title, seo_row, excl) = await loop.run_in_executor(
                                 parse_pool, self._parse_and_classify, src_url, final_src_url, html, seo_ctx
                             )
                         else:
@@ -3471,6 +3597,12 @@ class OnPageAuditEngine:
                             "remark": fetch_res["remark"],
                             "checked_at": now_iso,
                             "_seo": seo_row,   # written in the same transaction as the page
+                            "_excluded": [{"job_id": self.job_id, "source_page_url": src_url, "kind": k, **x}
+                                          for k, key in (("url", "urls"), ("image", "images")) for x in excl[key]],
+                            "discovered_url_count": int(excl["found_urls"] or 0),
+                            "discovered_image_count": int(excl["found_images"] or 0),
+                            "excluded_url_occurrences": sum(x["occurrence_count"] for x in excl["urls"]),
+                            "excluded_image_occurrences": sum(x["occurrence_count"] for x in excl["images"]),
                         }
                         self._rels_discovered += len(rel_rows)
                         self._img_rels_discovered += len(img_rows)

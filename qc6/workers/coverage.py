@@ -145,6 +145,8 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         audit_seo=True, probe_url=f"{site['base_url'].rstrip('/')}/robots.txt")
     eng.crawl_delay = float(opts.get("_crawl_delay") or 0.0)   # robots.txt Crawl-delay: at least this long between requests
     eng.extra_headers = identity_headers(site)
+    from qcv5.crawler.url_rules import UrlRules
+    eng.url_rules = UrlRules.load((site.get("settings") or {}).get("url_rules"))   # what isn't reported, and why
     from qc6.site_access import httpx_hook
     eng.site_request_hook = httpx_hook(site)
     sms, idx = opts.get("_sitemaps") or [], opts.get("_sm_idx") or []
