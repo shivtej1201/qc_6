@@ -145,6 +145,7 @@ export function DownloadMenu({ siteId, run }: { siteId: number; run?: number | n
     [`/api/v2/sites/${siteId}/export.xlsx${q}`, "Excel, one sheet", "summary, problems, every page row: small"],
     [`/api/v2/sites/${siteId}/export.csv${q}`, "CSV", "the same, as plain text"],
     [`/api/v2/sites/${siteId}/export.zip${q}`, "ZIP", "the CSV compressed: smallest"],
+    ...(run ? [[`/api/v2/runs/${run}/non-domain.xlsx`, "Non-domain URL audit (Excel)", "URLs on other hosts: QA / UAT / dev / staging, other subdomains, external, with template and component"] as [string, string, string]] : []),
     ...(run ? [[`/api/v2/runs/${run}/package.zip`, "All data as CSVs (ZIP)", "every link, unique URL, broken / redirect / external URL, images, SEO"] as [string, string, string]] : []),
   ];
   return (

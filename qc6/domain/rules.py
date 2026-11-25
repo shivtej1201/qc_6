@@ -149,6 +149,28 @@ _r("EMI_INVALID", "template", "medium", "content",
    "Show the EMI amount as a number with the currency (₹3,125/month), in the visible text and the page's data.",
    "The next check finds a valid EMI amount on these pages.")
 
+# ---- environment URLs on production pages (qc6.host_audit; left out of the health score) -----------------------
+_r("ENV_URL_QA", "subject", "high", "technical",
+   "{n_pages} pages link to the QA host {subject}",
+   "A QA environment URL on production pages sends visitors and search engines to a test system.",
+   "Replace {subject} with the production host in the component that writes it (see the template and component).",
+   "The next check finds no URL on {subject}.")
+_r("ENV_URL_UAT", "subject", "high", "technical",
+   "{n_pages} pages link to the UAT host {subject}",
+   "A UAT environment URL on production pages sends visitors and search engines to a test system.",
+   "Replace {subject} with the production host in the component that writes it (see the template and component).",
+   "The next check finds no URL on {subject}.")
+_r("ENV_URL_DEV", "subject", "high", "technical",
+   "{n_pages} pages link to the development / staging host {subject}",
+   "A development or staging URL on production pages usually means an environment setting leaked into production.",
+   "Replace {subject} with the production host, and check the environment configuration of the component that writes it.",
+   "The next check finds no URL on {subject}.")
+_r("ENV_URL_OTHER_SUBDOMAIN", "subject", "low", "technical",
+   "{n_pages} pages link to {subject}, a subdomain not in the allowed list",
+   "It may be a test or old host. If it's a real production host, add it to the allowed subdomains.",
+   "Check {subject}; replace it with the production host, or add it to host_policy.allowed_subdomains.",
+   "The next check finds no URL on {subject}, or it is allowed.")
+
 # ---- link graph, canonical targets, near-duplicates (computed after the crawl) --------------------------------
 _r("DEEP_PAGE", "template", "low", "links",
    "{n_pages} {template} are more than 3 clicks from the home page",

@@ -2145,6 +2145,25 @@ async def retry_failed(run_id: int, me=Depends(current_member)):
     return {"list_id": lid, "urls": len(urls)}
 
 
+@app.get("/api/v2/runs/{run_id}/non-domain.xlsx")
+async def non_domain_report(run_id: int, me=Depends(current_member)):
+    """Non-Domain / environment URL audit of a check, on its own (also inside the report ZIP)."""
+    site = await _run_site(run_id, me)
+    pool = await get_pool()
+    templates = {r["url"]: r["name"] for r in await pool.fetch(
+        "SELECT p.url, t.name FROM pages p JOIN templates t ON t.id = p.template_id WHERE p.run_id = $1", run_id)}
+    from qc6 import host_audit
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+    await asyncio.to_thread(host_audit.write_report, run_id, site, templates, tmp)
+    await services.log(pool, me["workspace_id"], me["id"], "report.non_domain", f"run:{run_id}", {})
+    from starlette.background import BackgroundTask
+    host = re.sub(r"[^a-z0-9.-]+", "-", site["primary_host"].lower())
+    return FileResponse(tmp, filename=f"qc-non-domain-urls-{host}-check{run_id}.xlsx", background=BackgroundTask(os.unlink, tmp),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 @app.get("/api/v2/runs/{run_id}/package.zip")
 async def run_package(run_id: int, me=Depends(current_member)):
     """Every data file of a check as CSV, in one ZIP (the V5 package: all link relationships, unique URLs, broken,

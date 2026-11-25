@@ -22,7 +22,7 @@ RULE_PREFIX = [
     ("HREFLANG", "Hreflang"), ("OPEN_GRAPH", "Open Graph / social meta"),
     ("STRUCTURED_DATA", "Structured data (schema)"), ("SCHEMA_", "Structured data (schema)"),
     ("PRODUCT_", "Product schema"), ("OFFER_", "Product schema"), ("EMI_", "EMI"),
-    ("BROKEN_LINK", "Links"), ("REDIRECTED_LINK", "Links"), ("BROKEN_IMAGE", "Images"),
+    ("ENV_URL_", "Links"), ("BROKEN_LINK", "Links"), ("REDIRECTED_LINK", "Links"), ("BROKEN_IMAGE", "Images"),
     ("NOT_IN_SITEMAP", "Sitemap"), ("NOINDEX_IN_SITEMAP", "Sitemap"), ("SITEMAP_", "Sitemap"),
     ("VIEWPORT", "Page markup"), ("CHARSET", "Page markup"), ("HTML_", "Page markup"),
     ("URL_", "URL format"), ("TRAILING_SLASH", "URL format"),
