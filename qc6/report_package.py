@@ -11,6 +11,7 @@ where it compresses about 10x. Nothing is lost; each file is small enough to ope
       URL_Audit.xlsx               every unique URL with its status; problem links grouped by URL x component
       Image_Audit.xlsx             every unique image; problem images grouped by image x component
       Schema_Audit.xlsx            per page: title, description, H1, canonical, indexability, structured data
+      Non_Domain_URL_Audit.xlsx    URLs on other hosts than the primary domain: QA / UAT / dev / other subdomains, external
       data/Pages.csv               every page crawled
       data/All_Links.csv           every page -> URL placement with status and component
       data/All_Images.csv          every page -> image placement with status
@@ -94,6 +95,17 @@ class _Xlsx:
         self.rows += total
         return total
 
+    def order(self, first: Sequence[str]) -> None:
+        """Put these sheets first (written last because they're small summaries of the long sheet)."""
+        objs = self.wb.worksheets_objs
+        front = [w for n in first for w in objs if w.name == n]
+        rest = [w for w in objs if w not in front]
+        self.wb.worksheets_objs = front + rest
+        for i, w in enumerate(self.wb.worksheets_objs):
+            w.index = i
+        if front:
+            front[0].activate()
+
     def close(self) -> None:
         self.wb.close()
 
@@ -116,7 +128,7 @@ def _examples(s: Optional[str]) -> List[str]:
 
 # ------------------------------------------------------------------ the package
 def build_files(run_id: int, host: str, templates: Dict[str, str], out_dir: str, summary_xlsx: Optional[str],
-                seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                seed: Optional[Dict[str, Any]] = None, site_for_audit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Write every file of the package into out_dir (blocking; run in a thread)."""
     os.makedirs(os.path.join(out_dir, "data"), exist_ok=True)
     db = os.path.join(run_dir(run_id), "coverage.db")
@@ -299,6 +311,12 @@ def build_files(run_id: int, host: str, templates: Dict[str, str], out_dir: str,
                     [70, 24, 40, 9, 8, 12, 9, 10, 80, 14, 30, 12, 40])
         x.close()
 
+        # ---------------- Non_Domain_URL_Audit.xlsx (additive: QA / UAT / dev / other hosts found on the pages)
+        if site_for_audit is not None:
+            from qc6 import host_audit
+            res = host_audit.write_report(run_id, site_for_audit, templates, os.path.join(out_dir, "Non_Domain_URL_Audit.xlsx"))
+            files["Non_Domain_URL_Audit.xlsx"] = res["rows"]
+
         # ---------------- CSV detail
         d = os.path.join(out_dir, "data")
         files["data/Pages.csv"] = _csv(os.path.join(d, "Pages.csv"), [
@@ -425,7 +443,7 @@ async def build_for_run(pool, run_id: int, site: Dict[str, Any]) -> Dict[str, An
         seed = await seed_for_run(pool, run_id)
         if os.path.isdir(out_dir):
             shutil.rmtree(out_dir)
-        files = await asyncio.to_thread(build_files, run_id, host, templates, out_dir, summary, seed)
+        files = await asyncio.to_thread(build_files, run_id, host, templates, out_dir, summary, seed, site)
         n = await asyncio.to_thread(zip_dir, out_dir, zip_path)
         size = os.path.getsize(zip_path)
         await pool.execute("""UPDATE reports SET status = 'ready', size_bytes = $2, files = $3, compressed = true, finished_at = now(),

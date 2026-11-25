@@ -414,6 +414,14 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
                                   {"component": component_of(rule, subject=subject), "detail": str(fields.get("value") or "")[:300],
                                    "emi": res.get("emi") if rule.startswith("EMI_") else None}))
         await asyncio.to_thread(_store_schema, db_path, job, schema)
+    try:                                               # QA / UAT / dev URLs on production pages (qc6.host_audit)
+        from qc6 import host_audit
+        for page, rule, host_, comp, _occ in await asyncio.to_thread(host_audit.findings, db_path, job,
+                                                                      host_audit.policy_for(site)):
+            items.append(Item(rule, page, "coverage", db_tpl.get(page_tpl.get(page, -1)), host_, {"value": host_},
+                              {"component": comp, "host": host_}))
+    except Exception:
+        log.warning("environment URL audit failed (the check goes on): %s", traceback.format_exc())
     steps.done("pages_and_problems")
     graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items, spot=spot is not None)
     steps.done("link_intelligence")

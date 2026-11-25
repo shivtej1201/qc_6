@@ -176,7 +176,8 @@ async def close_run(pool, run_id: int, site_id: int, sources: List[str], complet
 async def snapshot_score(pool, run_id: int, site_id: int, pages_total: int) -> Dict[str, Any]:
     async with pool.acquire() as conn:
         open_fixes = await conn.fetch("SELECT severity, dimension, pages_affected FROM fixes WHERE site_id = $1 "
-                                      "AND status IN ('open', 'in_progress', 'fixed_pending_check')", site_id)
+                                      "AND status IN ('open', 'in_progress', 'fixed_pending_check') "
+                                      "AND rule NOT LIKE 'ENV\\_URL\\_%'", site_id)   # the environment-URL audit is additive
         sc = S.compute(pages_total, [dict(r) for r in open_fixes])
         if sc["score"] is not None:
             await conn.execute("INSERT INTO score_snapshots (site_id, run_id, formula, score, dimensions) VALUES ($1,$2,$3,$4,$5) "

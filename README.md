@@ -399,6 +399,39 @@ logical issue never gets two tickets and every affected URL stays in the attachm
 tickets under the older one-per-issue grouping keeps it until it's switched on the Tickets screen, so no raised
 number disappears.
 
+## Non-Domain / environment URL audit (additional report)
+
+An extra report, built from what the crawl already recorded (`qc6/host_audit.py`). Crawling, extraction,
+deduplication, validation, exclusions and the existing reports are unchanged, and so is the health score.
+
+Every reportable URL and image found on the pages (links, canonical, hreflang, Open Graph, JSON-LD, iframes,
+images) whose host isn't the primary domain is classified by the site's host policy:
+* **QA / UAT / Dev / staging:** a subdomain of the primary domain whose labels match the patterns (bmqa, qa-www,
+  bmuat, uat2, dev, staging, preprod, sit...), or localhost / an IP address.
+* **Allowed subdomain:** listed in `allowed_subdomains`.
+* **Other subdomain:** any other subdomain, listed for review.
+* **External** (or **External (allowed)**).
+
+JS, CSS, tag managers and tracking URLs stay excluded. Each row has: source page, template, component, found and
+normalized URL, host, primary domain, classification, HTTP/HTTPS, status, where it redirects, first seen on,
+occurrences and remarks.
+
+`Non_Domain_URL_Audit.xlsx` (in the report ZIP, and on its own from *Download report → Non-domain URL audit*):
+* **Summary** (the policy and counts);
+* **Issues:** QA / UAT / Dev URLs aggregated by Classification x Host x Template x Component, with the affected pages
+  and examples (one row = one ticket);
+* **Hosts**;
+* **All non-domain URLs.**
+
+QA / UAT / Dev hosts also become problems (`ENV_URL_QA` / `_UAT` / `_DEV`, one per host), grouped into tickets by
+Template + Component like every other issue.
+
+Policy per site, `settings.host_policy` (all optional):
+`{"primary_domain": "bajajfinserv.in", "allowed_subdomains": ["api", "cdn*"], "qa_patterns": [...],
+"uat_patterns": [...], "dev_patterns": [...], "flag": ["QA", "UAT", "Dev / staging"], "external_allowed": ["youtube.com"]}`.
+The primary domain defaults to the registrable domain of the crawled host (www.bajajfinserv.in → bajajfinserv.in).
+Patterns are globs on each subdomain label. A site's own patterns replace the defaults.
+
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):
