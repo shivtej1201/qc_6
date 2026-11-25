@@ -68,7 +68,7 @@ export function MailView({ site }: { site: Site; params: URLSearchParams }) {
         <form className="panel mail-form" data-reveal onSubmit={(e) => { e.preventDefault(); act("save"); }}>
           <label className="switch-row">
             <input type="checkbox" checked={f.enabled} onChange={(e) => set("enabled", e.target.checked)} />
-            <span><b>Send the summary after every check</b><small>Single URL / spot checks don't send one.</small></span>
+            <span><b>Send the summary after every check</b><small>Every check of more than one page: sitemap, sheet or typed pages.</small></span>
           </label>
 
           <fieldset>

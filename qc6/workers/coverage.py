@@ -25,6 +25,8 @@ from qcv5.reports.on_page_csv_packager import build_on_page_csv_package
 from qc6.sqlite_ro import ro_uri
 from qc6.domain import templates as T
 from qc6.linkgraph import text_simhash
+from qc6 import schema_check
+from qc6.components import component as component_of
 from qc6.product import extract as product_extract
 from qc6.settings import settings
 from qc6.workers.analysis import Item, apply, close_run, notify, snapshot_score, spot_pages
@@ -42,6 +44,8 @@ class FingerprintEngine(OnPageAuditEngine):
         self.fingerprints: Dict[str, int] = {}
         self.text_fps: Dict[str, int] = {}            # SimHash of the main text, for near-duplicate pages
         self.products: Dict[str, Any] = {}            # product structured data per page (qc6.product)
+        self.schema: Dict[str, Any] = {}              # schema + EMI checks per page (qc6.schema_check)
+        self.emi_cfg: Dict[str, Any] = {}
         self._fp_lock = threading.Lock()
 
     def _parse_and_classify(self, src_url, final_url, html, seo_ctx=None):
@@ -50,7 +54,11 @@ class FingerprintEngine(OnPageAuditEngine):
             fp = T.simhash(html)
             tfp = text_simhash(html)
             prod = product_extract(html)
+            sch = schema_check.check(html, final_url or src_url, self.emi_cfg)
+            slim = {"types": sch["types"][:20], "product": sch["product"], "offer": sch["offer"], "price": sch["price"],
+                    "currency": sch["currency"], "problems": sch["problems"][:40], "emi": sch["emi"]}
             with self._fp_lock:
+                self.schema[src_url] = slim
                 self.fingerprints[src_url] = fp
                 if tfp is not None:
                     self.text_fps[src_url] = tfp
@@ -62,7 +70,8 @@ class FingerprintEngine(OnPageAuditEngine):
         import json as _json
         with self._fp_lock:
             data = {"layout": {k: str(v) for k, v in self.fingerprints.items()},
-                    "text": {k: str(v) for k, v in self.text_fps.items()}, "product": dict(self.products)}
+                    "text": {k: str(v) for k, v in self.text_fps.items()}, "product": dict(self.products),
+                    "schema": dict(self.schema)}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             _json.dump(data, f)
@@ -77,6 +86,7 @@ class FingerprintEngine(OnPageAuditEngine):
         self.fingerprints.update({k: int(v) for k, v in data["layout"].items()})
         self.text_fps.update({k: int(v) for k, v in data.get("text", {}).items()})
         self.products.update(data.get("product", {}))
+        self.schema.update(data.get("schema", {}))
 
 
 # V5 rule code -> V6 rule (+ how to build subject/fields). Anything else becomes PAGE_CHECK / LINK_CHECK with V5's
@@ -101,7 +111,8 @@ def map_issue(r: sqlite3.Row, template_id: Optional[int], host: str) -> Optional
     target = r["subject_url"] or r["found_url"] or ""
     if code in SKIP:
         return None
-    ev = {"v5_rule": code, "detail": (r["detail"] or "")[:300], "status": r["http_status"]}
+    ev = {"v5_rule": code, "detail": (r["detail"] or "")[:300], "status": r["http_status"],
+          "component": component_of(code, el, (r["location"] if "location" in r.keys() else "") or "")}
     if code in LINK_BROKEN and r["category"] != "SOURCE_PAGE":
         rule = "BROKEN_IMAGE" if "IMAGE" in el or r["category"] in ("IMAGE", "BROKEN_IMAGE") else "BROKEN_LINK"
         return Item(rule, page, "coverage", template_id, target, {"value": r["http_status"] or code}, ev)
@@ -145,6 +156,7 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
         audit_seo=True, probe_url=f"{site['base_url'].rstrip('/')}/robots.txt")
     eng.crawl_delay = float(opts.get("_crawl_delay") or 0.0)   # robots.txt Crawl-delay: at least this long between requests
     eng.extra_headers = identity_headers(site)
+    eng.emi_cfg = dict((site.get("settings") or {}).get("emi") or {})
     from qcv5.crawler.url_rules import UrlRules
     eng.url_rules = UrlRules.load((site.get("settings") or {}).get("url_rules"))   # what isn't reported, and why
     from qc6.site_access import httpx_hook
@@ -248,12 +260,30 @@ async def run_coverage(pool, run_id: int, site: Dict[str, Any], urls: List[str],
     fact_counts = await asyncio.to_thread(facts.export, db_path, job, run_id)
     steps.done("link_facts")
     out = await import_coverage(pool, run_id, site, db_path, job, eng.fingerprints, stats, pkg, text_fps=eng.text_fps,
-                                products=eng.products, steps=steps)
+                                products=eng.products, steps=steps, schema=eng.schema)
     out["facts"] = fact_counts
     from qc6 import reuse as _reuse
     out["links_reused_from_previous"] = await asyncio.to_thread(_reuse.reused_count, db_path, job)
     out["timings"] = steps.out
     return out
+
+
+def _store_schema(db_path: str, job: str, schema: Dict[str, Any]) -> None:
+    """Per page schema + EMI result into the check's crawl database (report package, Data explorer `schema` view)."""
+    c = sqlite3.connect(db_path, timeout=30)
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS qc_schema_checks (job_id TEXT, page_url TEXT, schema_types TEXT, product INTEGER,
+                     offer INTEGER, price REAL, currency TEXT, problem_count INTEGER, problems TEXT, emi_status TEXT,
+                     emi_sources TEXT, emi_amount REAL, emi_note TEXT, PRIMARY KEY (job_id, page_url))""")
+        c.executemany("INSERT OR REPLACE INTO qc_schema_checks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+            (job, u, ", ".join(r.get("types") or []), int(bool(r.get("product"))), int(bool(r.get("offer"))), r.get("price"),
+             r.get("currency"), len(r.get("problems") or []),
+             "; ".join(f"{p['type']}.{p['field']} {p['kind']}{(' ' + p['detail']) if p.get('detail') else ''}" for p in r.get("problems") or []),
+             (r.get("emi") or {}).get("status"), ", ".join((r.get("emi") or {}).get("sources") or []),
+             (r.get("emi") or {}).get("amount"), (r.get("emi") or {}).get("why")) for u, r in schema.items()])
+        c.commit()
+    finally:
+        c.close()
 
 
 class _Steps:
@@ -271,7 +301,7 @@ class _Steps:
 async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str, job: str,
                           fingerprints: Dict[str, int], stats: Dict[str, Any], pkg: Dict[str, Any],
                           text_fps: Optional[Dict[str, int]] = None, products: Optional[Dict[str, Any]] = None,
-                          steps: Optional["_Steps"] = None) -> Dict[str, Any]:
+                          steps: Optional["_Steps"] = None, schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     steps = steps or _Steps()
     spot = await spot_pages(pool, run_id)
     c = sqlite3.connect(db_path)
@@ -368,10 +398,22 @@ async def import_coverage(pool, run_id: int, site: Dict[str, Any], db_path: str,
         prows = [{"url": r["url"], "http_status": r["http_status"], "template_id": db_tpl.get(page_tpl.get(r["url"], -1)),
                   "product": products.get(r["url"]), "site_type": page_type_label(r["page_type"], r["business"])} for r in pages]
         for url, rule, fields in product_problems(prows):
-            items.append(Item(rule, url, "coverage", db_tpl.get(page_tpl.get(url, -1)), "", fields, {"product": products.get(url)}))
+            items.append(Item(rule, url, "coverage", db_tpl.get(page_tpl.get(url, -1)), "", fields,
+                              {"product": products.get(url), "component": component_of(rule)}))
         await pool.execute("""UPDATE pages p SET facts = p.facts || jsonb_build_object('product', x.prod::jsonb)
                               FROM unnest($2::text[], $3::text[]) AS x(url, prod) WHERE p.run_id = $1 AND p.url = x.url""",
                            run_id, [u for u, v in products.items() if v], [json.dumps(v) for v in products.values() if v])
+    if schema:                                         # every schema type + EMI (qc6.schema_check)
+        ok_pages = {r["url"] for r in pages if r["http_status"] and 200 <= r["http_status"] < 300}
+        for url, res in schema.items():
+            if url not in ok_pages:
+                continue
+            tpl = db_tpl.get(page_tpl.get(url, -1))
+            for rule, subject, fields in schema_check.findings(url, res):
+                items.append(Item(rule, url, "coverage", tpl, subject, fields,
+                                  {"component": component_of(rule, subject=subject), "detail": str(fields.get("value") or "")[:300],
+                                   "emi": res.get("emi") if rule.startswith("EMI_") else None}))
+        await asyncio.to_thread(_store_schema, db_path, job, schema)
     steps.done("pages_and_problems")
     graph = await _link_intelligence(pool, run_id, site, pages, page_tpl, db_tpl, text_fps or {}, items, spot=spot is not None)
     steps.done("link_intelligence")

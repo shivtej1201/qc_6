@@ -333,6 +333,72 @@ ROBOTS_BLOCKED. A real block now names the rule and the file, e.g. `'Disallow: /
 60 s instead of each waiting through timeouts and retries. They're all checked again calmly at the end of the crawl,
 so no result is lost. The site's own host is never cut off; it slows down instead.
 
+## Complete report as one ZIP, stored locally
+
+When a check finishes, the worker builds its complete report (`qc6/report_package.py`), stores it on this computer
+under `var/runs/<check>/package/`, and records it in the `reports` table: file, size, number of files, rows per file,
+time taken, status, downloads. The file itself is never stored in the database. On the finished check, **Download
+complete report (ZIP)** gets it any time later without crawling again; **Rebuild** makes it again. The summary e-mail
+attaches the ZIP when it is under the size limit (`QC6_MAIL_MAX_ATTACH_MB`, default 20), else the summary workbook.
+
+    QC-report-<host>-check<id>.zip
+      Crawl_Summary.xlsx      dashboard, key findings, charts
+      Issue_Summary.xlsx      Template x Component x Issue: affected pages, occurrences, example pages and URLs
+      URL_Audit.xlsx          every unique URL with its status; problem links grouped by URL x template x component
+      Image_Audit.xlsx        every unique image; problem images grouped the same way
+      Schema_Audit.xlsx       per page: title, description, H1, canonical, indexability, structured data
+      data/*.csv              every page, every page -> URL / image placement, every excluded URL with its reason
+      seed/                   what the check was given: Input_URLs.csv (sources, sheet row), sitemaps, uploaded files
+      README.txt
+
+**Why it's small:** a multi-GB workbook came from writing one row per placement. A redirecting header link on
+1.25 lakh pages became 1.25 lakh rows. The Excel sheets are now grouped: one row per URL x page component, with
+the page count and examples. Measured on 20,000 pages (8.6 lakh link placements): 60,000 problem placement rows
+became 150 grouped rows. The ZIP is 19.8 MB (187 MB of files inside) and takes 40 s to build. Every page-by-page row
+is still there, in CSV, which compresses about 10x in the ZIP. All files are written in streaming mode (XlsxWriter
+constant memory, CSV), so memory stays flat at any size, and sheets split at Excel's row limit.
+
+**Seeds kept:** uploaded sheets and sitemap files are kept in `var/lists/<list>/seed/` (they used to be deleted
+after reading), as is typed text. The list keeps every URL with its sources. All of it goes into the ZIP's `seed/`.
+
+**Crawl queue** (URL QC menu): every page of a check with its state (queued, completed, failed / blocked / timed
+out), attempts, HTTP status, time taken, when it finished, its source and the error, live while the check runs.
+**Retry the failed pages** puts them in a new list through the common intake. Pause, resume and cancel stop at once,
+including while QC is waiting for an unreachable site.
+
+## Structured data, EMI, and Template x Component tickets
+
+Every crawled page goes through `qc6/schema_check.py`, in the parse step that already has its HTML:
+* **Schema**, from JSON-LD (including `@graph`) and Product microdata:
+  * Product: name, image, description, sku / gtin / mpn, offers.
+  * Offer: price is a plain number above 0, priceCurrency is 3 letters, availability is a schema.org value.
+  * AggregateRating: ratingValue within worst..best, ratingCount or reviewCount above 0.
+  * BreadcrumbList: ListItems with positions 1..n in order, a name, and an item URL (the last may leave it out).
+  * Organization: name, url, logo. WebPage: name or url. FAQPage: each Question has a name and acceptedAnswer.text.
+  * Unreadable JSON-LD is reported, not ignored.
+  * Problems become `SCHEMA_FIELD_MISSING` / `SCHEMA_VALUE_INVALID` with the exact field (e.g. `Offer.price`),
+    next to the existing `PRODUCT_*` checks.
+* **EMI** is looked for in structured data, embedded page state (`__NEXT_DATA__`, `window.__INITIAL_STATE__`...),
+  microdata and visible text ("EMI starts at ₹3,125", "₹2,083/month"), so EMI shown on the page is never reported
+  missing. Each page gets one of:
+  * **present**, with where it was found and the amount;
+  * **invalid**: EMI is mentioned but has no amount, or the amount is ≤ 0 or above the price;
+  * **missing**: the page has a price, or matches the site's EMI pages, and shows no EMI anywhere;
+  * **not applicable**.
+  Configure per site with `settings.emi`: `{"required_paths": ["/products/*"], "min_price": 3000, "check": true}`.
+* Per-page results are in the check's database (`qc_schema_checks`, the `schema` view in the Data explorer) and in
+  `Schema_Audit.xlsx` → *Schema & EMI*.
+
+**Template x Component x Issue.** Every problem now records its page component and template. The component is
+where the link was on the page (Breadcrumb, Header, Navigation, Footer, Product listing...) or what the rule is about
+(Product schema, Offer schema, Canonical, Title, EMI...). The template is the template of its pages, or *Site-wide*
+for a header, footer or navigation link found on pages of several templates. `Issue_Summary.xlsx` lists them with
+affected pages, occurrences and examples. **Tickets** group the same way: one ticket per Template + Component +
+Issue (e.g. *Broken link · Navigation · Site-wide*, *Invalid Offer.price · Offer schema · PDP*), so the same
+logical issue never gets two tickets and every affected URL stays in the attachment. A site that already raised
+tickets under the older one-per-issue grouping keeps it until it's switched on the Tickets screen, so no raised
+number disappears.
+
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):

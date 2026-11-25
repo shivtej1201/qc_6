@@ -31,7 +31,8 @@ export function TicketsView({ site, params }: { site: Site; params: URLSearchPar
       <div className="head">
         <div>
           <h1>Tickets</h1>
-          <p className="lede">One ticket per issue type, for example all links that redirect, with every affected URL in its attachment.
+          <p className="lede">One ticket per template, page component and issue, for example "links that redirect · Header · site-wide"
+            or "missing price · Product schema · PDP", with every affected page and URL in its attachment.
             Copy the ticket into the Ops team's tool, attach the sheet, then mark it raised with the number it got.
             QC closes it when a check finds the issue fixed.</p>
         </div>
@@ -51,6 +52,12 @@ export function TicketsView({ site, params }: { site: Site; params: URLSearchPar
             </button>
           ))}
         </div>
+        {d && <div className="seg" role="group" aria-label="Group tickets by">
+          <button aria-pressed={d.grouping !== "issue_type"} onClick={async () => { await api.setTicketGrouping(site.id, "template_component"); list.reload(); }}>
+            Template + component</button>
+          <button aria-pressed={d.grouping === "issue_type"} onClick={async () => { await api.setTicketGrouping(site.id, "issue_type"); list.reload(); }}>
+            One per issue</button>
+        </div>}
         <label className="sr-only" htmlFor="ticket-q">Find a ticket</label>
         <input id="ticket-q" className="search" placeholder="Find a ticket: QC-0042, a word, an Ops number" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
@@ -85,7 +92,8 @@ function TicketRow({ siteId, t, open, onToggle, onChanged }: { siteId: number; t
       <button className="ticket-head" aria-expanded={open} aria-controls={panel} onClick={onToggle}>
         <span className="mono ticket-id">{t.ticket_id}</span>
         <Sev s={t.severity} />
-        <span className="ticket-title">{t.issue}<small>{t.affected}</small></span>
+        <span className="ticket-title">{t.template_name || t.component
+          ? (t.issue.split(" · ")[0]) : t.issue}<small>{t.component ? `${t.component} · ${t.template_name} · ` : ""}{t.affected}</small></span>
         <span className="faint hide-phone">{t.type}</span>
         <span className={`pill ${t.state === "closed" ? "good" : t.state === "raised" ? "new" : "warn"}`}>
           {STATE_TEXT[t.state]}{t.raised_ref ? `: ${t.raised_ref}` : ""}</span>

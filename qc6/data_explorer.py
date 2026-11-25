@@ -49,6 +49,8 @@ VIEWS = {
                    LEFT JOIN on_page_image_validation_cache c ON c.job_id = r.job_id AND c.normalized_url = r.normalized_image_url""",
     "excluded": """SELECT source_page_url, kind, found_url, normalized_url, url_type, reason, occurrence_count AS occurrences,
                           location FROM on_page_excluded_urls""",
+    "schema": """SELECT page_url, schema_types, product, offer, price, currency, problem_count, problems, emi_status,
+                        emi_sources, emi_amount, emi_note FROM qc_schema_checks""",
     "issues": """SELECT rule_code, category, severity, page_url, element_type, found_url, http_status, final_url, detail
                    FROM on_page_issues""",
 }
@@ -61,6 +63,8 @@ EXAMPLES = [
     ("Most reused URLs (checked once)", "SELECT url, reuse_count, http_status\nFROM url_status\nORDER BY reuse_count DESC\nLIMIT 50"),
     ("Images without alt text", "SELECT source_page_url, url\nFROM images\nWHERE alt_present = 0"),
     ("Excluded URLs by reason", "SELECT reason, kind, COUNT(*) AS urls, SUM(occurrences) AS occurrences\nFROM excluded\nGROUP BY reason, kind\nORDER BY occurrences DESC"),
+    ("EMI status of pages", "SELECT emi_status, COUNT(*) AS pages\nFROM schema\nGROUP BY emi_status"),
+    ("Pages with schema problems", "SELECT page_url, schema_types, problems\nFROM schema\nWHERE problem_count > 0\nORDER BY problem_count DESC"),
     ("Issues by rule", "SELECT rule_code, severity, COUNT(*) AS n\nFROM issues\nGROUP BY rule_code, severity\nORDER BY n DESC"),
 ]
 
@@ -91,7 +95,7 @@ def _open(run_id: int) -> sqlite3.Connection:
     con = sqlite3.connect(ro_uri(path), uri=True, timeout=5, check_same_thread=False)
     have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for name, sql in VIEWS.items():
-        need = set(re.findall(r"\b(on_page_\w+)\b", sql))
+        need = set(re.findall(r"\b((?:on_page|qc)_\w+)\b", sql))
         if need <= have:
             con.execute(f"CREATE TEMP VIEW {name} AS {sql}")
     con.execute("PRAGMA query_only = 1")
@@ -219,7 +223,7 @@ def schema(run_id: int) -> Dict[str, Any]:
         have = {t["name"] for t in tables}
         views = []
         for name, sql in VIEWS.items():
-            if set(re.findall(r"\b(on_page_\w+)\b", sql)) <= have:
+            if set(re.findall(r"\b((?:on_page|qc)_\w+)\b", sql)) <= have:
                 cols = [c.strip().split()[-1].split(".")[-1]
                         for c in re.split(r",(?![^(]*\))", re.sub(r"\s+", " ", sql.split("FROM")[0][len(" SELECT"):]))]
                 views.append({"name": name, "columns": cols, "kind": "view"})

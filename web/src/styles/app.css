@@ -611,3 +611,13 @@ ul.plain li { overflow-wrap: anywhere; }
 .pipe-src td.mono { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .add-more { display: grid; gap: 8px; margin-top: 10px; }
 #start-list { width: 100%; }
+
+/* Complete report package */
+.report-pkg { margin: 12px 0; display: grid; gap: 8px; }
+.report-pkg h3 { margin: 0; font-size: 16px; }
+.pkg-files ul { list-style: none; padding: 0; margin: 6px 0; display: grid; gap: 2px; font-size: 13px; }
+.pkg-files li { overflow-wrap: anywhere; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--measure);
+  border-radius: 50%; animation: qc-spin 0.8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+@keyframes qc-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
