@@ -373,6 +373,15 @@ async def after_run_hooks(pool, run_id: int, site: Dict[str, Any], summary: Dict
         await alerts.after_run(pool, run_id, site, summary)
     except Exception:
         log.warning("after-run hooks failed for run %s: %s", run_id, traceback.format_exc())
+    try:                                    # the complete report package (ZIP), stored locally, before the e-mail
+        if True:                            # every check, whatever its source (sitemap, sheet, typed pages)
+            from qc6 import report_package
+            from qc6 import events
+            pkg = await report_package.build_for_run(pool, run_id, site)
+            await events.record(pool, run_id, "report", f"Report package ready: {pkg['files']} files, "
+                                f"{pkg['size'] / 1048576:.1f} MB (ZIP)", report_id=pkg["id"])
+    except Exception:
+        log.warning("report package for run %s failed: %s", run_id, traceback.format_exc())
     try:                                    # crawl summary e-mail with the Management report (only when turned on)
         from qc6 import mailer
         await mailer.after_run(pool, run_id, site)

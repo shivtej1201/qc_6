@@ -1,4 +1,4 @@
-"""SMTP settings and the crawl summary e-mail (with the Management report attached).
+"""SMTP settings and the crawl summary e-mail (with the complete report ZIP, or the summary workbook, attached).
 
 * Settings live in Postgres per workspace (mail_settings). The password is sealed with QC6_SECRET_KEY (AES-256-GCM)
   and never leaves the server: the API only says whether one is set.
@@ -189,7 +189,8 @@ def send_now(cfg: Dict[str, Any], to: List[str], subject: str, text: str, html_b
     for path, name in attachments or []:
         with open(path, "rb") as f:
             msg.add_attachment(f.read(), maintype="application",
-                               subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=name)
+                               subtype="zip" if name.lower().endswith(".zip") else
+                               "vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=name)
     password = _password(cfg)
     last: Optional[BaseException] = None
     for attempt in range(2):
@@ -386,6 +387,14 @@ def verify_xlsx(path: Optional[str]) -> Tuple[bool, str]:
     return True, ""
 
 
+def verify_zip(path: str) -> bool:
+    try:
+        with zipfile.ZipFile(path) as z:
+            return z.testzip() is None and len(z.namelist()) > 0
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
 async def summary_for_run(pool, run_id: int, site: Dict[str, Any], attach: bool = True) -> Dict[str, Any]:
     """Everything the e-mail needs: numbers, the verified report (path), the ticket status."""
     run = dict(await pool.fetchrow("SELECT * FROM runs WHERE id = $1", run_id))
@@ -399,7 +408,19 @@ async def summary_for_run(pool, run_id: int, site: Dict[str, Any], attach: bool 
             prog = json.loads(prog or "{}")
         nums["pages"]["input_duplicates"] = int(prog.get("duplicates") or 0)
     report: Dict[str, Any] = {"status": "off", "note": "Not attached (turned off in the e-mail settings)"}
+    pkg = None
     if attach and run.get("status") == "completed":
+        from qc6 import report_package
+        pkg = await report_package.latest(pool, run_id)
+    if pkg and pkg.get("status") == "ready" and os.path.exists(pkg["path"]):
+        size = os.path.getsize(pkg["path"])
+        good = await asyncio.to_thread(verify_zip, pkg["path"])
+        if good and size <= MAX_ATTACH_BYTES:
+            report = {"status": "attached", "path": pkg["path"], "keep": True, "name": pkg["file_name"],
+                      "note": f"Complete report package attached ({size / 1048576:.1f} MB ZIP, {pkg.get('files') or 0} files, verified)"}
+        else:
+            pkg = None                                   # too big / damaged: attach the summary workbook instead
+    if attach and run.get("status") == "completed" and pkg is None:
         path = None
         try:
             from qc6 import smt_report
@@ -414,13 +435,18 @@ async def summary_for_run(pool, run_id: int, site: Dict[str, Any], attach: bool 
                                   "download it from QC"}
             else:
                 report = {"status": "attached", "path": path,
-                          "note": f"Generated and attached ({os.path.getsize(path) / 1048576:.1f} MB, verified)"}
+                          "note": f"Summary workbook attached ({os.path.getsize(path) / 1048576:.1f} MB, verified)"}
+                from qc6 import report_package
+                full = await report_package.latest(pool, run_id)
+                if full and full.get("status") == "ready" and full.get("size_bytes"):
+                    report["note"] += (f"; the complete package ({full['size_bytes'] / 1048576:.0f} MB ZIP) is too big for "
+                                       f"e-mail: download it from QC")
         except Exception as e:                       # noqa: BLE001
             log.warning("management report for run %s failed: %r", run_id, e)
             report = {"status": "failed", "note": f"Not attached: the report couldn't be built ({e.__class__.__name__})"}
             if path and os.path.exists(path):
                 os.unlink(path)
-    elif attach:
+    elif attach and run.get("status") != "completed":
         report = {"status": "failed", "note": "Not generated: the check didn't complete"}
     tickets: Dict[str, Any] = {"note": "-"}
     try:
@@ -448,7 +474,7 @@ async def send_summary(pool, run_id: int, site: Dict[str, Any], cfg: Optional[Di
     if not to:
         raise MailError("Add at least one recipient.")
     s = await summary_for_run(pool, run_id, site, attach=cfg.get("attach_report", True) is not False)
-    files = [(s["report"]["path"], s["file_name"])] if s["report"]["status"] == "attached" else []
+    files = [(s["report"]["path"], s["report"].get("name") or s["file_name"])] if s["report"]["status"] == "attached" else []
     result: Dict[str, Any] = {"run_id": run_id, "at": datetime.utcnow().isoformat() + "Z", "to": len(to),
                               "report": s["report"]["status"]}
     try:
@@ -461,7 +487,7 @@ async def send_summary(pool, run_id: int, site: Dict[str, Any], cfg: Optional[Di
         raise
     finally:
         p = s["report"].get("path")
-        if p and os.path.exists(p):
+        if p and os.path.exists(p) and not s["report"].get("keep"):       # the stored ZIP stays; temp files go
             os.unlink(p)
         await pool.execute("UPDATE mail_settings SET last_result = $2 WHERE workspace_id = $1", site["workspace_id"], result)
     return {**result, "subject": s["subject"], "report_note": s["report"]["note"]}
@@ -474,8 +500,8 @@ async def after_run(pool, run_id: int, site: Dict[str, Any]) -> None:
         if not cfg or not cfg.get("enabled"):
             return
         opts = await pool.fetchval("SELECT options FROM runs WHERE id = $1", run_id) or {}
-        if isinstance(opts, dict) and opts.get("spot"):
-            return                                       # a few pages checked by hand: no summary e-mail
+        if isinstance(opts, dict) and opts.get("spot") and int((opts["spot"] or {}).get("count") or 0) <= 1:
+            return                                       # one page checked by hand: no summary e-mail
         await send_summary(pool, run_id, site, cfg)
     except MailError as e:
         log.warning("summary e-mail for run %s not sent: %s", run_id, e)

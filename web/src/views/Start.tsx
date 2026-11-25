@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Job, type Pipeline, type QcBlock } from "../api";
+import { api, type Job, type Pipeline, type QcBlock, type RunReport } from "../api";
 import { go } from "../main";
 import { useViewMotion } from "../motion";
 import { Confirm, DownloadMenu, ErrorBox, Icon, ago, count, useLoad, useToast } from "../ui";
@@ -313,6 +313,7 @@ function JobCard({ job: j, onChange, toast, onSiteDeleted }: { job: Job; onChang
       {ph === "completed" && (<>
         <div className="big-num"><b>{count(j.run_summary?.pages ?? j.url_count)}</b> pages checked
           <span>finished {ago(j.run_finished)}{j.run_summary?.score != null ? ` · health score ${Math.round(j.run_summary.score)}` : ""}</span></div>
+        {j.run_id && <ReportPackage runId={j.run_id} toast={toast} />}
         {j.run_id && <QcResult runId={j.run_id} toast={toast} />}
         <div className="row" style={{ flexWrap: "wrap" }}>
           <DownloadMenu siteId={j.site_id} run={j.run_id} />
@@ -525,5 +526,45 @@ function AddMore({ listId, onAdded, toast }: { listId: number; onAdded: () => vo
         <button className="btn quiet" onClick={() => setOpen(false)}>Close</button>
       </div>
     </div>
+  );
+}
+
+function mb(n: number | null | undefined) { return n == null ? "" : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`; }
+
+/* The complete report of a check as one ZIP, stored locally (built when the check finishes; can be rebuilt). */
+function ReportPackage({ runId, toast }: { runId: number; toast: (m: string) => void }) {
+  const [nonce, setNonce] = useState(0);
+  const reps = useLoad(() => api.runReports(runId), [runId, nonce]);
+  const r: RunReport | undefined = reps.data?.reports.find((x) => x.status === "ready" || x.status === "building") || reps.data?.reports[0];
+  useEffect(() => {
+    if (r?.status !== "building") return;
+    const t = window.setTimeout(() => setNonce((n) => n + 1), 3000);
+    return () => window.clearTimeout(t);
+  }, [r?.status, r?.id]);
+  const rebuild = async () => {
+    try { await api.buildReport(runId); toast("Building the report package…"); window.setTimeout(() => setNonce((n) => n + 1), 800); }
+    catch (e: any) { toast(e.detail || e.title || e.message); }
+  };
+  if (!reps.data) return null;
+  const files = r ? Object.entries(r.rows).filter(([k]) => !k.startsWith("seed/") || k === "seed/Input_URLs.csv") : [];
+  return (
+    <section className="panel report-pkg" aria-labelledby={`pkg-${runId}`}>
+      <div className="panel-head"><h3 id={`pkg-${runId}`}>Complete report</h3>
+        {r?.status === "ready" && <span className="faint">{mb(r.size_bytes)} ZIP · {r.files} files · stored on this computer</span>}</div>
+      {!r ? <p className="faint">No report package yet. <button className="link-btn" onClick={rebuild}>Build it now</button></p>
+        : r.status === "building" ? <p><span className="spinner" aria-hidden="true" /> Building the report package (Excel summaries, CSV detail, ZIP)…</p>
+        : r.status === "failed" ? <p className="error-box">The package couldn't be built: {r.error} <button className="link-btn" onClick={rebuild}>Try again</button></p>
+        : (<>
+          <div className="row" style={{ flexWrap: "wrap" }}>
+            <a className="btn primary" href={r.download!} download><Icon name="page" />Download complete report (ZIP)</a>
+            <button className="btn quiet" onClick={rebuild}>Rebuild</button>
+          </div>
+          <details className="pkg-files"><summary>What's inside</summary>
+            <ul>{files.map(([k, n]) => <li key={k}><span className="mono">{k}</span> <span className="faint">{count(n)} rows</span></li>)}</ul>
+            <p className="faint">Excel files are grouped (one row per URL, or per URL and page component, with the page count and examples).
+              Every page-by-page row is in the CSV files under data/. seed/ is what the check was given.</p>
+          </details>
+        </>)}
+    </section>
   );
 }

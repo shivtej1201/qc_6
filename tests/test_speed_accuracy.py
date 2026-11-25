@@ -105,3 +105,25 @@ _real_sleep = asyncio.sleep
 
 async def _no_sleep(_s, *a, **k):
     await _real_sleep(0)
+
+
+def test_pause_interrupts_the_unreachable_site_probe():
+    """The 'is the site reachable?' probe waits up to 11 x 45 s; a pause / cancel must not wait for it."""
+    import time as _t
+    e = object.__new__(eng.OnPageAuditEngine)
+    e.probe_url, e.primary_domain, e.akamai_cooldown_sec, e.probe_interval_sec = "https://down.test/robots.txt", "down.test", 0, 45.0
+    e.metrics = {"http_requests": 0, "requests_by_kind": {"probe": 0}}
+    e._stop_requested = False
+
+    class Down:
+        async def get(self, *a, **k):
+            raise httpx.ConnectError("All connection attempts failed")
+
+    async def go():
+        e._stop_ev = asyncio.Event()
+        e._stop_loop = asyncio.get_running_loop()
+        asyncio.get_running_loop().call_later(0.3, e.request_stop)
+        t0 = _t.perf_counter()
+        await e._wait_for_primary_ready(Down())
+        return _t.perf_counter() - t0
+    assert asyncio.run(go()) < 2

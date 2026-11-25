@@ -262,6 +262,11 @@ export const api = {
   saveMail: (b: MailForm) => req<MailSettings>("PUT", "/api/v2/mail", b),
   testMail: (b: MailForm) => req<{ ok: boolean; to: string[] }>("POST", "/api/v2/mail/test", b),
   sendSummary: (runId: number) => req<{ ok: boolean; to: number; subject: string; report_note: string }>("POST", `/api/v2/runs/${runId}/send-summary`),
+  runReports: (runId: number) => req<{ reports: RunReport[] }>("GET", `/api/v2/runs/${runId}/reports`),
+  buildReport: (runId: number) => req<{ building: boolean }>("POST", `/api/v2/runs/${runId}/reports`),
+  queue: (runId: number, state: string, q: string, offset: number, limit = 100) =>
+    req<RunQueue>("GET", `/api/v2/runs/${runId}/queue?${new URLSearchParams({ state, q, offset: String(offset), limit: String(limit) })}`),
+  retryFailed: (runId: number) => req<{ list_id: number; urls: number }>("POST", `/api/v2/runs/${runId}/queue/retry-failed`),
   factsCsvUrl: (runId: number, dataset: string, filter: string) => `/api/v2/runs/${runId}/export/${dataset}.csv?${new URLSearchParams({ filter })}`,
   presets: (sid: number) => req<{ current: string; rate_rps: number | null; pages: number | null; presets: { id: string; label: string;
     description: string; target_rps: number; max_rps: number; estimate: { minutes: number; pages: number } | null }[] }>("GET", `/api/v2/sites/${sid}/presets`),
@@ -283,3 +288,12 @@ export interface MailForm { enabled: boolean; host: string; port: number; securi
 export interface MailSettings extends Partial<MailForm> { enabled: boolean; can_edit: boolean; password_set?: boolean;
   secret_key_set?: boolean; max_attach_mb?: number;
   last_result: { ok?: boolean; error?: string; at?: string; run_id?: number; to?: number; report?: string } }
+
+export interface RunReport { id: number; run_id: number; file_name: string; status: "building" | "ready" | "failed" | "replaced";
+  size_bytes: number | null; files: number | null; rows: Record<string, number>; seconds: number | null; error: string | null;
+  downloads: number; created_at: string | null; finished_at: string | null; download: string | null }
+
+export interface RunQueue { run_status: string; started_at: string | null; finished_at: string | null;
+  counts: { QUEUED: number; COMPLETED: number; FAILED: number; EXCLUDED: number; TOTAL: number }; total: number; offset: number; limit: number;
+  rows: { id: number; url: string; state: string; attempts: number; status: number | null; ms: number | null; done_at: string | null;
+    error: string; sitemap: string; links: number | null; sources: string[] }[] }

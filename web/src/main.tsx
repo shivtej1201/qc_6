@@ -15,6 +15,7 @@ import { FixesView } from "./views/Fixes";
 import { TicketsView } from "./views/Tickets";
 import { DataView } from "./views/Data";
 import { MailView } from "./views/Mail";
+import { QueueView } from "./views/Queue";
 import { PageView } from "./views/Page";
 import { JourneysView } from "./views/Journeys";
 import { LinksView } from "./views/Links";
@@ -37,6 +38,7 @@ const NAV_GROUPS: { label: string; more?: boolean; items: [string, string, strin
     ["tickets", "page", "Tickets", "ticket raise ops jira template internal"],
     ["links", "link", "Links & images", "broken redirects images"],
     ["data", "database", "Data explorer", "sql query database explore table url_results debug"],
+    ["queue", "layers", "Crawl queue", "queue jobs status queued running completed failed retry progress"],
     ["email", "mail", "Email summary", "smtp mail email summary report send settings"]] },
   { label: "More tools", more: true, items: [["today", "today", "Today", "home dashboard needs"], ["insights", "up", "Insights", "trends charts"],
     ["growth", "growth", "Growth", "opportunities search console queries"], ["pages", "layers", "All pages", "inventory urls compare"],
@@ -115,7 +117,7 @@ function App({ local }: { local: boolean }) {
     const p = { site, params: route.params };
     body = {
       today: <TodayView {...p} />, insights: <InsightsView {...p} />, growth: <GrowthView {...p} />, live: <LiveView {...p} />, fixes: <FixesView {...p} />, pages: <PagesView {...p} />, tickets: <TicketsView {...p} />, page: <PageView {...p} />,
-      journeys: <JourneysView {...p} />, links: <LinksView {...p} />, data: <DataView {...p} />, email: <MailView {...p} />,
+      journeys: <JourneysView {...p} />, links: <LinksView {...p} />, data: <DataView {...p} />, email: <MailView {...p} />, queue: <QueueView {...p} />,
     }[route.view] || <TodayView {...p} />;
   }
 

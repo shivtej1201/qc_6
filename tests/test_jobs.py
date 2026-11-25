@@ -121,6 +121,15 @@ def test_single_url_and_sheet(env):
         await pool.close()
         return spot
     assert asyncio.run(run()) == "sheet"                           # a few pages: its own results
+    # the uploaded sheet is kept as the check's seed and packed into its report ZIP
+    import zipfile as _zf
+    reps = c.get(f"/api/v2/runs/{rid}/reports").json()["reports"]
+    assert reps and reps[0]["status"] == "ready" and "seed/pages.csv" in reps[0]["rows"]
+    z = _zf.ZipFile(io.BytesIO(c.get(reps[0]["download"]).content))
+    top = z.namelist()[0].split("/")[0]
+    assert z.read(f"{top}/seed/pages.csv") == csv_bytes                 # the original file, byte for byte
+    inp = z.read(f"{top}/seed/Input_URLs.csv").decode("utf-8-sig")
+    assert "Sheet: pages.csv" in inp and "row 2" in inp
     assert c.delete(f"/api/v2/lists/{one['id']}", headers=H).status_code == 200
 
 
@@ -621,13 +630,30 @@ def test_summary_email_after_check(env, monkeypatch):
                      "Failed", "200 OK", "3xx", "4xx", "5xx", "DNS failures", "Timeout failures", "Redirects",
                      "Duplicate URLs skipped", "Total extracted URLs", "Total unique URLs", "Total images extracted",
                      "Started", "Finished", "Total processing time", "Report generation", "Ticket processing",
-                     "Generated and attached", "sitemap.xml"):
+                     "Complete report package attached", "sitemap.xml"):
             assert want in text, want
         assert "Total URLs submitted: 90" in text
         atts = list(msg.iter_attachments())
-        assert len(atts) == 1 and atts[0].get_filename().endswith(f"check{rid}.xlsx")
+        assert len(atts) == 1 and atts[0].get_filename() == f"QC-report-127.0.0.1-check{rid}.zip"
         z = zipfile.ZipFile(io.BytesIO(atts[0].get_content()))
-        assert "xl/workbook.xml" in z.namelist() and z.testzip() is None
+        names = z.namelist()
+        assert z.testzip() is None
+        top = f"QC-report-127.0.0.1-check{rid}/"
+        for f in ("Crawl_Summary.xlsx", "Issue_Summary.xlsx", "URL_Audit.xlsx", "Image_Audit.xlsx", "Schema_Audit.xlsx",
+                  "data/Pages.csv", "data/All_Links.csv", "data/Excluded_URLs.csv", "seed/Input_URLs.csv", "seed/sitemaps.txt", "README.txt"):
+            assert top + f in names, f
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(z.read(top + "Issue_Summary.xlsx")), read_only=True)
+        tw = [r for r in wb["Template-wise issues"].iter_rows(values_only=True)]
+        assert tw[0][:3] == ("Template", "Component", "Issue") and len(tw) > 1
+        assert any(r[1] == "Main content" or r[1] == "Navigation" or r[1] == "Header" for r in tw[1:])
+        pages_csv = z.read(top + "data/Pages.csv").decode("utf-8-sig").splitlines()
+        assert len(pages_csv) == 91
+        reps = c.get(f"/api/v2/runs/{rid}/reports").json()["reports"]
+        assert reps[0]["status"] == "ready" and reps[0]["rows"]["data/Pages.csv"] == 90
+        dl = c.get(reps[0]["download"])
+        assert dl.status_code == 200 and dl.content == atts[0].get_content()
+        assert c.get(f"/api/v2/runs/{rid}/reports").json()["reports"][0]["downloads"] == 1
         assert c.get("/api/v2/mail").json()["last_result"]["ok"] is True
 
         # send again by hand; e-mail off -> nothing after the next check
