@@ -333,6 +333,39 @@ ROBOTS_BLOCKED. A real block now names the rule and the file, e.g. `'Disallow: /
 60 s instead of each waiting through timeouts and retries. They're all checked again calmly at the end of the crawl,
 so no result is lost. The site's own host is never cut off; it slows down instead.
 
+## Complete report as one ZIP, stored locally
+
+When a check finishes, the worker builds its complete report (`qc6/report_package.py`), stores it on this computer
+under `var/runs/<check>/package/`, and records it in the `reports` table: file, size, number of files, rows per file,
+time taken, status, downloads. The file itself is never stored in the database. On the finished check, **Download
+complete report (ZIP)** gets it any time later without crawling again; **Rebuild** makes it again. The summary e-mail
+attaches the ZIP when it is under the size limit (`QC6_MAIL_MAX_ATTACH_MB`, default 20), else the summary workbook.
+
+    QC-report-<host>-check<id>.zip
+      Crawl_Summary.xlsx      dashboard, key findings, charts
+      Issue_Summary.xlsx      Template x Component x Issue: affected pages, occurrences, example pages and URLs
+      URL_Audit.xlsx          every unique URL with its status; problem links grouped by URL x template x component
+      Image_Audit.xlsx        every unique image; problem images grouped the same way
+      Schema_Audit.xlsx       per page: title, description, H1, canonical, indexability, structured data
+      data/*.csv              every page, every page -> URL / image placement, every excluded URL with its reason
+      seed/                   what the check was given: Input_URLs.csv (sources, sheet row), sitemaps, uploaded files
+      README.txt
+
+**Why it's small:** a multi-GB workbook came from writing one row per placement. A redirecting header link on
+1.25 lakh pages became 1.25 lakh rows. The Excel sheets are now grouped: one row per URL x page component, with
+the page count and examples. Measured on 20,000 pages (8.6 lakh link placements): 60,000 problem placement rows
+became 150 grouped rows. The ZIP is 19.8 MB (187 MB of files inside) and takes 40 s to build. Every page-by-page row
+is still there, in CSV, which compresses about 10x in the ZIP. All files are written in streaming mode (XlsxWriter
+constant memory, CSV), so memory stays flat at any size, and sheets split at Excel's row limit.
+
+**Seeds kept:** uploaded sheets and sitemap files are kept in `var/lists/<list>/seed/` (they used to be deleted
+after reading), as is typed text. The list keeps every URL with its sources. All of it goes into the ZIP's `seed/`.
+
+**Crawl queue** (URL QC menu): every page of a check with its state (queued, completed, failed / blocked / timed
+out), attempts, HTTP status, time taken, when it finished, its source and the error, live while the check runs.
+**Retry the failed pages** puts them in a new list through the common intake. Pause, resume and cancel stop at once,
+including while QC is waiting for an unreachable site.
+
 ## Data explorer (SQL on the crawl data)
 
 **Data explorer** (URL QC menu) runs your own SELECT queries on a check's crawl database (`runs/<check>/coverage.db`):

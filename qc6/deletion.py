@@ -156,6 +156,7 @@ async def clear_workspace_data(pool, workspace_id: int) -> Dict[str, Any]:
             os.unlink(os.path.join(settings.data_dir, "lists", f"{int(lid)}.alternates.json.gz"))
         except OSError:
             pass
+        shutil.rmtree(os.path.join(settings.data_dir, "lists", str(int(lid))), ignore_errors=True)   # the list's seed files
     files = _remove_objects(orphans)
     _forget_caches()
     return {"sites": len(site_ids), "checks": len(run_ids), "url_lists": len(list_ids), "screenshots_removed": files}

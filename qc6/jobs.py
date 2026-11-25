@@ -167,6 +167,38 @@ async def _extract(pool, lid: int, site: Dict[str, Any], sitemap_url: str, appen
         _tasks.pop(lid, None)
 
 
+def _keep_seed(lid: int, path: str, name: str) -> None:
+    """Move an uploaded file into the list's seed folder (kept after the crawl, packed into the report ZIP)."""
+    from qc6.report_package import seed_dir
+    try:
+        d = seed_dir(lid)
+        os.makedirs(d, exist_ok=True)
+        base = os.path.basename(name) or "upload"
+        dest, n = os.path.join(d, base), 1
+        while os.path.exists(dest):
+            n += 1
+            stem, ext = os.path.splitext(base)
+            dest = os.path.join(d, f"{stem} ({n}){ext}")
+        os.replace(path, dest)
+    except OSError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _keep_text(lid: int, text: str) -> None:
+    from qc6.report_package import seed_dir
+    try:
+        d = seed_dir(lid)
+        os.makedirs(d, exist_ok=True)
+        n = len([x for x in os.listdir(d) if x.startswith("manual-entry")]) + 1
+        with open(os.path.join(d, f"manual-entry-{n}.txt"), "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        pass
+
+
 async def _site_for_urls(pool, me: Dict[str, Any], sample: List[str]) -> Dict[str, Any]:
     if not sample:
         raise ListError("No address starting with http:// or https:// was found.")
@@ -186,6 +218,7 @@ async def from_text(pool, me: Dict[str, Any], text: str, source: str = "list", l
             it = await intake.load(pool, add_to, site["primary_host"], None)
             intake.feed_text(it, text)
             await _finish(pool, add_to, it, {}, True)
+            _keep_text(add_to, text)
         except Exception as e:
             await _failed(pool, add_to, _plain_error(e, "Those addresses"), True)
             raise
@@ -203,6 +236,7 @@ async def from_text(pool, me: Dict[str, Any], text: str, source: str = "list", l
     lid = await _new_list(pool, me["workspace_id"], site["id"], "single" if len(it.urls) == 1 and source == "single" else "list",
                           label, me["id"], status="extracting")
     await _finish(pool, lid, it, {}, False)
+    _keep_text(lid, text)
     return lid
 
 
@@ -286,10 +320,7 @@ async def _read_files(pool, lid: int, site: Dict[str, Any], files: List[Tuple[st
             except ListError as e:
                 skipped.append(str(e))
             finally:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+                _keep_seed(lid, path, name)            # the original file stays with the list (the check's seed)
         if not it.urls and skipped:
             raise ListError(skipped[0])
         await _finish(pool, lid, it, {"skipped_files": skipped[:5]}, append)
@@ -301,12 +332,9 @@ async def _read_files(pool, lid: int, site: Dict[str, Any], files: List[Tuple[st
         log.warning("sheet list %s failed: %s", lid, e)
         await _failed(pool, lid, _plain_error(e, "The file"), append)
     finally:
-        for path, _ in files:
+        for path, name in files:
             if os.path.exists(path):
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+                _keep_seed(lid, path, name)
         _tasks.pop(lid, None)
 
 

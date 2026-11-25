@@ -1376,14 +1376,31 @@ class OnPageAuditEngine:
         self.metrics["waf_events"] += 1
         return self.consecutive_waf >= self.waf_cooldown_threshold
 
+    async def _sleep_unless_stopped(self, seconds: float) -> bool:
+        """Sleep, but wake at once when the run is paused / cancelled. True = stop requested."""
+        ev = getattr(self, "_stop_ev", None)
+        if self._stop_requested:
+            return True
+        if ev is None:
+            await asyncio.sleep(seconds)
+            return self._stop_requested
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=seconds)
+            return True
+        except asyncio.TimeoutError:
+            return self._stop_requested
+
     async def _wait_for_primary_ready(self, client: httpx.AsyncClient, initial_wait: bool = False):
         if not self.probe_url and (not self.primary_domain or self.primary_domain in ("127.0.0.1", "localhost")):
             return
         if initial_wait and self.akamai_cooldown_sec > 0:
             print(f"[COOLDOWN] Waiting {self.akamai_cooldown_sec:.0f}s for Akamai edge window reset...", flush=True)
-            await asyncio.sleep(self.akamai_cooldown_sec)
+            if await self._sleep_unless_stopped(self.akamai_cooldown_sec):
+                return
         probe_url = self.probe_url or (f"https://{self.primary_domain}/robots.txt" if self.primary_domain.startswith("www.") else f"https://www.{self.primary_domain}/robots.txt")
         for attempt in range(1, 12):
+            if self._stop_requested:                 # pause / cancel: don't keep probing
+                return
             try:
                 self.metrics["http_requests"] += 1
                 self.metrics["requests_by_kind"]["probe"] += 1
@@ -1396,7 +1413,8 @@ class OnPageAuditEngine:
                 print(f"[COOLDOWN] Probe #{attempt}: HTTP {r.status_code}; waiting {self.probe_interval_sec:.0f}s...", flush=True)
             except Exception as e:
                 print(f"[COOLDOWN] Probe #{attempt} error: {e}; waiting {self.probe_interval_sec:.0f}s...", flush=True)
-            await asyncio.sleep(self.probe_interval_sec)
+            if await self._sleep_unless_stopped(self.probe_interval_sec):
+                return
 
     async def _trigger_primary_cooldown(self, client: httpx.AsyncClient):
         if not self._cooldown_gate.is_set():

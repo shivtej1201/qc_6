@@ -1962,6 +1962,173 @@ async def run_html(run_id: int, url: str, download: bool = False, me=Depends(cur
     return Response(data[:8 * 1024 * 1024], media_type="text/plain; charset=utf-8", headers=headers)
 
 
+async def _run_site(run_id: int, me) -> Dict[str, Any]:
+    pool = await get_pool()
+    r = await pool.fetchrow("SELECT s.* FROM runs r JOIN sites s ON s.id = r.site_id WHERE r.id = $1 AND s.workspace_id = $2",
+                            run_id, me["workspace_id"])
+    if r is None:
+        raise problem(404, "Check not found")
+    return dict(r)
+
+
+def _report_out(r: Dict[str, Any]) -> Dict[str, Any]:
+    d = r.get("detail") or {}
+    return {"id": r["id"], "run_id": r["run_id"], "file_name": r["file_name"], "status": r["status"], "size_bytes": r["size_bytes"],
+            "files": r["files"], "rows": d.get("rows") or {}, "seconds": d.get("seconds"), "error": r["error"],
+            "downloads": r["downloads"], "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
+            "download": f"/api/v2/reports/{r['id']}/download" if r["status"] == "ready" else None}
+
+
+@app.get("/api/v2/runs/{run_id}/reports")
+async def run_reports(run_id: int, me=Depends(current_member)):
+    """The stored report packages of a check (newest first) with their files, size and status."""
+    await _run_site(run_id, me)
+    rows = await (await get_pool()).fetch("SELECT * FROM reports WHERE run_id = $1 AND status != 'deleted' ORDER BY id DESC", run_id)
+    return {"reports": [_report_out(dict(r)) for r in rows]}
+
+
+_building: Dict[int, asyncio.Task] = {}
+
+
+@app.post("/api/v2/runs/{run_id}/reports", status_code=202)
+async def build_run_report(run_id: int, me=Depends(current_member)):
+    """(Re)build the complete report package of a check in the background."""
+    can_edit(me)
+    site = await _run_site(run_id, me)
+    pool = await get_pool()
+    st = await pool.fetchval("SELECT status FROM runs WHERE id = $1", run_id)
+    if st not in ("completed", "cancelled", "paused", "failed"):
+        raise problem(409, "The check is still running", "The report package is made when it finishes.")
+    t = _building.get(run_id)
+    if t is None or t.done():
+        from qc6 import report_package
+
+        async def go():
+            try:
+                await report_package.build_for_run(pool, run_id, site)
+            except Exception:
+                pass
+            finally:
+                _building.pop(run_id, None)
+        _building[run_id] = asyncio.create_task(go())
+    await services.log(pool, me["workspace_id"], me["id"], "report.build", f"run:{run_id}", {})
+    return {"building": True}
+
+
+@app.get("/api/v2/reports/{report_id}/download")
+async def download_report(report_id: int, me=Depends(current_member)):
+    pool = await get_pool()
+    r = await pool.fetchrow("SELECT rp.* FROM reports rp JOIN sites s ON s.id = rp.site_id WHERE rp.id = $1 AND s.workspace_id = $2",
+                            report_id, me["workspace_id"])
+    if r is None or r["status"] != "ready":
+        raise problem(404, "Report not found", "It may still be building, or it was replaced by a newer one.")
+    base = os.path.realpath(os.path.join(settings.data_dir, "runs", str(r["run_id"])))
+    if not os.path.realpath(r["path"]).startswith(base + os.sep) or not os.path.exists(r["path"]):
+        raise problem(404, "The report file is missing", "Build it again from the check.")
+    await pool.execute("UPDATE reports SET downloads = downloads + 1, last_download_at = now() WHERE id = $1", report_id)
+    await services.log(pool, me["workspace_id"], me["id"], "report.download", f"report:{report_id}", {})
+    return FileResponse(r["path"], filename=r["file_name"], media_type="application/zip")
+
+
+@app.get("/api/v2/runs/{run_id}/report.zip")
+async def run_report_zip(run_id: int, me=Depends(current_member)):
+    """The latest complete report package of a check (Download complete report ZIP)."""
+    await _run_site(run_id, me)
+    rid = await (await get_pool()).fetchval("SELECT id FROM reports WHERE run_id = $1 AND kind = 'package' AND status = 'ready' "
+                                            "ORDER BY id DESC LIMIT 1", run_id)
+    if rid is None:
+        raise problem(404, "No report package yet", "It is made when the check finishes; or build it now from the check.")
+    return await download_report(rid, me)
+
+
+QUEUE_STATES = {"queued": "s.crawl_state = 'PENDING'", "completed": "s.crawl_state = 'COMPLETED'",
+                "failed": "s.crawl_state IN ('FAILED','BLOCKED','TIMED_OUT')", "excluded": "s.crawl_state = 'EXPLICITLY_EXCLUDED'",
+                "all": "1=1"}
+
+
+@app.get("/api/v2/runs/{run_id}/queue")
+async def run_queue(run_id: int, state: str = "all", q: str = Query("", max_length=300), offset: int = Query(0, ge=0),
+                    limit: int = Query(100, ge=1, le=500), me=Depends(current_member)):
+    """The check's crawl queue: every page with its state, attempts, status, time taken and error; counts by state."""
+    await _run_site(run_id, me)
+    if state not in QUEUE_STATES:
+        raise problem(400, "Unknown state")
+    from qc6.sqlite_ro import ro_uri
+    import sqlite3
+    path = os.path.join(settings.data_dir, "runs", str(run_id), "coverage.db")
+    if not os.path.exists(path):
+        raise problem(404, "No crawl queue for this check")
+    pool = await get_pool()
+    run = await pool.fetchrow("SELECT status, started_at, finished_at FROM runs WHERE id = $1", run_id)
+    srcs = {}
+    lid = await pool.fetchval("SELECT id FROM url_lists WHERE run_id = $1 ORDER BY id DESC LIMIT 1", run_id)
+
+    def read():
+        c = sqlite3.connect(ro_uri(path), uri=True, timeout=5)
+        try:
+            job = f"RUN{run_id}"
+            counts = dict(c.execute("SELECT crawl_state, COUNT(*) FROM on_page_source_pages WHERE job_id = ? GROUP BY 1", (job,)).fetchall())
+            where, args = [f"s.job_id = ?", QUEUE_STATES[state]], [job]
+            if q:
+                where.append("s.source_page_url LIKE ?")
+                args.append(f"%{q}%")
+            w = " AND ".join(where)
+            total = c.execute(f"SELECT COUNT(*) FROM on_page_source_pages s WHERE {w}", args).fetchone()[0]
+            rows = c.execute(f"""SELECT s.source_page_id, s.source_page_url, s.crawl_state, COALESCE(s.attempts, 0), s.http_status,
+                                        ROUND(s.response_time_ms), s.checked_at, COALESCE(NULLIF(s.error_message, ''), s.error_type, ''),
+                                        s.source_sitemap, s.relationships_count
+                                   FROM on_page_source_pages s WHERE {w}
+                                  ORDER BY s.crawl_state = 'PENDING', s.checked_at DESC, s.source_page_id LIMIT ? OFFSET ?""",
+                             args + [limit, offset]).fetchall()
+            return counts, total, rows
+        finally:
+            c.close()
+    counts, total, rows = await asyncio.to_thread(read)
+    if lid and rows:
+        srcs = {r["url"]: list(r["sources"]) for r in await pool.fetch(
+            "SELECT url, sources FROM list_urls WHERE list_id = $1 AND url = ANY($2::text[])", lid, [r[1] for r in rows])}
+    st = {"QUEUED": counts.get("PENDING", 0), "COMPLETED": counts.get("COMPLETED", 0),
+          "FAILED": sum(counts.get(k, 0) for k in ("FAILED", "BLOCKED", "TIMED_OUT")), "EXCLUDED": counts.get("EXPLICITLY_EXCLUDED", 0)}
+    st["TOTAL"] = sum(counts.values())
+    names = {"PENDING": "QUEUED", "EXPLICITLY_EXCLUDED": "EXCLUDED"}
+    return {"run_status": run["status"], "started_at": run["started_at"].isoformat() if run["started_at"] else None,
+            "finished_at": run["finished_at"].isoformat() if run["finished_at"] else None, "counts": st, "by_state": counts,
+            "total": total, "offset": offset, "limit": limit,
+            "rows": [{"id": i, "url": u, "state": names.get(s_, s_), "attempts": a, "status": h, "ms": ms, "done_at": at,
+                      "error": e, "sitemap": sm, "links": lk, "sources": srcs.get(u) or ([sm] if sm else [])}
+                     for i, u, s_, a, h, ms, at, e, sm, lk in rows]}
+
+
+@app.post("/api/v2/runs/{run_id}/queue/retry-failed", status_code=201)
+async def retry_failed(run_id: int, me=Depends(current_member)):
+    """A new URL list of this check's failed / blocked / timed-out pages (through the common intake), ready to start."""
+    can_edit(me)
+    await _run_site(run_id, me)
+    from qc6.sqlite_ro import ro_uri
+    import sqlite3
+    path = os.path.join(settings.data_dir, "runs", str(run_id), "coverage.db")
+    if not os.path.exists(path):
+        raise problem(404, "No crawl queue for this check")
+
+    def failed():
+        c = sqlite3.connect(ro_uri(path), uri=True, timeout=5)
+        try:
+            return [r[0] for r in c.execute("SELECT source_page_url FROM on_page_source_pages WHERE job_id = ? "
+                                            "AND crawl_state IN ('FAILED','BLOCKED','TIMED_OUT') ORDER BY source_page_id",
+                                            (f"RUN{run_id}",))]
+        finally:
+            c.close()
+    urls = await asyncio.to_thread(failed)
+    if not urls:
+        raise problem(409, "Nothing failed in this check")
+    from qc6 import jobs
+    pool = await get_pool()
+    lid = await jobs.from_text(pool, me, "\n".join(urls), "list", f"{len(urls):,} failed pages of check {run_id}")
+    await services.log(pool, me["workspace_id"], me["id"], "queue.retry_failed", f"run:{run_id}", {"urls": len(urls), "list": lid})
+    return {"list_id": lid, "urls": len(urls)}
+
+
 @app.get("/api/v2/runs/{run_id}/package.zip")
 async def run_package(run_id: int, me=Depends(current_member)):
     """Every data file of a check as CSV, in one ZIP (the V5 package: all link relationships, unique URLs, broken,
