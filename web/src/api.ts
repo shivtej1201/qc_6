@@ -78,10 +78,11 @@ export interface OpsTicket { run_id: number; status: string;
 
 export interface InternalTicket { id: number; ticket_id: string; group_key: string; issue: string; title: string; text: string;
   priority: string; severity: Severity; type: string; urls: number; pages: number; affected: string; fixes: number;
-  state: "to_raise" | "raised" | "closed"; raised_ref: string | null; raised_at: string | null; regressed: boolean; attachment: string }
+  state: "to_raise" | "raised" | "closed"; raised_ref: string | null; raised_at: string | null; regressed: boolean; attachment: string;
+  template_name?: string; component?: string }
 export interface TicketTemplate { title: string; body: string; is_default: boolean }
 export interface InternalTickets { tickets: InternalTicket[]; counts: Record<string, number>; template: TicketTemplate;
-  placeholders: { name: string; means: string }[] }
+  placeholders: { name: string; means: string }[]; grouping?: "template_component" | "issue_type" }
 
 export type Severity = "critical" | "high" | "medium" | "low";
 export type FixStatus = "open" | "in_progress" | "fixed_pending_check" | "verified" | "wont_fix";
@@ -241,6 +242,7 @@ export const api = {
   deleteBrief: (id: number) => req<{ ok: boolean }>("DELETE", `/api/v2/briefs/${id}`),
   internalTickets: (sid: number, view: string, q = "") =>
     req<InternalTickets>("GET", `/api/v2/sites/${sid}/internal-tickets?view=${view}&q=${encodeURIComponent(q)}`),
+  setTicketGrouping: (sid: number, mode: "template_component" | "issue_type") => req<{ mode: string }>("PUT", `/api/v2/sites/${sid}/ticket-grouping`, { mode }),
   saveTicketTemplate: (sid: number, title: string, body: string) => req<TicketTemplate>("PUT", `/api/v2/sites/${sid}/ticket-template`, { title, body }),
   markRaised: (sid: number, tid: number, ref: string) =>
     req<{ ok: boolean; raised_ref: string | null }>("POST", `/api/v2/sites/${sid}/internal-tickets/${tid}/raised`, { ref }),

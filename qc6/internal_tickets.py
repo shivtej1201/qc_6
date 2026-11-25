@@ -52,6 +52,8 @@ Priority: {priority}
 Type: {type}
 Website: {site}
 Affected: {affected}
+Template: {template_name}
+Component: {component}
 Page types: {page_types}
 Status in QC: {status}
 First found: {first_found} · Last seen: {last_seen} (QC check #{check})
@@ -91,6 +93,7 @@ PLACEHOLDERS = {
     "type": "kind of problem (Links, Images, SEO, Speed...)", "site": "website",
     "affected": "e.g. '100 URLs on 10,000 pages'", "urls": "number of affected addresses", "pages": "number of affected pages",
     "listed": "how many addresses are written in the ticket", "url_list": "first addresses, one per line, with their status",
+    "template_name": "the template the issue is on (or Site-wide)", "component": "the page component, e.g. Breadcrumb, Product schema",
     "page_types": "page types involved", "status": "Open / Raised / Closed", "example_page": "one affected page",
     "reproduce": "what to look at on that page", "expected": "what should happen", "why": "why it matters", "fix": "how to fix",
     "first_found": "date first found", "last_seen": "date last seen", "check": "latest QC check number",
@@ -104,8 +107,39 @@ def ticket_id(n: int) -> str:
     return f"QC-{n:04d}"
 
 
-def group_key_sql(alias: str = "f") -> str:
-    return f"CASE WHEN {alias}.subject = '' OR {alias}.subject ~ '{_ADDR}' THEN {alias}.rule ELSE {alias}.rule || ':' || {alias}.subject END"
+SEP = "@@"
+MODES = ("template_component", "issue_type")
+
+
+def group_key_sql(alias: str = "f", mode: str = "issue_type") -> str:
+    """The ticket a fix belongs to. issue_type: one ticket per issue (all redirecting links). template_component:
+    one per Template + Component + Issue (redirecting links in the Header, site-wide; missing price in the Product
+    schema of PDP pages), the key is the issue key + '@@template@@component'."""
+    base = f"CASE WHEN {alias}.subject = '' OR {alias}.subject ~ '{_ADDR}' THEN {alias}.rule ELSE {alias}.rule || ':' || {alias}.subject END"
+    if mode == "template_component":
+        return f"(({base}) || '{SEP}' || {alias}.ticket_template || '{SEP}' || {alias}.component)"
+    return base
+
+
+def mode_of_key(key: str) -> str:
+    return "template_component" if SEP in (key or "") else "issue_type"
+
+
+def split_key(key: str) -> tuple:
+    base, _, rest = (key or "").partition(SEP)
+    tpl, _, comp = rest.partition(SEP)
+    return base, tpl, comp
+
+
+async def grouping(pool, site: Dict[str, Any]) -> str:
+    """The site's ticket grouping: its setting; else Template + Component, except for a site that already has raised
+    tickets under the older one-per-issue grouping (they keep their numbers until it's switched)."""
+    m = (site.get("settings") or {}).get("ticket_grouping")
+    if m in MODES:
+        return m
+    old = await pool.fetchval("SELECT 1 FROM issue_tickets WHERE site_id = $1 AND raised_ref IS NOT NULL "
+                              "AND position('@@' in group_key) = 0 LIMIT 1", site["id"])
+    return "issue_type" if old else "template_component"
 
 
 def humanize(code: str) -> str:
@@ -114,14 +148,17 @@ def humanize(code: str) -> str:
 
 
 def group_name(key: str) -> str:
-    rule, _, sub = key.partition(":")
-    if sub:
-        return humanize(sub)
-    return GROUP_NAMES.get(rule) or humanize(rule)
+    base, tpl, comp = split_key(key)
+    rule, _, sub = base.partition(":")
+    name = humanize(sub) if sub and rule not in ("SCHEMA_FIELD_MISSING", "SCHEMA_VALUE_INVALID") else \
+        (f"{GROUP_NAMES.get(rule) or humanize(rule)}: {sub}" if sub else GROUP_NAMES.get(rule) or humanize(rule))
+    if tpl or comp:
+        return f"{name} · {comp or 'Page'} · {tpl or 'Unclassified pages'}"
+    return name
 
 
 def kind_of(key: str, dimension: str) -> str:
-    rule = key.split(":")[0]
+    rule = split_key(key)[0].split(":")[0]
     if "IMAGE" in rule:
         return "Images"
     if "LINK" in rule or rule in ("PAGE_NOT_FOUND", "PAGE_SERVER_ERROR"):
@@ -160,60 +197,66 @@ def _date(ts) -> str:
 VIEWS = {"to_raise": "g.open_fixes > 0 AND it.raised_ref IS NULL", "raised": "g.open_fixes > 0 AND it.raised_ref IS NOT NULL",
          "closed": "g.open_fixes = 0", "all": "true"}
 
-GROUPS_SQL = f"""
-  WITH fx AS (SELECT f.*, {group_key_sql()} AS gkey FROM fixes f WHERE f.site_id = $1),
+def groups_sql(mode: str) -> str:
+    return GROUPS_SQL.replace("__GKEY__", group_key_sql("f", mode))
+
+
+GROUPS_SQL = """
+  WITH fx AS (SELECT f.*, __GKEY__ AS gkey FROM fixes f WHERE f.site_id = $1),
   g AS (SELECT gkey, COUNT(*) AS fixes, COUNT(*) FILTER (WHERE {OPEN}) AS open_fixes,
                MIN(CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END) AS sev,
                MIN(f.first_seen_run) AS first_run, MAX(f.last_seen_run) AS last_run, BOOL_OR(f.regressed) AS regressed,
                MIN(f.dimension) AS dimension, ARRAY_AGG(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL) AS page_types,
                SUM(f.pages_affected) AS pages_sum
           FROM fx f LEFT JOIN templates t ON t.id = f.template_id GROUP BY gkey)"""
+GROUPS_SQL = GROUPS_SQL.replace("{OPEN}", OPEN)
 
 
-async def _ensure_numbers(pool, site_id: int) -> None:
+async def _ensure_numbers(pool, site_id: int, mode: str = "issue_type") -> None:
     await pool.execute(f"""INSERT INTO issue_tickets (site_id, group_key)
-                           SELECT DISTINCT $1::bigint, {group_key_sql()} FROM fixes f WHERE f.site_id = $1
+                           SELECT DISTINCT $1::bigint, {group_key_sql('f', mode)} FROM fixes f WHERE f.site_id = $1
                            ON CONFLICT (site_id, group_key) DO NOTHING""", site_id)
 
 
 async def list_for_site(pool, site: Dict[str, Any], view: str = "to_raise", q: str = "", base_link: str = "",
                         run_id: Optional[int] = None) -> Dict[str, Any]:
     """Every issue ticket of the site (or only the issues one check found), with its text from the template."""
-    await _ensure_numbers(pool, site["id"])
+    mode = await grouping(pool, site)
+    await _ensure_numbers(pool, site["id"], mode)
     tpl = template_of(site.get("settings"))
     args: List[Any] = [site["id"]]
     where = VIEWS[view]
     if run_id:
         args.append(int(run_id))
         where += f""" AND EXISTS (SELECT 1 FROM fixes f2 JOIN findings fd ON fd.fix_id = f2.id
-                                  WHERE f2.site_id = $1 AND {group_key_sql('f2')} = g.gkey AND fd.run_id = ${len(args)})"""
-    rows = await pool.fetch(f"""{GROUPS_SQL}
+                                  WHERE f2.site_id = $1 AND {group_key_sql('f2', mode)} = g.gkey AND fd.run_id = ${len(args)})"""
+    rows = await pool.fetch(f"""{groups_sql(mode)}
         SELECT g.*, it.id AS tid, it.raised_ref, it.raised_at, r1.created_at AS first_found, r2.created_at AS last_seen
           FROM g JOIN issue_tickets it ON it.site_id = $1 AND it.group_key = g.gkey
           LEFT JOIN runs r1 ON r1.id = g.first_run LEFT JOIN runs r2 ON r2.id = g.last_run
          WHERE {where} ORDER BY (g.open_fixes = 0), g.regressed DESC, g.sev, g.pages_sum DESC, it.id""", *args)
     keys = [r["gkey"] for r in rows]
-    detail = await _details(pool, site["id"], keys) if keys else {}
+    detail = await _details(pool, site["id"], keys, mode) if keys else {}
     tickets = []
     for r in rows:
         t = build(dict(r), site, tpl, detail.get(r["gkey"], {}), base_link)
         if q and q.lower() not in f"{t['ticket_id']} {t['issue']} {t['raised_ref'] or ''} {t['title']}".lower():
             continue
         tickets.append(t)
-    counts = dict(await pool.fetchrow(f"""{GROUPS_SQL}
+    counts = dict(await pool.fetchrow(f"""{groups_sql(mode)}
         SELECT {', '.join(f"COUNT(*) FILTER (WHERE {v}) AS {k}" for k, v in VIEWS.items())}
           FROM g JOIN issue_tickets it ON it.site_id = $1 AND it.group_key = g.gkey""", site["id"]))
-    return {"tickets": tickets, "counts": counts, "template": tpl,
+    return {"tickets": tickets, "counts": counts, "template": tpl, "grouping": mode,
             "placeholders": [{"name": k, "means": v} for k, v in PLACEHOLDERS.items()]}
 
 
-async def _details(pool, site_id: int, keys: List[str]) -> Dict[str, Dict[str, Any]]:
+async def _details(pool, site_id: int, keys: List[str], mode: str = "issue_type") -> Dict[str, Dict[str, Any]]:
     """Per group: affected addresses / pages counted, the first LISTED addresses with status, and an example page.
     Open fixes only when the group still has some (a closed group shows what it had)."""
     out: Dict[str, Dict[str, Any]] = {k: {"urls": 0, "pages": 0, "list": [], "example": "", "fix": "", "why": "", "text": ""} for k in keys}
     rows = await pool.fetch(f"""
-        WITH fx AS (SELECT f.*, {group_key_sql()} AS gkey,
-                           BOOL_OR({OPEN}) OVER (PARTITION BY {group_key_sql()}) AS group_open
+        WITH fx AS (SELECT f.*, {group_key_sql('f', mode)} AS gkey,
+                           BOOL_OR({OPEN}) OVER (PARTITION BY {group_key_sql('f', mode)}) AS group_open
                       FROM fixes f WHERE f.site_id = $1),
         live AS (SELECT * FROM fx WHERE gkey = ANY($2::text[]) AND ({OPEN.replace('f.', 'fx.')} OR NOT group_open))
         SELECT l.gkey, COUNT(DISTINCT l.id) AS fixes,
@@ -227,10 +270,10 @@ async def _details(pool, site_id: int, keys: List[str]) -> Dict[str, Dict[str, A
         d.update(urls=int(r["urls"] or 0), pages=int(r["pages"] or 0), example=r["example"] or "", texts=r["texts"] or {})
     lst = await pool.fetch(f"""
         SELECT gkey, subject, detail, pages, example FROM (
-          SELECT {group_key_sql()} AS gkey, f.subject, f.pages_affected AS pages, f.example_url AS example,
+          SELECT {group_key_sql('f', mode)} AS gkey, f.subject, f.pages_affected AS pages, f.example_url AS example,
                  (SELECT fd.evidence->>'detail' FROM findings fd WHERE fd.fix_id = f.id AND fd.run_id = f.last_seen_run LIMIT 1) AS detail,
-                 ROW_NUMBER() OVER (PARTITION BY {group_key_sql()} ORDER BY f.pages_affected DESC, f.subject) AS rn
-            FROM fixes f WHERE f.site_id = $1 AND {group_key_sql()} = ANY($2::text[]) AND {OPEN} AND f.subject ~ '{_ADDR}') x
+                 ROW_NUMBER() OVER (PARTITION BY {group_key_sql('f', mode)} ORDER BY f.pages_affected DESC, f.subject) AS rn
+            FROM fixes f WHERE f.site_id = $1 AND {group_key_sql('f', mode)} = ANY($2::text[]) AND {OPEN} AND f.subject ~ '{_ADDR}') x
          WHERE rn <= {LISTED}""", site_id, keys)
     for r in lst:
         out[r["gkey"]]["list"].append({"url": r["subject"], "detail": r["detail"] or "", "pages": r["pages"], "example": r["example"] or ""})
@@ -239,7 +282,8 @@ async def _details(pool, site_id: int, keys: List[str]) -> Dict[str, Dict[str, A
 
 def build(g: Dict[str, Any], site: Dict[str, Any], tpl: Dict[str, Any], d: Dict[str, Any], base_link: str = "") -> Dict[str, Any]:
     key = g["gkey"]
-    rule = key.split(":")[0]
+    _, g_tpl, g_comp = split_key(key)
+    rule = split_key(key)[0].split(":")[0]
     tid = ticket_id(g["tid"])
     sev = ("critical", "high", "medium", "low")[int(g["sev"])]
     issue = group_name(key)
@@ -278,18 +322,20 @@ def build(g: Dict[str, Any], site: Dict[str, Any], tpl: Dict[str, Any], d: Dict[
         "why": why, "fix": fix, "first_found": _date(g.get("first_found")), "last_seen": _date(g.get("last_seen")),
         "check": g.get("last_run") or "-", "attachment": att, "link": f"{base_link}#/tickets?t={g['tid']}",
         "raised_as": g.get("raised_ref") or "not raised yet",
+        "template_name": g_tpl or (", ".join(sorted(g.get("page_types") or [])) or "-"), "component": g_comp or "-",
     }
     return {"id": g["tid"], "ticket_id": tid, "group_key": key, "issue": issue, "title": render(tpl["title"], values),
             "text": render(tpl["body"], values), "priority": PRIORITY[sev], "severity": sev, "type": kind,
             "urls": urls, "pages": pages, "affected": affected, "fixes": int(g["fixes"]), "state": state,
             "raised_ref": g.get("raised_ref"), "raised_at": g.get("raised_at"), "regressed": bool(g.get("regressed")),
-            "attachment": att}
+            "attachment": att, "template_name": g_tpl, "component": g_comp}
 
 
 # ------------------------------------------------------------------ the attachment
 async def attachment_rows(pool, site_id: int, group_key: str):
     """Rows for the ticket's attachment: one per affected address (or page), and every page / address pair."""
-    open_only = await pool.fetchval(f"SELECT BOOL_OR({OPEN}) FROM fixes f WHERE f.site_id = $1 AND {group_key_sql()} = $2",
+    mode = mode_of_key(group_key)
+    open_only = await pool.fetchval(f"SELECT BOOL_OR({OPEN}) FROM fixes f WHERE f.site_id = $1 AND {group_key_sql('f', mode)} = $2",
                                     site_id, group_key)
     cond = OPEN if open_only else "true"
     addrs = await pool.fetch(f"""
@@ -299,13 +345,13 @@ async def attachment_rows(pool, site_id: int, group_key: str):
                (SELECT fd.evidence->>'status' FROM findings fd WHERE fd.fix_id = f.id AND fd.run_id = f.last_seen_run LIMIT 1) AS final_status,
                (SELECT fd.evidence->>'value' FROM findings fd WHERE fd.fix_id = f.id AND fd.run_id = f.last_seen_run LIMIT 1) AS value
           FROM fixes f LEFT JOIN templates t ON t.id = f.template_id
-         WHERE f.site_id = $1 AND {group_key_sql()} = $2 AND {cond}
+         WHERE f.site_id = $1 AND {group_key_sql('f', mode)} = $2 AND {cond}
          ORDER BY f.pages_affected DESC, f.subject""", site_id, group_key)
     pairs = await pool.fetch(f"""
         SELECT fd.page_url, f.subject, fd.evidence->>'detail' AS detail, t.name AS page_type
           FROM findings fd JOIN fixes f ON f.id = fd.fix_id AND fd.run_id = f.last_seen_run
           LEFT JOIN templates t ON t.id = f.template_id
-         WHERE f.site_id = $1 AND {group_key_sql()} = $2 AND {cond}
+         WHERE f.site_id = $1 AND {group_key_sql('f', mode)} = $2 AND {cond}
          ORDER BY f.subject, fd.page_url LIMIT 1000000""", site_id, group_key)
     return addrs, pairs
 

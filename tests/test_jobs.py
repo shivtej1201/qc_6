@@ -407,12 +407,16 @@ def test_full_workbook_like_the_v5_sample(env):
     assert tk[0][:2] == ["Ticket", "Issue"] and tk[1][0].startswith("QC-") and "ATTACHMENT" in tk[1][7]
     sid = j["site_id"]
     lst = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all").json()
+    assert lst["grouping"] == "template_component"
     issues = [t["issue"] for t in lst["tickets"]]
-    assert len(issues) == len(set(issues)), issues                          # never two tickets for one issue type
-    broken = next(t for t in lst["tickets"] if t["group_key"] == "BROKEN_LINK")
+    assert len(issues) == len(set(issues)), issues                  # never two tickets for one template + component + issue
+    # the 404 link in the header menu is on pages of every template: one ticket, Navigation, site-wide
+    broken = next(t for t in lst["tickets"] if t["group_key"].startswith("BROKEN_LINK@@") and t["component"] == "Navigation")
+    assert broken["template_name"] == "Site-wide" and "Navigation" in broken["issue"] and "Template: Site-wide" in broken["text"]
     async def fix_count():
         pool = await _pool(dsn)
-        n = await pool.fetchval("SELECT count(*) FROM fixes WHERE site_id = $1 AND rule = 'BROKEN_LINK'", sid)
+        n = await pool.fetchval("SELECT count(*) FROM fixes WHERE site_id = $1 AND rule = 'BROKEN_LINK' "
+                                "AND component = 'Navigation' AND ticket_template = 'Site-wide'", sid)
         await pool.close()
         return n
     assert broken["urls"] == asyncio.run(fix_count()) and broken["urls"] >= 1 and broken["pages"] >= 1
@@ -443,6 +447,12 @@ def test_full_workbook_like_the_v5_sample(env):
     assert csv_r.status_code == 200 and "OPS-1234" in csv_r.text and broken["attachment"] in csv_r.text
     c.post(f"/api/v2/sites/{sid}/internal-tickets/{broken['id']}/raised", json={"ref": ""}, headers=H)
     assert c.get(f"/api/v2/sites/{sid}/internal-tickets?view=raised").json()["counts"]["raised"] == 0
+    # one ticket per issue type, the older grouping, is still there for a site that wants it
+    assert c.put(f"/api/v2/sites/{sid}/ticket-grouping", json={"mode": "issue_type"}, headers=H).status_code == 200
+    old = c.get(f"/api/v2/sites/{sid}/internal-tickets?view=all").json()
+    assert old["grouping"] == "issue_type" and any(t["group_key"] == "BROKEN_LINK" for t in old["tickets"])
+    assert len(old["tickets"]) <= len(lst["tickets"])
+    c.put(f"/api/v2/sites/{sid}/ticket-grouping", json={"mode": "template_component"}, headers=H)
     c.put(f"/api/v2/sites/{sid}/ticket-template", json={"title": "", "body": ""}, headers=H)
     assert c.get(f"/api/v2/sites/{sid}/internal-tickets").json()["template"]["is_default"]
     assert rows("QC Problem Pages")[0] == ["Page", "Answer", "Page type", "Problem no.", "Severity", "Problem", "Found", "Remarks"]
@@ -643,6 +653,10 @@ def test_summary_email_after_check(env, monkeypatch):
                   "data/Pages.csv", "data/All_Links.csv", "data/Excluded_URLs.csv", "seed/Input_URLs.csv", "seed/sitemaps.txt", "README.txt"):
             assert top + f in names, f
         import openpyxl
+        sch = openpyxl.load_workbook(io.BytesIO(z.read(top + "Schema_Audit.xlsx")), read_only=True)
+        assert "Schema & EMI" in sch.sheetnames
+        srows = list(sch["Schema & EMI"].iter_rows(values_only=True))
+        assert srows[0][:3] == ("Page", "Template", "Schema types") and len(srows) > 1
         wb = openpyxl.load_workbook(io.BytesIO(z.read(top + "Issue_Summary.xlsx")), read_only=True)
         tw = [r for r in wb["Template-wise issues"].iter_rows(values_only=True)]
         assert tw[0][:3] == ("Template", "Component", "Issue") and len(tw) > 1

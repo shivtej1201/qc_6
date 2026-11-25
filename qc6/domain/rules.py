@@ -126,6 +126,29 @@ _r("PRODUCT_IMAGE_MISSING", "template", "low", "content",
    "Product results with a picture get noticed; without one the product may not show as a rich result.",
    "Add \"image\" to the Product data with the main product photo's full address.")
 
+# ---- structured data (every schema type QC checks) and EMI (qc6.schema_check) -------------------------------------
+_r("SCHEMA_FIELD_MISSING", "template", "medium", "content",
+   "{n_pages} {template} have structured data without {subject}",
+   "A required field is missing, so search engines may ignore this structured data or show a poorer result.",
+   "Add {subject} to the page's JSON-LD (schema.org), filled from the page's own data.",
+   "The next check finds {subject} on these pages.")
+_r("SCHEMA_VALUE_INVALID", "template", "medium", "content",
+   "{n_pages} {template} have an invalid {subject} in their structured data",
+   "Search engines reject a value they can't read ({value}).",
+   "Fix {subject} in the JSON-LD: {value}.",
+   "The next check finds a valid {subject} on these pages.")
+_r("EMI_MISSING", "template", "medium", "content",
+   "{n_pages} {template} show no EMI information",
+   "These pages have a price (or match the EMI pages setting) but no EMI anywhere: not in structured data, the page's "
+   "embedded data or its visible text.",
+   "Show the EMI (for example \"EMI from ₹3,125/month\") on these pages, and keep it in the page's data.",
+   "The next check finds EMI information on these pages.")
+_r("EMI_INVALID", "template", "medium", "content",
+   "{n_pages} {template} show EMI information QC can't read",
+   "EMI is on the page but {value}.",
+   "Show the EMI amount as a number with the currency (₹3,125/month), in the visible text and the page's data.",
+   "The next check finds a valid EMI amount on these pages.")
+
 # ---- link graph, canonical targets, near-duplicates (computed after the crawl) --------------------------------
 _r("DEEP_PAGE", "template", "low", "links",
    "{n_pages} {template} are more than 3 clicks from the home page",
